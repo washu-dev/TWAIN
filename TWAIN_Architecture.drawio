@@ -1,0 +1,462 @@
+<mxfile host="Electron" modified="2026-04-10T18:50:07.743Z" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/24.5.3 Chrome/124.0.6367.207 Electron/30.0.6 Safari/537.36" version="24.5.3" etag="Kup7p-v2f3WLsEvocBEw" type="device">
+  <diagram id="Fd3DehHI3Q5NzzMiwjqH" name="Page-1">
+    <mxGraphModel dx="1766" dy="1209" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1654" pageHeight="2200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="&lt;b&gt;TWAIN: The WashU AI-Assisted Platform for Simulation From Narration&lt;/b&gt;&lt;br&gt;Full Architecture &amp;amp; Deliverables · WashU Digital Transformation Research Corps AY2025-2026 · PI: Robert Wexler" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#333333;fontSize=15;fontColor=#333333;align=center;" parent="1" vertex="1">
+          <mxGeometry y="-30" width="1590" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="L1bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=40;arcSize=7;" parent="1" vertex="1">
+          <mxGeometry y="90" width="1590" height="220" as="geometry" />
+        </mxCell>
+        <mxCell id="L1lbl" value="LAYER 1 — CROSS-DEVICE CLIENT LAYER  (SwiftUI · Shared State Model · CloudKit)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#00385a;" parent="1" vertex="1">
+          <mxGeometry x="20" y="90" width="800" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="C1" value="&lt;b&gt;iOS / iPadOS App&lt;/b&gt;&lt;br&gt;SwiftUI&lt;br&gt;─────────────────&lt;br&gt;• Narrative text input&lt;br&gt;• Speech-to-text capture&lt;br&gt;• Interactive clarification Q&amp;amp;A&lt;br&gt;• Intent refinement UI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="655" y="130" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="C2" value="&lt;b&gt;macOS App&lt;/b&gt;&lt;br&gt;SwiftUI&lt;br&gt;─────────────────&lt;br&gt;• Workflow review &amp;amp; editing&lt;br&gt;• Execution control panel&lt;br&gt;• Analysis &amp;amp; result inspection&lt;br&gt;• Full dashboard access" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="338" y="130" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="C3" value="&lt;b&gt;watchOS App&lt;/b&gt;&lt;br&gt;SwiftUI&lt;br&gt;─────────────────&lt;br&gt;• Job status glances&lt;br&gt;• Approval prompts&lt;br&gt;• Push notifications&lt;br&gt;• Lightweight confirm/reject" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="973" y="130" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="C5" value="&lt;b&gt;Web Client&lt;/b&gt;&lt;br&gt;(Future / Optional)&lt;br&gt;─────────────────&lt;br&gt;• Browser-based monitoring&lt;br&gt;• Workflow result dashboards&lt;br&gt;• Collaborator access&lt;br&gt;• Read-only provenance view" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#6c8ebf;fontSize=10;fontColor=#999999;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1290" y="130" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="L2bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;opacity=40;arcSize=6;" parent="1" vertex="1">
+          <mxGeometry y="340" width="1590" height="220" as="geometry" />
+        </mxCell>
+        <mxCell id="L2lbl" value="LAYER 2 — API GATEWAY &amp;amp; STATE SYNCHRONIZATION  (Python / FastAPI)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#4a0069;" parent="1" vertex="1">
+          <mxGeometry x="20" y="340" width="700" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="A1" value="&lt;b&gt;TWAIN REST API Gateway&lt;/b&gt;&lt;br&gt;FastAPI · Python&lt;br&gt;─────────────&lt;br&gt;• Routing &amp;amp; versioning&lt;br&gt;• Rate limiting&lt;br&gt;• Request validation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="20" y="380" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="A2" value="&lt;b&gt;WebSocket Server&lt;/b&gt;&lt;br&gt;FastAPI · Python&lt;br&gt;─────────────&lt;br&gt;• Real-time job updates&lt;br&gt;• Streaming LLM responses&lt;br&gt;• Live clarification dialogue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="338" y="380" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="A3" value="&lt;b&gt;Auth &amp;amp; Session Manager&lt;/b&gt;&lt;br&gt;JWT / OAuth2&lt;br&gt;─────────────&lt;br&gt;• User identity&lt;br&gt;• Session tokens&lt;br&gt;• Role-based access" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="973" y="380" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="A4" value="&lt;b&gt;State Sync Service&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Cross-device state&lt;br&gt;• Conflict resolution&lt;br&gt;• CloudKit bridge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="655" y="380" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="A5" value="&lt;b&gt;Notification Service&lt;/b&gt;&lt;br&gt;APNs / Web Push&lt;br&gt;─────────────&lt;br&gt;• Job completion alerts&lt;br&gt;• Approval request push&lt;br&gt;• watchOS delivery" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1290" y="380" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="L3bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;opacity=40;arcSize=5;" parent="1" vertex="1">
+          <mxGeometry y="590" width="1160" height="410" as="geometry" />
+        </mxCell>
+        <mxCell id="L3lbl" value="LAYER 3 — CORE AI / INTELLIGENCE LAYER  (Python + LLM · Weeks 3–4 Deliverable)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#7d5a00;" parent="1" vertex="1">
+          <mxGeometry x="20" y="590" width="700" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="I1" value="&lt;b&gt;Semantic Parsing Module&lt;/b&gt;&lt;br&gt;Python + LLM&lt;br&gt;─────────────&lt;br&gt;• Narrative → typed JSON spec&lt;br&gt;• Intent classification&lt;br&gt;• Ambiguity flagging&lt;br&gt;• Schema-constrained output&lt;br&gt;• Prompt version tracking" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="20" y="630" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="I2" value="&lt;b&gt;Clarification Engine&lt;/b&gt;&lt;br&gt;Python + LLM&lt;br&gt;─────────────&lt;br&gt;• Targeted Q&amp;amp;A generation&lt;br&gt;• Missing detail detection&lt;br&gt;• Multi-turn dialogue mgmt&lt;br&gt;• Confirmation before exec&lt;br&gt;• Failure mode guardrails" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="440" y="630" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="I3" value="&lt;b&gt;Decision Support Module&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Candidate pathway proposals&lt;br&gt;• Cost–fidelity trade-offs&lt;br&gt;• Assumption articulation&lt;br&gt;• Property-driven questions&lt;br&gt;• Iterative pathway refinement" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="860" y="630" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="I4" value="&lt;b&gt;Schema Validator&lt;/b&gt;&lt;br&gt;Python · Pydantic&lt;br&gt;─────────────&lt;br&gt;• JSON/YAML type checking&lt;br&gt;• Constraint enforcement&lt;br&gt;• User vs. system fields&lt;br&gt;• Validation test suite&lt;br&gt;• Regression narrative tests" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="540" y="820" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="I5" value="&lt;b&gt;Workflow Compiler&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Intent → executable plan&lt;br&gt;• Step sequencing&lt;br&gt;• Dependency resolution&lt;br&gt;• User constraints separation&lt;br&gt;• System defaults injection" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="860" y="820" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="EXT1" value="&lt;b&gt;LLM API&lt;/b&gt;&lt;br&gt;EXTERNAL&lt;br&gt;─────────────&lt;br&gt;Claude / GPT / etc.&lt;br&gt;Schema-constrained gen&lt;br&gt;Prompt + version tracking" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="220" y="820" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="L4bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;opacity=40;arcSize=5;" parent="1" vertex="1">
+          <mxGeometry y="1030" width="1160" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="L4lbl" value="LAYER 4 — DATA &amp;amp; SPECIFICATION LAYER  (JSON/YAML Schema · SQLite · Weeks 1–2 Deliverable)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#1a5c00;" parent="1" vertex="1">
+          <mxGeometry x="20" y="1030" width="800" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="D1" value="&lt;b&gt;Intent Specification Schema&lt;/b&gt;&lt;br&gt;JSON / YAML&lt;br&gt;─────────────&lt;br&gt;• Typed workflow spec&lt;br&gt;• User constraints field&lt;br&gt;• System-selected defaults&lt;br&gt;• Sim-explicit &amp;amp; property-driven" style="shape=cylinder;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;spacingLeft=8;" parent="1" vertex="1">
+          <mxGeometry x="20" y="1070" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="D2" value="&lt;b&gt;Workflow Registry&lt;/b&gt;&lt;br&gt;SQLite / PostgreSQL&lt;br&gt;─────────────&lt;br&gt;• Named workflow versions&lt;br&gt;• Reusable templates&lt;br&gt;• Cross-domain library" style="shape=cylinder;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;spacingLeft=8;" parent="1" vertex="1">
+          <mxGeometry x="860" y="1070" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="D3" value="&lt;b&gt;Provenance Store&lt;/b&gt;&lt;br&gt;SQLite / JSON&lt;br&gt;─────────────&lt;br&gt;• Decision audit trail&lt;br&gt;• Assumption records&lt;br&gt;• End-to-end run metadata&lt;br&gt;• Cross-device synchronized" style="shape=cylinder;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;spacingLeft=8;" parent="1" vertex="1">
+          <mxGeometry x="860" y="1210" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="D4" value="&lt;b&gt;Execution Log DB&lt;/b&gt;&lt;br&gt;SQLite / JSON&lt;br&gt;─────────────&lt;br&gt;• Synchronized run logs&lt;br&gt;• Job status history&lt;br&gt;• Error &amp;amp; stderr records" style="shape=cylinder;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;spacingLeft=8;" parent="1" vertex="1">
+          <mxGeometry x="540" y="1210" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="D5" value="&lt;b&gt;Benchmark &amp;amp; Test Library&lt;/b&gt;&lt;br&gt;File-based&lt;br&gt;─────────────&lt;br&gt;• Precomputed reference outputs&lt;br&gt;• Regression narrative corpus&lt;br&gt;• 3 domain sample structures&lt;br&gt;• No sensitive datasets" style="shape=cylinder;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;spacingLeft=8;" parent="1" vertex="1">
+          <mxGeometry x="340" y="1070" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="L5bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;opacity=40;arcSize=4;" parent="1" vertex="1">
+          <mxGeometry x="-400" y="640" width="320" height="1140" as="geometry" />
+        </mxCell>
+        <mxCell id="L5lbl" value="LAYER 5 — INPUT GENERATION &amp;amp; VALIDATION&amp;nbsp;&lt;div&gt;&amp;nbsp;(Python · pymatgen · ASE · FreeBird.jl ·&amp;nbsp;&lt;/div&gt;&lt;div&gt;Weeks 5–6 Deliverable)&lt;/div&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#7d4500;" parent="1" vertex="1">
+          <mxGeometry x="-380" y="640" width="340" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="G1" value="&lt;b&gt;Chemistry Input Generator&lt;/b&gt;&lt;br&gt;Python · pymatgen&lt;br&gt;─────────────&lt;br&gt;• VASP-style DFT inputs&lt;br&gt;• INCAR, KPOINTS, POSCAR&lt;br&gt;• k-point mesh generation&lt;br&gt;• Cutoff energy selection&lt;br&gt;• Pre-run consistency check" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="-380" y="700" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="G2" value="&lt;b&gt;Materials Input Generator&lt;/b&gt;&lt;br&gt;Python · ASE&lt;br&gt;─────────────&lt;br&gt;• Crystal structure setup&lt;br&gt;• Supercell generation&lt;br&gt;• Force field configuration&lt;br&gt;• Periodic boundary conditions&lt;br&gt;• Structure validation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="-380" y="880" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="G3" value="&lt;b&gt;Biophysics Input Generator&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Biomolecular configurations&lt;br&gt;• MD / MC setup files&lt;br&gt;• Topology &amp;amp; parameter gen&lt;br&gt;• Solvation box setup&lt;br&gt;• Energy minimization prep" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="-380" y="1060" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="G4" value="&lt;b&gt;Physics Input Generator&lt;/b&gt;&lt;br&gt;Python · FreeBird.jl bridge&lt;br&gt;─────────────&lt;br&gt;• FreeBird.jl integration&lt;br&gt;• Lattice dynamics setup&lt;br&gt;• Phonon calculation config&lt;br&gt;• Julia ↔ Python interop&lt;br&gt;• Force constant generation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="-380" y="1240" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="G5" value="&lt;b&gt;Consistency Checker&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Cross-parameter validation&lt;br&gt;• Common error detection&lt;br&gt;• Pre-run guardrails&lt;br&gt;• Domain-specific rules&lt;br&gt;• Fix suggestions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="-380" y="1600" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="EXT2" value="&lt;b&gt;FreeBird.jl&lt;/b&gt;&lt;br&gt;EXTERNAL · Julia&lt;br&gt;─────────────&lt;br&gt;Physics simulation library&lt;br&gt;Lattice dynamics engine&lt;br&gt;Julia runtime required" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="-380" y="1420" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="L6bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0f0f0;strokeColor=#666666;opacity=40;arcSize=5;" parent="1" vertex="1">
+          <mxGeometry y="1390" width="1590" height="390" as="geometry" />
+        </mxCell>
+        <mxCell id="L6lbl" value="LAYER 6 — ORCHESTRATION &amp;amp; PROVENANCE CAPTURE  (Python · Slurm · PBS · Weeks 7–8 Deliverable)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#333333;" parent="1" vertex="1">
+          <mxGeometry x="20" y="1390" width="800" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="O1" value="&lt;b&gt;Job Submission Engine&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Scheduler routing logic&lt;br&gt;• Job script generation&lt;br&gt;• Pre-flight checks&lt;br&gt;• Adapter selection&lt;br&gt;• Retry handling" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="20" y="1430" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="O2" value="&lt;b&gt;Slurm Adapter&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• SBATCH script generation&lt;br&gt;• sbatch / squeue / scancel&lt;br&gt;• Partition &amp;amp; node config&lt;br&gt;• Wall-time management&lt;br&gt;• Module loading" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="340" y="1600" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="O3" value="&lt;b&gt;PBS Adapter&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• PBS script generation&lt;br&gt;• qsub / qstat / qdel&lt;br&gt;• Resource specification&lt;br&gt;• Queue management&lt;br&gt;• Environment modules" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="340" y="1430" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="O4" value="&lt;b&gt;Local Executor&lt;/b&gt;&lt;br&gt;Python · subprocess&lt;br&gt;─────────────&lt;br&gt;• Direct macOS execution&lt;br&gt;• Dev &amp;amp; debug mode&lt;br&gt;• Background process mgmt&lt;br&gt;• stdout / stderr capture&lt;br&gt;• Signal handling" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="20" y="1600" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="O5" value="&lt;b&gt;Job Monitor&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Polling &amp;amp; event-driven&lt;br&gt;• Status reporting&lt;br&gt;• Failure detection&lt;br&gt;• Progress estimation&lt;br&gt;• Notification triggers" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1290" y="1430" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="L7bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4d6;strokeColor=#cc4125;opacity=40;arcSize=3;" parent="1" vertex="1">
+          <mxGeometry x="1490" y="590" width="640" height="770" as="geometry" />
+        </mxCell>
+        <mxCell id="L7lbl" value="LAYER 7 — POST-PROCESSING &amp;amp; VISUALIZATION  (Python · matplotlib · plotly · Weeks 9–10 Deliverable)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#7d0000;" parent="1" vertex="1">
+          <mxGeometry x="1510" y="590" width="800" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="P1" value="&lt;b&gt;Templated Analysis Engine&lt;/b&gt;&lt;br&gt;Python · Julia&lt;br&gt;─────────────&lt;br&gt;• Domain-specific routines&lt;br&gt;• Key quantity extraction&lt;br&gt;• Automated analysis pipelines&lt;br&gt;• Error bar / stat handling&lt;br&gt;• Convergence checks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cc4125;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1510" y="1180" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="P2" value="&lt;b&gt;Plot Generator&lt;/b&gt;&lt;br&gt;Python · matplotlib · plotly&lt;br&gt;─────────────&lt;br&gt;• Publication-ready figures&lt;br&gt;• Interactive charts&lt;br&gt;• SVG / PDF / PNG export&lt;br&gt;• Energy bands, DOS, RDF&lt;br&gt;• Trajectory animation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cc4125;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1830" y="820" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="P3" value="&lt;b&gt;Dashboard Builder&lt;/b&gt;&lt;br&gt;Python · SwiftUI&lt;br&gt;─────────────&lt;br&gt;• Cross-device result summaries&lt;br&gt;• Workflow linkage view&lt;br&gt;• Assumption traceability&lt;br&gt;• Shareable result cards&lt;br&gt;• macOS &amp;amp; visionOS views" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cc4125;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1830" y="640" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="P4" value="&lt;b&gt;Result ↔ Intent Linker&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Connect results to original intent&lt;br&gt;• Assumption traceability&lt;br&gt;• Provenance back-reference&lt;br&gt;• Decision justification trail&lt;br&gt;• Diff between runs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cc4125;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1510" y="1000" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="P5" value="&lt;b&gt;Report &amp;amp; Demo Generator&lt;/b&gt;&lt;br&gt;Python · Markdown / PDF&lt;br&gt;─────────────&lt;br&gt;• Summary documents&lt;br&gt;• User guide templates&lt;br&gt;• Demo video artifacts&lt;br&gt;• External proposal assets&lt;br&gt;• NSF / NIH / DOE narratives" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cc4125;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1510" y="820" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="L8bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8e8e8;strokeColor=#555555;opacity=40;arcSize=11;" parent="1" vertex="1">
+          <mxGeometry y="1810" width="1590" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="L8lbl" value="LAYER 8 — INFRASTRUCTURE &amp;amp; DEVELOPMENT ENVIRONMENT" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#333333;" parent="1" vertex="1">
+          <mxGeometry x="20" y="1810" width="600" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="INF1" value="&lt;b&gt;WashU Campus HPC&lt;/b&gt;&lt;br&gt;EXTERNAL · RIS Cluster&lt;br&gt;─────────────&lt;br&gt;• Slurm / PBS scheduler&lt;br&gt;• Small validation runs&lt;br&gt;• Module &amp;amp; container env" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="338" y="1850" width="280" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="INF2" value="&lt;b&gt;Local macOS Machines&lt;/b&gt;&lt;br&gt;EXTERNAL · Dev Workstations&lt;br&gt;─────────────&lt;br&gt;• Python + Julia env&lt;br&gt;• Xcode / SwiftUI dev&lt;br&gt;• Local simulation runs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="20" y="1850" width="280" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="INF3" value="&lt;b&gt;CI/CD Pipeline&lt;/b&gt;&lt;br&gt;GitHub Actions&lt;br&gt;─────────────&lt;br&gt;• Automated test runs&lt;br&gt;• Regression narrative tests&lt;br&gt;• LLM drift detection" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#555555;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="655" y="1850" width="280" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="INF4" value="&lt;b&gt;Version Control&lt;/b&gt;&lt;br&gt;Git / GitHub&lt;br&gt;─────────────&lt;br&gt;• Open-source codebase&lt;br&gt;• Module packaging&lt;br&gt;• Documentation site" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#555555;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="973" y="1850" width="280" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="INF5" value="&lt;b&gt;Python + Julia Environment&lt;/b&gt;&lt;br&gt;Conda / venv / containers&lt;br&gt;─────────────&lt;br&gt;pymatgen · ASE · FreeBird.jl&lt;br&gt;Conda / venv · Docker / Apptainer&lt;br&gt;HPC module loading" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#555555;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1290" y="1850" width="280" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="DTbg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f4f8;strokeColor=#0070c0;opacity=40;arcSize=8;" parent="1" vertex="1">
+          <mxGeometry y="2160" width="1590" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="DTlbl" value="10-WEEK DELIVERABLES TIMELINE  (AY2025-2026 · Digital Transformation Research Corps)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#003f7f;" parent="1" vertex="1">
+          <mxGeometry x="20" y="2170" width="700" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="W1" value="&lt;b&gt;Weeks 1–2&lt;/b&gt;&lt;br&gt;Requirements &amp;amp; Schema&lt;br&gt;─────────────────────&lt;br&gt;☑ JSON/YAML intent schema&lt;br&gt;☑ 3 domain use cases documented&lt;br&gt;☑ MVP success metrics defined&lt;br&gt;☑ Architecture diagram&lt;br&gt;☑ User-constraint vs. system-default separation spec" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0070c0;fontSize=10;align=left;spacingLeft=10;" parent="1" vertex="1">
+          <mxGeometry x="20" y="2190" width="280" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="W2" value="&lt;b&gt;Weeks 3–4&lt;/b&gt;&lt;br&gt;Parsing &amp;amp; Refinement&lt;br&gt;─────────────────────&lt;br&gt;☑ Semantic parsing module&lt;br&gt;☑ Clarification engine&lt;br&gt;☑ Schema validation + Pydantic models&lt;br&gt;☑ LLM API integration&lt;br&gt;☑ Validation test suite&lt;br&gt;☑ Multi-turn dialogue tests" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0070c0;fontSize=10;align=left;spacingLeft=10;" parent="1" vertex="1">
+          <mxGeometry x="338" y="2190" width="280" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="W3" value="&lt;b&gt;Weeks 5–6&lt;/b&gt;&lt;br&gt;Input Generation&lt;br&gt;─────────────────────&lt;br&gt;☑ Chemistry input gen (VASP/DFT)&lt;br&gt;☑ Materials input gen (ASE)&lt;br&gt;☑ Biophysics input gen&lt;br&gt;☑ Physics gen + FreeBird.jl bridge&lt;br&gt;☑ Consistency checker&lt;br&gt;☑ 3-domain sample outputs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0070c0;fontSize=10;align=left;spacingLeft=10;" parent="1" vertex="1">
+          <mxGeometry x="655" y="2190" width="280" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="W4" value="&lt;b&gt;Weeks 7–8&lt;/b&gt;&lt;br&gt;Orchestration &amp;amp; Provenance&lt;br&gt;─────────────────────&lt;br&gt;☑ Job submission engine&lt;br&gt;☑ Slurm adapter&lt;br&gt;☑ PBS adapter&lt;br&gt;☑ Local executor&lt;br&gt;☑ Job monitor + logging&lt;br&gt;☑ Provenance capture + cross-device sync" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0070c0;fontSize=10;align=left;spacingLeft=10;" parent="1" vertex="1">
+          <mxGeometry x="973" y="2190" width="280" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="W5" value="&lt;b&gt;Weeks 9–10&lt;/b&gt;&lt;br&gt;Integration &amp;amp; Demo&lt;br&gt;─────────────────────&lt;br&gt;☑ Integrated TWAIN MVP&lt;br&gt;☑ 3 end-to-end validated workflows&lt;br&gt;☑ Plots / publication dashboards&lt;br&gt;☑ Cross-device demo (phone→desktop→watch)&lt;br&gt;☑ Demo video(s) + user guide&lt;br&gt;☑ External proposal assets (NSF/NIH/DOE)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#0070c0;fontSize=10;align=left;spacingLeft=10;" parent="1" vertex="1">
+          <mxGeometry x="1290" y="2190" width="280" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="LEGbg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f9f9f9;strokeColor=#999999;" parent="1" vertex="1">
+          <mxGeometry y="2430" width="1590" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="LEGlbl" value="LEGEND" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontStyle=1;fontSize=11;" parent="1" vertex="1">
+          <mxGeometry x="20" y="2430" width="100" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="LEG1" value="Internal Component" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;" parent="1" vertex="1">
+          <mxGeometry x="20" y="2460" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="LEG2" value="External Service / Infrastructure" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+          <mxGeometry x="220" y="2460" width="180" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="LEG3" value="Data Store (Cylinder)" style="shape=cylinder;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+          <mxGeometry x="420" y="2455" width="180" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="LEG4" value="Future / Optional Component" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#6c8ebf;fontColor=#999999;fontSize=10;" parent="1" vertex="1">
+          <mxGeometry x="620" y="2460" width="200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="LEG5" value="Internal data / control flow" style="text;html=1;strokeColor=none;fillColor=none;fontSize=10;" parent="1" vertex="1">
+          <mxGeometry x="970" y="2460" width="200" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="LEG6" value="External dependency (dashed)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#b85450;" parent="1" vertex="1">
+          <mxGeometry x="970" y="2480" width="200" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="E01" value="narrative / speech / viz requests" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" parent="1" source="C4" target="A1" edge="1">
+          <mxGeometry x="-0.0614" relative="1" as="geometry">
+            <mxPoint x="88" y="-70" as="sourcePoint" />
+            <Array as="points" />
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E02" value="workflow ops" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.35;entryY=0;entryDx=0;entryDy=0;fontSize=9;" parent="1" source="C2" target="A1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E03" value="approvals" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=9;" parent="1" source="C3" target="A5" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1183" y="320" />
+              <mxPoint x="1430" y="320" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E05" value="parsed request" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;" parent="1" source="A1" target="I1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E06" value="streaming dialogue" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;" parent="1" source="A2" target="I2" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E07" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="I1" target="I2" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E08" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="I2" target="I3" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E09" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;" parent="1" source="I3" target="I4" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="930" y="800" />
+              <mxPoint x="680" y="800" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E10" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="I4" target="I5" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E11" value="LLM calls" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#b85450;fontSize=9;labelBackgroundColor=none;" parent="1" source="I1" target="EXT1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E12" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#b85450;" parent="1" source="I2" target="EXT1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E13" value="writes spec" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;entryX=0.85;entryY=0.05;entryDx=0;entryDy=0;entryPerimeter=0;exitX=0.25;exitY=1;exitDx=0;exitDy=0;" parent="1" source="I5" target="D1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="930" y="1020" />
+              <mxPoint x="258" y="1020" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E14" value="stores workflow" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;" parent="1" source="I5" target="D2" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E15" value="reads spec" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;exitX=0.15;exitY=0.05;exitDx=0;exitDy=0;exitPerimeter=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="D1" target="G1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="110" y="830" as="sourcePoint" />
+            <Array as="points">
+              <mxPoint x="62" y="1020" />
+              <mxPoint x="-30" y="1020" />
+              <mxPoint x="-30" y="775" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E16" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0;exitY=0.3;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="D1" target="G2" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="-60" y="1106" />
+              <mxPoint x="-60" y="955" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E17" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0;exitY=0.7;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="D1" target="G3" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="-60" y="1154" />
+              <mxPoint x="-60" y="1135" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E18" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.15;exitY=0.95;exitDx=0;exitDy=0;exitPerimeter=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" parent="1" source="D1" target="G4" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="62" y="1315" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E19" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#b85450;" parent="1" source="G4" target="EXT2" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E20" value="validated inputs" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;" parent="1" source="G5" target="O1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="-40" y="1675" />
+              <mxPoint x="-40" y="1505" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E21" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=1;exitY=0.75;exitDx=0;exitDy=0;" parent="1" source="O1" target="O2" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="320" y="1543" />
+              <mxPoint x="320" y="1680" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E22" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="O1" target="O3" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E23" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="O1" target="O4" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E24" value="sbatch" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#b85450;fontSize=9;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" parent="1" source="O2" target="INF1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="480" y="1840" />
+              <mxPoint x="480" y="1840" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E25" value="qsub" style="edgeStyle=orthogonalEdgeStyle;html=1;dashed=1;strokeColor=#b85450;fontSize=9;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" parent="1" source="O3" target="INF1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="660" y="1510" />
+              <mxPoint x="660" y="1800" />
+              <mxPoint x="550" y="1800" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E26" value="subprocess" style="html=1;dashed=1;strokeColor=#b85450;fontSize=9;" parent="1" source="O4" target="INF2" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E27" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="O5" target="O6" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E28" value="writes provenance" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;" parent="1" source="O6" target="D3" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E29" value="writes logs" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;" parent="1" source="O6" target="D4" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E30" value="job events" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;" parent="1" source="O5" target="A5" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E31" value="push alert" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;fontSize=9;entryX=0.25;entryY=1;entryDx=0;entryDy=0;exitX=0.25;exitY=0;exitDx=0;exitDy=0;" parent="1" source="A5" target="C3" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1360" y="330" />
+              <mxPoint x="1043" y="330" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E32" value="job outputs" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;entryX=0.25;entryY=1;entryDx=0;entryDy=0;exitX=0.75;exitY=0;exitDx=0;exitDy=0;" parent="1" source="O5" target="P1" edge="1">
+          <mxGeometry x="0.2006" relative="1" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E33" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" parent="1" source="P1" target="P2" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1970" y="1255" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E34" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="P2" target="P3" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E35" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="P1" target="P4" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E36" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" parent="1" source="P4" target="P5" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E37" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;" parent="1" source="P5" target="P6" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E38" value="provenance linkage" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#82b366;fontSize=9;" parent="1" source="D3" target="P4" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1280" y="1270" />
+              <mxPoint x="1280" y="1025" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E39" value="dashboards / results" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#cc4125;fontSize=9;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" parent="1" source="P6" target="C2" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1650" y="70" />
+              <mxPoint x="478" y="70" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E40" value="3D viz" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#cc4125;fontSize=9;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" parent="1" source="P3" target="C4" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1970" y="50" />
+              <mxPoint x="160" y="50" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="E41" value="shared state" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;fontSize=9;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" parent="1" source="A4" target="C1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="E42" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;entryX=0.75;entryY=1;entryDx=0;entryDy=0;exitX=0.25;exitY=0;exitDx=0;exitDy=0;" parent="1" source="A4" target="C2" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="zSSUtatjA6vcuQLuu6UH-2" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#cc4125;fontSize=9;" edge="1" parent="1" source="P3" target="P6">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="2315" y="1083" as="sourcePoint" />
+            <mxPoint x="1950" y="-16" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="P6" value="&lt;b&gt;Export &amp;amp; Package Module&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• Open-source release bundle&lt;br&gt;• Documented codebase package&lt;br&gt;• Workflow archive (zip/tar)&lt;br&gt;• Reproducibility manifest&lt;br&gt;• DOI / Zenodo submission" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#cc4125;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="1510" y="640" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="zSSUtatjA6vcuQLuu6UH-3" value="" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=9;" edge="1" parent="1" source="O5" target="O6">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1315" y="1506" as="sourcePoint" />
+            <mxPoint x="1060" y="803" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="O6" value="&lt;b&gt;Provenance Capture Service&lt;/b&gt;&lt;br&gt;Python&lt;br&gt;─────────────&lt;br&gt;• End-to-end run records&lt;br&gt;• Decision &amp;amp; assumption logging&lt;br&gt;• Cross-device metadata sync&lt;br&gt;• Run-to-intent linkage&lt;br&gt;• Reproducibility artifacts" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="860" y="1430" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="C4" value="&lt;b&gt;visionOS App&lt;/b&gt;&lt;br&gt;SwiftUI&lt;br&gt;─────────────────&lt;br&gt;• Immersive structure inspection&lt;br&gt;• Trajectory visualization&lt;br&gt;• Workflow branch tree view&lt;br&gt;• 3D molecular rendering" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;spacingLeft=8;arcSize=0;" parent="1" vertex="1">
+          <mxGeometry x="20" y="130" width="280" height="150" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
