@@ -1,7 +1,8 @@
 import json
 import sqlite3
-
+from datetime import datetime, timezone
 DB_NAME = 'executionlog.db'
+
 
 # Initializes the database
 def init_db():
@@ -15,7 +16,7 @@ def init_db():
                 endTime TEXT,
                 status TEXT NOT NULL, -- QUEUED, RUNNING, SUCCESS, FAILURE
                 errorMessage TEXT,
-                metadata TEXT,
+                metadata TEXT
                 )''')
     con.commit()
 
@@ -24,7 +25,7 @@ def status(specifiedJobId):
     # Opening database and getting status of specified job
     con = sqlite3.connect(DB_NAME)
     cur = con.cursor()
-    query = '''SELECT status FROM jobs WHERE jobId = ?'''
+    query = '''SELECT status FROM jobs WHERE submissionId = ?'''
     cur.execute(query, (specifiedJobId,))
     result = cur.fetchone()
 
@@ -36,9 +37,38 @@ def status(specifiedJobId):
     if result is None:
         return "No job matching specified job id"
     else:
-        return result
+        return result[0]
 
-# Data is json file with 
-def jobQueued(data):
-    con = sqlite3.connect(DB_NAME)
-    cur = con.cursor()
+def jobQueued(submissionId):
+    # submissionId is also the name of the file containing data
+    file = open(f'../SubmissionFiles/{submissionId}.json', 'r')
+    data = json.load(file)
+    _submissionId = data["submissionId"]
+    _submitTime = data["submitTime"]
+    _jobName = data["jobName"]
+    _metadata = json.dumps(data.get("metadata",{}))
+    with sqlite3.connect(DB_NAME) as con:
+
+        cur = con.cursor()
+        cur.execute('''INSERT INTO jobs(submissionId, jobName, submitTime, metadata, status) VALUES(?,?,?,?,?)''',
+                    (_submissionId, _jobName, _submitTime, _metadata, "QUEUED"))
+        con.commit()
+
+#
+def jobStarted(submissionId):
+    with sqlite3.connect(DB_NAME) as con:
+        cur = con.cursor()
+        cur.execute('''UPDATE jobs SET startTime = ?, status = 'RUNNING' WHERE submissionId = ?''',(datetime.now(timezone(timezone.utc).isoformat),submissionId,))
+        con.commit()
+
+def jobCompleted(submissionId):
+    with sqlite3.connect(DB_NAME) as con:
+        cur = con.cursor()
+        cur.execute('''UPDATE jobs SET endTime = ?, status = 'SUCCESS' WHERE submissionId = ?''',(datetime.now(timezone(timezone.utc).isoformat),submissionId,))
+        con.commit()
+
+def jobFailed(submissionId, errorMessage):
+    with sqlite3.connect(DB_NAME) as con:
+        cur = con.cursor()
+        cur.execute('''UPDATE jobs SET errorMessage = ?, status = 'FAILURE' WHERE submissionId = ?''',(errorMessage, submissionId,))
+        con.commit()
