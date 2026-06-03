@@ -8,91 +8,93 @@
       "type": "object"
     },
 
-    "userConstraints":{
+    "userConstraints": {
       "type": "object",
       "required": ["metadata"],
+      "properties": {
+        "metadata": {
+          "type": "object",
+          "required": ["submissionId", "inputType", "timeStamp"],
+          "properties": {
+            "user": {
+              "type": "string",
+              "description": "The user who submitted the request"
+            },
 
-      "metadata": {
-        "type": "object",
-        "required": ["submissionId", "inputType", "timeStamp"],
+            "submissionId": {
+              "type": "string",
+              "description": "A unique id to identify the request"
+            },
 
-        "user": {
-          "type": "string",
-          "description": "The user who submitted the request"
+            "inputType": {
+              "type": "string",
+              "enum": ["chemistry", "physics", "biophysics", "materials"],
+              "description": "The type of simulation the query will be performing"
+            },
+
+            "timeStamp": {
+              "type": "string",
+              "format": "date-time",
+              "description": "The time the query was submitted"
+            }
+          }
         },
 
-        "submissionId": {
-          "type": "string",
-          "description": "A unique id to identify the request"
-        },
+        "slurmInfo": {
+          "type": "object",
+          "description": "Container for the slurm data. Can be specified by the user but not required",
+          "properties": {
+            "cpuCount": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of CPUs requested, minimum of 1. Default: 8"
+            },
 
-        "inputType": {
-          "type": "string",
-          "enum": ["chemistry", "physics", "biophysics", "materials"],
-          "description": "The type of simulation the query will be performing"
-        },
+            "gpuCount": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of GPUs requested, minimum of 0. Default: 0"
+            },
 
-        "timeStamp": {
-          "type": "string",
-          "format": "date-time",
-          "description": "The time the query was submitted"
-        }
-      },
+            "ramAmount": {
+              "type": "integer",
+              "description": "Amount of RAM requested, MEASURED IN MEGABYTES ONLY. Default: 4000MB"
+            },
 
-
-      "slurmInfo":{
-        "type": "object",
-        "description": "Container for the slurm data. Can be specified by the user but not required",
-
-        "cpuCount": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Number of CPUs requested, minimum of 1. Default: 8"
-        },
-
-        "gpuCount":{
-          "type": "integer",
-          "minimum": 0,
-          "description": "Number of GPUs requested, minimum of 0. Default: 0"
-        },
-
-        "ramAmount": {
-          "type": "integer",
-          "description": "Amount of RAM requested, MEASURED IN MEGABYTES ONLY. Default: 4000MB"
-        },
-        "maxTime": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "The maximum number of hours the query is allowed to run before shutting down. Default: 8 hours"
+            "maxTime": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The maximum number of hours the query is allowed to run before shutting down. Default: 8 hours"
+            }
+          }
         }
       }
     }
   },
   "if": {
+    "properties": {
+      "userConstraints": {
         "properties": {
-          "userConstraints":
-          {
+          "metadata": {
             "properties": {
-              "metadata": {
-                "properties": {
-                  "inputType": {"string": "chemistry"}
-                }
-              }
+              "inputType": { "const": "chemistry" }
             }
           }
         }
-      },
+      }
+    }
+  },
   "then": {
     "properties": {
       "query": {
         "properties": {
           "subject": {
             "type": "object",
-            "required": [],
+            "required": ["species", "coordinates"],
             "properties": {
               "category": {
                 "type": "string",
-                "enum": ["structure, molecule"],
+                "enum": ["structure", "molecule"],
                 "description": "The type of molecule that is being simulated in Pymatgen"
               },
               "species": {
@@ -101,16 +103,16 @@
                 "minItems": 1,
                 "items": {
                   "type": "string"
-                },
-                "coordinates": {
+                }
+              },
+              "coordinates": {
+                "type": "array",
+                "description": "Locations of elements",
+                "minItems": 1,
+                "items": {
                   "type": "array",
-                  "description": "Locations of elements",
-                  "minItems": 1,
                   "items": {
-                    "type": "array",
-                    "items": {
-                      "type": "integer"
-                    }
+                    "type": "number"
                   }
                 }
               }
@@ -118,7 +120,6 @@
           }
         }
       }
-
     }
   }
 }
