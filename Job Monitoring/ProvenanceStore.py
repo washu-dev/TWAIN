@@ -14,12 +14,13 @@ def initProvenance():
         # Creating the database
         cur.execute('''CREATE TABLE provenance(
         provenanceId INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-        submissionId INTEGER NOT NULL FOREIGN KEY, -- corresponds to submissionId for execution log
+        submissionId INTEGER NOT NULL, -- corresponds to submissionId for execution log
         user VARCHAR NOT NULL,
         assumptions TEXT,
         decisions TEXT,
+        timestamp TEXT
         
-        
+
         ''')
     return
 

@@ -9,7 +9,7 @@ DB_NAME = 'executionlog.db'
 def initDb():
     con = sqlite3.connect(DB_NAME)
     cur = con.cursor()
-    cur.execute('''CREATE TABLE jobs(
+    cur.execute('''CREATE TABLE IF NOT EXISTS jobs(
                 submissionId TEXT PRIMARY KEY,
                 jobName TEXT NOT NULL,
                 user TEXT NOT NULL,
@@ -55,7 +55,7 @@ def jobQueued(submissionId):
     # Add it to the sql database
     with sqlite3.connect(DB_NAME) as con:
         cur = con.cursor()
-        cur.execute('''INSERT INTO jobs(submissionId, user, jobName, submitTime, metadata, status) VALUES(?,?,?,?,?)''',
+        cur.execute('''INSERT INTO jobs(submissionId, user, jobName, submitTime, metadata, status) VALUES(?,?,?,?,?,?)''',
                     (_submissionId, _user, _jobName, _submitTime, _metadata, "QUEUED"))
         con.commit()
 
@@ -63,14 +63,14 @@ def jobQueued(submissionId):
 def jobStarted(submissionId):
     with sqlite3.connect(DB_NAME) as con:
         cur = con.cursor()
-        cur.execute('''UPDATE jobs SET startTime = ?, status = 'RUNNING' WHERE submissionId = ?''',(datetime.now(timezone(timezone.utc).isoformat),submissionId,))
+        cur.execute('''UPDATE jobs SET startTime = ?, status = 'RUNNING' WHERE submissionId = ?''',(datetime.now(timezone.utc).isoformat(),submissionId,))
         con.commit()
 
 # Update job's status to SUCCESS and endTime to present
 def jobCompleted(submissionId):
     with sqlite3.connect(DB_NAME) as con:
         cur = con.cursor()
-        cur.execute('''UPDATE jobs SET endTime = ?, status = 'SUCCESS' WHERE submissionId = ?''',(datetime.now(timezone(timezone.utc).isoformat),submissionId,))
+        cur.execute('''UPDATE jobs SET endTime = ?, status = 'SUCCESS' WHERE submissionId = ?''',(datetime.now(timezone.utc).isoformat(),submissionId,))
         con.commit()
 
 # Update job's status to FAILURE and add errorMessage
