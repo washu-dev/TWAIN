@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "IntentSpecification",
+  "type": "object",
+  "required": ["userConstraints"],
+  "properties": {
+    "query": {
+      "type": "object"
+    },
+
+    "userConstraints":{
+      "type": "object",
+      "required": ["metadata"],
+
+      "metadata": {
+        "type": "object",
+        "required": ["submissionId", "inputType", "timeStamp"],
+
+        "user": {
+          "type": "string",
+          "description": "The user who submitted the request"
+        },
+
+        "submissionId": {
+          "type": "string",
+          "description": "A unique id to identify the request"
+        },
+
+        "inputType": {
+          "type": "string",
+          "enum": ["chemistry", "physics", "biophysics", "materials"],
+          "description": "The type of simulation the query will be performing"
+        },
+
+        "timeStamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The time the query was submitted"
+        }
+      },
+
+
+      "slurmInfo":{
+        "type": "object",
+        "description": "Container for the slurm data. Can be specified by the user but not required",
+
+        "cpuCount": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of CPUs requested, minimum of 1. Default: 8"
+        },
+
+        "gpuCount":{
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of GPUs requested, minimum of 0. Default: 0"
+        },
+
+        "ramAmount": {
+          "type": "integer",
+          "description": "Amount of RAM requested, MEASURED IN MEGABYTES ONLY. Default: 4000MB"
+        },
+        "maxTime": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The maximum number of hours the query is allowed to run before shutting down. Default: 8 hours"
+        }
+      }
+    }
+  },
+  "if": {
+        "properties": {
+          "userConstraints":
+          {
+            "properties": {
+              "metadata": {
+                "properties": {
+                  "inputType": {"string": "chemistry"}
+                }
+              }
+            }
+          }
+        }
+      },
+  "then": {
+    "properties": {
+      "query": {
+        "properties": {
+          "subject": {
+            "type": "object",
+            "required": [],
+            "properties": {
+              "category": {
+                "type": "string",
+                "enum": ["structure, molecule"],
+                "description": "The type of molecule that is being simulated in Pymatgen"
+              },
+              "species": {
+                "type": "array",
+                "description": "Array of elements in molecule",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                },
+                "coordinates": {
+                  "type": "array",
+                  "description": "Locations of elements",
+                  "minItems": 1,
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+    }
+  }
+}
