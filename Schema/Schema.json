@@ -130,11 +130,13 @@
     {
       "if": {
         "properties": {
-          "userConstraints": {},
-          "properties": {
-            "metadata": {},
+          "userConstraints": {
             "properties": {
-              "inputType": {"const":  "chemistry"}
+              "metadata": {
+                "properties": {
+                  "inputType": { "const": "chemistry" }
+                }
+              }
             }
           }
         }
@@ -142,11 +144,12 @@
       "then": {
         "required": ["query"],
         "properties": {
-          "query": {},
-          "required": ["chemical"],
-          "properties": {
-            "chemical": {
-              "required": ["category", "atoms"]
+          "query": {
+            "required": ["chemical"],
+            "properties": {
+              "chemical": {
+                "required": ["category", "atoms"]
+              }
             }
           }
         }
@@ -159,8 +162,19 @@
             "properties": {
               "chemical": {
                 "properties": {
-                  "category": {"const": "structure"}
+                  "category": { "const": "structure" }
                 }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "query": {
+            "properties": {
+              "chemical": {
+                "required": ["lattice"]
               }
             }
           }

@@ -73,6 +73,7 @@ Describes a chemistry subject (used when `inputType` is `chemistry`).
 The schema uses `allOf` with `if`/`then` blocks for subject-specific validation:
 
 - When `metadata.inputType` is `chemistry`, the request must include `query.chemical` with `category` and `atoms`.
+- When `query.chemical.category` is `structure`, `query.chemical.lattice` is required (crystals are periodic; molecules omit it).
 
 Additional branches for `physics`, `biophysics`, and `materials` are not yet defined.
 
