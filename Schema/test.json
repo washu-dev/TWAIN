@@ -1,0 +1,20 @@
+{
+  "userConstraints":{
+    "metadata": {
+      "submissionId": "42",
+      "inputType": "chemistry",
+      "timeStamp": "2026-06-08T21:04:00Z"
+    }
+  },
+  "query": {
+    "chemical": {
+      "category": "molecule",
+      "atoms": [
+        {"species": "au","coordinates": [0,0,0]}
+      ],
+      "experiment": {
+        "method": "MPRelaxSet"
+      }
+    }
+  }
+}
