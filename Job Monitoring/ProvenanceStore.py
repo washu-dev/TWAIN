@@ -12,16 +12,14 @@ def initProvenance():
         cur = con.cursor()
 
         # Creating the database
-        cur.execute('''CREATE TABLE provenance(
+        cur.execute('''CREATE TABLE IF NOT EXISTS provenance(
         provenanceId INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-        submissionId INTEGER NOT NULL, -- corresponds to submissionId for execution log
+        submissionId TEXT NOT NULL, -- corresponds to submissionId for execution log
         user VARCHAR NOT NULL,
         assumptions TEXT,
         decisions TEXT,
         timestamp TEXT
-        
-
-        ''')
+        )''')
     return
 
 # Data is given to the provenance log as a python dictionary, dumped from a json file by provenance capture service
@@ -35,10 +33,11 @@ def logProvenance(data):
         _user = data["user"]
         _assumptions = data["assumptions"]
         _decisions = data["decisions"]
+        _timestamp = datetime.now(timezone.utc).isoformat()
 
         # Add data to SQL database
-        cur.execute("INSERT INTO provenance(submissionId,user,assumptions,decisions) VALUES (?,?,?,?)",
-                    (_submissionId, _user, _assumptions, _decisions))
+        cur.execute("INSERT INTO provenance(submissionId,user,assumptions,decisions,timestamp) VALUES (?,?,?,?,?)",
+                    (_submissionId, _user, _assumptions, _decisions, _timestamp))
         con.commit()
         return cur.lastrowid
 

@@ -31,10 +31,6 @@ def status(specifiedJobId):
         cur.execute(query, (specifiedJobId,))
         result = cur.fetchone()
 
-        # Closing database
-        con.commit()
-        con.close()
-
         # Returning result
         if result is None:
             return "No job matching specified job id"
@@ -44,13 +40,13 @@ def status(specifiedJobId):
 # New job added to SQL database, should be called whenever the job is queued
 def jobQueued(submissionId):
     # Load file data
-    file = open(f'Logs/Task_Logs/{submissionId}.json', 'r') # submissionId is also the name of the file containing data
-    data = json.load(file)
-    _submissionId = data["submissionId"]
-    _user = data["user"]
-    _submitTime = data["submitTime"]
-    _jobName = data["jobName"]
-    _metadata = json.dumps(data.get("metadata",{}))
+    with open(f'Logs/Task_Logs/{submissionId}.json', 'r') as file: # submissionId is also the name of the file containing data
+        data = json.load(file)
+        _submissionId = data["submissionId"]
+        _user = data["user"]
+        _submitTime = data["submitTime"]
+        _jobName = data["jobName"]
+        _metadata = json.dumps(data.get("metadata",{}))
 
     # Add it to the sql database
     with sqlite3.connect(DB_NAME) as con:
@@ -77,5 +73,5 @@ def jobCompleted(submissionId):
 def jobFailed(submissionId, errorMessage):
     with sqlite3.connect(DB_NAME) as con:
         cur = con.cursor()
-        cur.execute('''UPDATE jobs SET errorMessage = ?, status = 'FAILURE' WHERE submissionId = ?''',(errorMessage, submissionId,))
+        cur.execute('''UPDATE jobs SET endTime = ?, errorMessage = ?, status = 'FAILURE' WHERE submissionId = ?''',(datetime.now(timezone.utc).isoformat(), errorMessage, submissionId,))
         con.commit()
