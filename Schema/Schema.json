@@ -58,6 +58,69 @@
                   "type": "number"
                 }
               }
+            },
+            "experiment": {
+              "type": "object",
+              "description": "What experiment we are running",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "enum" : ["MPRelaxSet", "MPStaticSet", "MPNonSCFSet"],
+                  "description": "General function for different experiment types"
+                },
+                "kpointOverride": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "description": "parameter value pairs for overriding settings",
+                    "properties": {
+                      "overrideParameter": {
+                        "type": "string",
+                        "description": "The actual parameter being overwritten"
+                      },
+                      "overrideValue": {
+                        "type": "string",
+                        "description": "The value for the overwritten parameter"
+                      }
+                    }
+                  }
+                },
+                "incarOverride": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "description": "parameter value pairs for overriding settings",
+                    "properties": {
+                      "overrideParameter": {
+                        "type": "string",
+                        "description": "The actual parameter being overwritten"
+                      },
+                      "overrideValue": {
+                        "type": "string",
+                        "description": "The value for the overwritten parameter"
+                      }
+                    }
+                  }
+                },
+                "potcarOverride": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "description": "parameter value pairs for overriding settings",
+                    "properties": {
+                      "overrideParameter": {
+                        "type": "string",
+                        "description": "The actual parameter being overwritten"
+                      },
+                      "overrideValue": {
+                        "type": "string",
+                        "description": "The value for the overwritten parameter"
+                      }
+                    }
+                  }
+                }
+              }
+
             }
           }
         },
@@ -298,7 +361,12 @@
             "required": ["chemical"],
             "properties": {
               "chemical": {
-                "required": ["category", "atoms"]
+                "required": ["category", "atoms", "experiment"],
+                "properties": {
+                  "experiment": {
+                    "required": ["method"]
+                  }
+                }
               }
             }
           }
