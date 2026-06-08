@@ -375,10 +375,13 @@
     },
     {
       "if": {
+        "required": ["query"],
         "properties": {
           "query": {
+            "required": ["chemical"],
             "properties": {
               "chemical": {
+                "required": ["category"],
                 "properties": {
                   "category": { "const": "structure" }
                 }
