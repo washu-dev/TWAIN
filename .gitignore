@@ -1,0 +1,19 @@
+# JetBrains IDEs (PyCharm/IntelliJ)
+.idea/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# pixi
+.pixi/
+
+# SQLite databases (generated at runtime by Job Monitoring)
+*.db
