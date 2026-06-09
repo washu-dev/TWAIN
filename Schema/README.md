@@ -7,7 +7,7 @@ This folder defines the **`IntentSpecification`** — the structured format that
 | File | Purpose |
 | --- | --- |
 | `Schema.json` | The authoritative [JSON Schema](https://json-schema.org/) (draft 2020-12). Use this for validation. |
-| `Schema.yaml` | A human-readable draft / example of a request. Useful as a reference while the per-subject fields are being designed. Not used for validation. |
+
 
 ## What is the IntentSpecification?
 
@@ -142,5 +142,4 @@ Draft202012Validator(schema).validate(request)
 ## Status / TODO
 
 - [ ] Define `query` subjects for `physics`, `biophysics`, and `materials`.
-- [ ] Keep `Schema.yaml` in sync with `Schema.json` (or generate one from the other).
 - [ ] Add sample request files and an automated validation test.
