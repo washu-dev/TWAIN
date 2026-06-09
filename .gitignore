@@ -18,4 +18,5 @@ env/
 # SQLite databases (generated at runtime by Job Monitoring)
 *.db
 
-.API/
+# API key folder
+API/
