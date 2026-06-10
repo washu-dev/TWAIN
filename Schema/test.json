@@ -1,20 +1,40 @@
 {
-  "userConstraints":{
-    "metadata": {
-      "submissionId": "42",
-      "inputType": "chemistry",
-      "timeStamp": "2026-06-08T21:04:00Z"
-    }
-  },
   "query": {
     "chemical": {
-      "category": "molecule",
+      "category": "structure",
       "atoms": [
-        {"species": "au","coordinates": [0,0,0]}
+        {
+          "species": "C",
+          "coordinates": [0.0, 0.0, 0.0]
+        },
+        {
+          "species": "C",
+          "coordinates": [0.3333333333, 0.6666666667, 0.0]
+        },
+        {
+          "species": "C",
+          "coordinates": [0.0, 0.0, 0.5]
+        },
+        {
+          "species": "C",
+          "coordinates": [0.6666666667, 0.3333333333, 0.5]
+        }
+      ],
+      "lattice": [
+        [2.4681, 0.0, 0.0],
+        [-1.2340, 2.1378, 0.0],
+        [0.0, 0.0, 6.7118]
       ],
       "experiment": {
         "method": "MPRelaxSet"
       }
+    }
+  },
+  "userConstraints": {
+    "metadata": {
+      "submissionId": "mprelaxset-graphite-001",
+      "inputType": "materials",
+      "timeStamp": "2024-06-01T00:00:00Z"
     }
   }
 }

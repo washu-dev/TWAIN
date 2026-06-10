@@ -10,7 +10,6 @@ class AgentInterface:
         self.apiKey = os.getenv("API_KEY")
         self.clientId = os.getenv("CLIENT_ID")
         self.apiSecret = os.getenv("CLIENT_SECRET")
-        print(repr(self.apiKey))
 
         # Set up headers
         resp = requests.post(
@@ -29,25 +28,23 @@ class AgentInterface:
                    "Content-Type": "application/json"}
 
     # Call agent (test for now, will be replaced with custom message in callagent)
-    def CallAgent(self):
-        print(self.headers) # DEBUGGING
+    def CallAgent(self, jsonQuery):
 
         # Call to agent
         resp = requests.post(
             "https://aiapi.wustl.edu/models/v2/messages",
             headers=self.headers,
-            json={
-                "model":        "claude-sonnet-4-6",
-                "max_tokens":   1024,
-                "messages": [{"role": "user", "content": "please only return the word yes"}]
-            }
+            json=jsonQuery
         )
 
+        # {
+        #     "model": "claude-sonnet-4-6",
+        #     "max_tokens": 1024,
+        #     "messages": [{"role": "user", "content": query}]
+        # }
+
         resp.raise_for_status()
-        print(resp.json())
-        print(resp.json()["content"][0]["text"]) # Output
-        exit()
+        return resp.json()
 
 if __name__ == "__main__":
     agent = AgentInterface()
-    agent.CallAgent()
