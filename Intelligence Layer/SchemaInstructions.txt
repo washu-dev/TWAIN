@@ -1,1 +1,0 @@
-The following is the .json schema that the .json text you return will be validated against.

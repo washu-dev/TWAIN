@@ -1,2 +1,4 @@
-You are to return *nothing* except text that is formatted in a .json file. 
-The .json file should be validated by the schema below.
+Return nothing but text as .json file.
+Start with {
+End with }
+.json file be validated by schema below
