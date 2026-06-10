@@ -24,7 +24,7 @@ class Prompt:
         with open("SchemaInstructions.txt","r") as file:
             prompt += file.read()
             prompt += "\n"
-        with open("../Schema/Schema.json","r") as schemaFile:
+        with open("../Schema/PymatgenSchema.json","r") as schemaFile:
             prompt += schemaFile.read()
             prompt += "\n"
         return prompt
