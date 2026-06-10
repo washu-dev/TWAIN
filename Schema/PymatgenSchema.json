@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "PymatgenInfo",
+  "type": "object",
+  "properties": {
+    "pymatgen": {
+      "type": "object",
+      "required": ["category", "atoms","experiment"],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": [
+            "lattice",
+            "molecule"
+          ],
+          "description": "Structural type"
+        },
+        "atoms": {
+          "type": "array",
+          "description": "Atom element and location",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "species",
+              "coordinates"
+            ],
+            "properties": {
+              "species": {
+                "type": "string",
+                "description": "Element"
+              },
+              "coordinates": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "description": "Position",
+                "items": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        },
+        "lattice": {
+          "type": "array",
+          "description": "Lattice matrix",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "experiment": {
+          "type": "object",
+          "required": ["method"],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum" : ["MPRelaxSet", "MPStaticSet", "MPNonSCFSet"],
+              "description": "Pymatgen function"
+            },
+            "kpointOverride": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "overrideParameter": {
+                    "type": "string"
+                  },
+                  "overrideValue": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "incarOverride": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "overrideParameter": {
+                    "type": "string"
+                  },
+                  "overrideValue": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "potcarOverride": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "overrideParameter": {
+                    "type": "string"
+                  },
+                  "overrideValue": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["pymatgen"],
+        "properties": {
+          "pymatgen": {
+            "required": ["category"],
+            "properties": {
+              "category": { "const": "lattice" }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "pymatgen": {
+            "required": ["lattice"]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -10,7 +10,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-.env
+env/
 
 # pixi
 .pixi/
@@ -18,3 +18,5 @@ venv/
 # SQLite databases (generated at runtime by Job Monitoring)
 *.db
 
+# API Key
+.env
