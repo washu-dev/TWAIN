@@ -7,7 +7,7 @@ from jsonschema.exceptions import ValidationError, SchemaError
 
 class SchemaValidator:
     def __init__(self):
-        self.schemaPath = "Schema.json"
+        self.schemaPath = "PymatgenSchema.json"
     def validate(self, jsonFile):
         try:
             with open(self.schemaPath, "r") as _schema:

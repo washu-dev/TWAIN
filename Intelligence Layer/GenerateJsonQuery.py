@@ -1,97 +1,75 @@
 import AgentInterface
+import PromptCompiler
 import json
 
-class Prompt:
+class Prompter:
     def __init__(self):
         self.agent = AgentInterface.AgentInterface()
-        self.state = "USER_PROMPT"
+        self.promptCompiler = PromptCompiler.PromptCompiler()
         self.userPrompt = ""
-        self.subject = ""
+        self.state = "GET_PROMPT"
+        self.method = ""
         self.cost = 0
+        self.validSubjects = ["Pymatgen","AtomicSimulationEnvironment"]
+        self.data = {}
 
-    def generateJsonQuery(self, query, system = "", model = "claude-sonnet-4-6", maxTokens = 1024, ):
-        jsonQuery = {
-            "model": model,
-            "max_tokens": maxTokens,
-            "messages": [{"role":"user","content":query}],
-        }
-        if system != "":
-            jsonQuery["system"] = system
-        return jsonQuery
 
-    # Generates prompt to create the actual data
-    def primaryDataPrompt(self):
-        prompt = ""
-        with open("Restraints.txt","r") as file:
-            prompt += file.read()
-            prompt += "\n"
-        match self.subject:
-            case "Pymatgen":
-                print("PYMATGEN CHOSEN...")
-                with open("../Schema/PymatgenSchema.json","r") as schemaFile:
-                    prompt += schemaFile.read()
-                    prompt += "\n"
-                prompt += self.userPrompt
-            case "Atomic Simulation Package":
-                print("Why did you go and pick that one claude")
-        return prompt
+    def nextState(self, input = ""):
+        match self.state:
+            case "GET_PROMPT":
+                self.state = "CHOOSE_SUBJECT"
+            case "CHOOSE_SUBJECT":
+                print(self.method)
+                print(self.method in self.validSubjects)
+                if(self.method not in self.validSubjects):
+                    self.state = "GET_PROMPT"
+                else:
+                    self.state = "SUBJECT_CONFIRMATION"
+            case "SUBJECT_CONFIRMATION":
+                if input.strip()[0].lower() == "y":
+                    self.state = "CREATING_DATA"
+                elif input.strip()[0].lower() == "n":
+                    print("Please specify method in prompt")
+                    self.state = "GET_PROMPT"
+                else:
+                    print("Invalid input. Please input only 'YES' or 'NO'")
+            case "CREATING_DATA":
+                self.state = "DATA_OUTPUT"
+        self.switchState(self.state)
 
-    # Generates prompt to query about which model to use
-    def subjectPrompt(self, userPrompt):
-        prompt = ""
-        with open("SubjectPrompt.txt","r") as file:
-            prompt += file.read()
-        prompt += "\n"
-        prompt += userPrompt
-        return prompt
-
-    def choosingSubject(self):
-        subjectPrompt = self.subjectPrompt(self.userPrompt)
-        jsonQuery = self.generateJsonQuery(subjectPrompt, model="claude-sonnet-4-6")
-        print("Choosing Subject..." + "\n")
-        response = self.agent.CallAgent(jsonQuery)
-        print("SUBJECT CHOSEN: " + response["content"][0]["text"])
-        print("\n")
-        print("FULL SUBJECT RESPONSE: " + str(response))
-        self.cost += response["quotaResponse"]["TotalTokenCost"]
-        _subject = response["content"][0]["text"].strip().strip("\"'").strip()
-        if _subject != "Pymatgen" and _subject != "Atomic Simulation Environment":
-            print("WRONG")
-            print(_subject)
-            self.subject = "Pymatgen"
-        self.subject = _subject
-        self.state = "CREATING_DATA"
-
-    def creatingData(self):
-
-        primaryDataPrompt = self.primaryDataPrompt()
-        jsonQuery = self.generateJsonQuery(primaryDataPrompt)
-        print("CREATING DATA...")
-        print("THINKING...")
-        print("\n")
-        response = self.agent.CallAgent(jsonQuery)
-        print("FULL RESPONSE:" + str(response))
-        self.cost += response["quotaResponse"]["TotalTokenCost"]
-        print("COST: " + str(self.cost))
-        jsonData = response["content"][0]["text"].strip().strip("`").removeprefix("json")
-        with open("testFiles/newFile.json", "w") as file:
-            file.write(jsonData)
-
-        exit()
+    def switchState(self, newState):
+        match newState:
+            case "CHOOSE_SUBJECT":
+                pass
+            case "DATA_PROMPT":
+                pass
 
     def run(self):
         while True:
             match self.state:
-                case "USER_PROMPT":
-                    self.userPrompt = input("ENTER YOUR PROMPT: ")
-                    self.state = "CHOOSING_SUBJECT"
-                case "CHOOSING_SUBJECT":
-                    self.choosingSubject()
+                case "GET_PROMPT":
+                    self.userPrompt = input("Please enter your prompt: ")
+                    self.nextState()
+                case "CHOOSE_SUBJECT":
+                    prompt = self.promptCompiler.setUserPrompt(self.userPrompt).subjectPrompt()
+                    self.method = self.agent.callAgent(prompt)["content"][0]["text"].strip('"')
+                    print(self.method)
+                    self.nextState()
+                case "SUBJECT_CONFIRMATION":
+                    inp = input(f"Is {self.method} the correct library to run the experiment? (Y/N): ")
+                    self.nextState(inp)
                 case "CREATING_DATA":
-                    self.creatingData()
+                    dataPrompt = self.promptCompiler.dataPrompt(self.method)
+                    self.data = self.agent.callAgent(dataPrompt)
+                    print(self.data)
+                    self.nextState()
+                case "DATA_OUTPUT":
+                    with open("data.json", "w") as outfile:
+                        json.dump(self.data, outfile)
+                    exit()
 
 
 if __name__ == "__main__":
-    promption = Prompt()
+    promption = Prompter()
     promption.run()
     
