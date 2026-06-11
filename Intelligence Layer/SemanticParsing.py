@@ -64,8 +64,9 @@ class Prompter:
                     print(self.data)
                     self.nextState()
                 case "DATA_OUTPUT":
+                    print(self.data)
                     with open("data.json", "w") as outfile:
-                        json.dump(self.data, outfile)
+                        outfile.write(self.data["content"][0]["text"].strip("`").strip("json"))
                     exit()
 
 

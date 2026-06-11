@@ -31,8 +31,11 @@ class PromptCompiler:
         self.resetPrompt()
         self.promptFromFile("Restraints.txt")
         self.promptFromFile(f"../Schema/{subject[:1].upper()}{subject[1:].lower()}Schema.json")
+        self.promptFromText(self.userPrompt)
         return self.getPrompt()
 
     def subjectPrompt(self):
+        self.resetPrompt()
         self.promptFromFile("SubjectPrompt.txt")
+        self.promptFromText(self.userPrompt)
         return self.getPrompt()

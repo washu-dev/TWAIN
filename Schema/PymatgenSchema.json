@@ -62,7 +62,8 @@
           "properties": {
             "method": {
               "type": "string",
-              "enum" : ["MPRelaxSet", "MPStaticSet", "MPNonSCFSet"],
+              "enum" : ["MPRelaxSet", "MPStaticSet", "MPNonSCFSet", "MPAbsorptionSet","MPHSEBSSet","MPMDSet","MPMetalRelaxSet",
+              "MPNMRSet","MPScanRelaxSet","MPScanStaticSet"],
               "description": "Pymatgen function"
             },
             "kpointOverride": {

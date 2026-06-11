@@ -1,0 +1,13 @@
+To use the semantic parsing, first make sure you have ".env" in your root library. It should be documented as follows.
+
+API_KEY=ABCD1234
+CLIENT_ID=EFGH5678
+CLIENT_SECRET=WXYZ9999
+
+You also have to make sure you are either on the Wash U network or connected to the VPN.
+Then, open SemanticParsing.py and press run!
+One note on the system: For now, semanticparsing does not support Atomic Simulated Environment.
+If the parsing module picks ASE, just say no and specify pymatgen in the prompt.
+For now, the full output (including cost, etc) is printed in the terminal, the data is written in json format
+to data.json, and the program terminates. The data.json file will be overwritten so if you want to use it make sure to
+save the work in a differently named file!

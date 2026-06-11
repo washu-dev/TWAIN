@@ -1,4 +1,3 @@
 Return nothing but text as .json file.
-Start with {
-End with }
+The first character of your response is { and the last is }
 .json file be validated by schema below
