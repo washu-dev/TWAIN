@@ -30,6 +30,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
@@ -47,6 +48,9 @@ FRAGMENT_QUERY_KEY = {
 }
 REFERENCES_DIR = Path(__file__).resolve().parent / "references"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+# ExecutionLog-shaped run records; one {submissionId}.json per engine run,
+# matching what Job Monitoring/ExecutionLog.py jobQueued() ingests
+JOB_RECORDS_DIR = RESULTS_DIR / "job_records"
 
 # Tolerances: results are floats and may differ slightly across
 # platforms/library versions, so exact equality is too strict.
@@ -276,6 +280,37 @@ def compare_engines(ase_result: dict, pmg_result: dict) -> bool:
     return ok
 
 
+def write_job_record(spec: dict, engine: str, spec_stem: str, times: dict,
+                     status: str, result: dict | None, error: str | None) -> Path:
+    """Emit an ExecutionLog-compatible run record.
+
+    Field names follow the jobs table in Job Monitoring/ExecutionLog.py, so
+    these files can be ingested by jobQueued() (which reads
+    {submissionId}.json) and the lifecycle fields map onto its columns.
+    """
+    submission_id = f"{spec['userConstraints']['metadata']['submissionId']}-{engine}"
+    record = {
+        "submissionId": submission_id,
+        "jobName": f"benchmark:{spec_stem}:{engine}",
+        "user": spec["userConstraints"]["metadata"].get("user", "benchmark-suite"),
+        "submitTime": times["submit"],
+        "startTime": times["start"],
+        "endTime": times["end"],
+        "status": status,
+        "errorMessage": error,
+        "metadata": {k: v for k, v in (result or {}).items() if k != "finalPositions"},
+    }
+    JOB_RECORDS_DIR.mkdir(parents=True, exist_ok=True)
+    path = JOB_RECORDS_DIR / f"{submission_id}.json"
+    with open(path, "w") as f:
+        json.dump(record, f, indent=2)
+    return path
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 ENGINES = {"ase": run_ase, "pymatgen": run_pymatgen}
 
 
@@ -298,9 +333,20 @@ def main():
     ok = True
     results = {}
     for name in engine_names:
-        result = ENGINES[name](spec)
+        times = {"submit": now_iso(), "start": now_iso(), "end": None}
+        try:
+            result = ENGINES[name](spec)
+        except Exception as e:
+            times["end"] = now_iso()
+            record_path = write_job_record(spec, name, args.spec.stem, times, "FAILURE", None, str(e))
+            print(f"[{name}] engine run FAILED: {e}")
+            print(f"Job record written to {record_path.relative_to(REPO_ROOT)}")
+            sys.exit(1)
+        times["end"] = now_iso()
+        record_path = write_job_record(spec, name, args.spec.stem, times, "SUCCESS", result, None)
         results[name] = result
         print(json.dumps({k: v for k, v in result.items() if k != "finalPositions"}, indent=2))
+        print(f"Job record written to {record_path.relative_to(REPO_ROOT)}")
 
         reference_path = REFERENCES_DIR / f"{args.spec.stem}_{name}.json"
         if args.write_reference:

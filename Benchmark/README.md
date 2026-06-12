@@ -69,6 +69,32 @@ real VASP path behind the MP input sets comes with cluster integration.
 Comparisons use tolerances (energy `1e-6` eV, positions `1e-4` Å) because
 floating-point results vary slightly across platforms.
 
+## Run records (ExecutionLog integration)
+
+Every engine run also writes an **ExecutionLog-compatible job record** to
+`results/job_records/{submissionId}.json`, with the field names the
+`Job Monitoring/ExecutionLog.py` `jobs` table uses (`submissionId`,
+`jobName`, `user`, `submitTime`/`startTime`/`endTime`, `status`
+SUCCESS/FAILURE, `errorMessage`, `metadata` with energy/steps/walltime).
+Failed engine runs produce a FAILURE record before the runner exits.
+Point `jobQueued()` at this folder and benchmark runs become loggable jobs.
+
+## Current reference results
+
+All values from ASE's EMT calculator (plumbing-grade, not research-grade;
+see note above). Energies in eV.
+
+| Structure | Input format | Engine(s) | Energy (eV) | Relax steps |
+| --- | --- | --- | --- | --- |
+| H2O molecule | full IntentSpecification | ase + pymatgen (agree exactly) | 1.879257 | 4 |
+| Graphite (4C cell) | pymatgen fragment | pymatgen | 0.839867 | 0 |
+| Bulk Cu (fcc, 4 atoms) | ase fragment | ase | -0.019744 | 0 |
+
+The 0-step relaxations are expected: those cells start at their EMT
+equilibrium geometry, so forces are already below fmax. H2O moves 4 steps
+from its slightly-off starting geometry. These numbers are the regression
+baseline -- `--check` fails if any of them drift.
+
 ## Status / roadmap
 
 - [x] M1 — ASE engine path (EMT static/relax), reference store + check
@@ -76,7 +102,7 @@ floating-point results vary slightly across platforms.
 - [x] M3 — Accept semantic-parser fragments (`--fragment pymatgen`)
 - [x] M4 — `--fragment ase` (via `Schema/AseSchema.json`); third sample
   structure (bulk Cu); references no longer store walltime
-- [ ] M5 — ExecutionLog-compatible run records; results write-up
+- [x] M5 — ExecutionLog-compatible run records; results write-up
 
 The three committed sample structures: H2O molecule (full spec, both
 engines), graphite (pymatgen fragment), bulk Cu (ase fragment).
