@@ -10,7 +10,7 @@
         "category": {
           "type": "string",
           "enum": [
-            "lattice",
+            "structure",
             "molecule"
           ],
           "description": "Structural type"
