@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" modified="2026-06-03" version="25.0" type="device">
+  <diagram id="error_recovery" name="TWAIN Error Recovery Paths">
+    <mxGraphModel dx="1400" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="TWAIN Error Recovery: Classification &amp; Strategies" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="50" y="10" width="1300" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- EXECUTION FAILURE -->
+        <mxCell id="exec_fail" value="Execution Fails" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=2;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="600" y="60" width="150" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- CLASSIFY ERROR -->
+        <mxCell id="classify" value="Classify Error" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;fontSize=11;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="570" y="140" width="210" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ERROR TYPE 1: Network Timeout -->
+        <mxCell id="err1" value="Network Timeout" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="50" y="270" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fix1" value="Retry with&#10;Exponential Backoff&#10;(max 3 retries)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="50" y="340" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ERROR TYPE 2: Missing Dependency -->
+        <mxCell id="err2" value="Missing Dependency" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="175" y="270" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fix2" value="Suggest pip install&#10;+ Rerun" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor:#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="175" y="340" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ERROR TYPE 3: Out of Memory -->
+        <mxCell id="err3" value="Out of Memory&#10;(OOM)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="300" y="270" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fix3" value="Reduce Batch Size&#10;+ Rerun" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="300" y="340" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ERROR TYPE 4: Invalid Input -->
+        <mxCell id="err4" value="Invalid Input&#10;(e.g., bad SMILES)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="425" y="270" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fix4" value="Ask Researcher&#10;for Corrected Input" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="425" y="340" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ERROR TYPE 5: Tool Crashed -->
+        <mxCell id="err5" value="Tool Crashed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor:#c62828;strokeWidth=1;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="550" y="270" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fix5" value="Propose Next-Best&#10;Tool + Replan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor:#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="550" y="340" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ERROR TYPE 6: Timeout -->
+        <mxCell id="err6" value="Timeout&#10;(wall-clock limit)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="675" y="270" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fix6" value="Extend Wall-Clock&#10;Time + Rerun" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="675" y="340" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ERROR TYPE 7: Policy Blocked -->
+        <mxCell id="err7" value="Policy Blocked&#10;(license/cost)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="800" y="270" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fix7" value="Escalate to&#10;Researcher" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="800" y="340" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- RECOVERY DECISION -->
+        <mxCell id="recovery_check" value="Retry Limit&#10;Exceeded?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;fontSize=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="300" y="450" width="150" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- REPLAN (if retries exhausted but recoverable) -->
+        <mxCell id="replan" value="Replan from&#10;Step 4: Discovery" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor:#1b5e20;strokeWidth=1.5;fontSize=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="500" y="470" width="110" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ESCALATE TO RESEARCHER -->
+        <mxCell id="escalate" value="Escalate to&#10;Researcher&#10;(Approval Gate)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;fontSize=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="700" y="470" width="110" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- RESEARCHER DECISION -->
+        <mxCell id="researcher_decision" value="Researcher&#10;Decision?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;fontSize=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="650" y="610" width="150" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- RECOVERY OPTIONS -->
+        <mxCell id="opt_retry" value="Retry (with fixes)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor:#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="500" y="645" width="90" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="opt_abandon" value="Abandon&#10;(Mark Failed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="610" y="645" width="90" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="opt_edit" value="Edit Input&#10;&amp; Restart" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="720" y="645" width="90" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="opt_clarify" value="Clarify Intent&#10;&amp; Replan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="830" y="645" width="90" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- FINAL STATES -->
+        <mxCell id="success" value="✓ Continue or&#10;Resume from Retry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=2;fontSize=9;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="350" y="780" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="failed" value="✗ Mark as Failed&#10;&amp; Archive" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=2;fontSize=9;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="600" y="780" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="restart" value="⟲ Restart from&#10;Clarification" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;strokeWidth=2;fontSize=9;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="850" y="780" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- EDGES: Error classification -->
+        <mxCell id="e_exec_fail" edge="1" parent="1" source="exec_fail" target="classify">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Classify to error types -->
+        <mxCell id="e_err1" edge="1" parent="1" source="classify" target="err1" label="Network">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="600" y="220" as="sourcePoint" />
+            <mxPoint x="100" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_err2" edge="1" parent="1" source="classify" target="err2" label="Dependency">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="625" y="220" as="sourcePoint" />
+            <mxPoint x="225" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_err3" edge="1" parent="1" source="classify" target="err3" label="OOM">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="650" y="220" as="sourcePoint" />
+            <mxPoint x="350" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_err4" edge="1" parent="1" source="classify" target="err4" label="Input">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="675" y="220" as="sourcePoint" />
+            <mxPoint x="475" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_err5" edge="1" parent="1" source="classify" target="err5" label="Crash">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="700" y="220" as="sourcePoint" />
+            <mxPoint x="600" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_err6" edge="1" parent="1" source="classify" target="err6" label="Timeout">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="725" y="220" as="sourcePoint" />
+            <mxPoint x="725" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_err7" edge="1" parent="1" source="classify" target="err7" label="Policy">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="750" y="220" as="sourcePoint" />
+            <mxPoint x="850" y="270" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Error to fixes -->
+        <mxCell id="e_fix1" edge="1" parent="1" source="err1" target="fix1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_fix2" edge="1" parent="1" source="err2" target="fix2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_fix3" edge="1" parent="1" source="err3" target="fix3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_fix4" edge="1" parent="1" source="err4" target="fix4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_fix5" edge="1" parent="1" source="err5" target="fix5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_fix6" edge="1" parent="1" source="err6" target="fix6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_fix7" edge="1" parent="1" source="err7" target="fix7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Fixes to recovery check -->
+        <mxCell id="e_to_recovery" edge="1" parent="1" source="fix1" target="recovery_check">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="400" as="sourcePoint" />
+            <mxPoint x="300" y="450" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Recovery decision branches -->
+        <mxCell id="e_retry_ok" edge="1" parent="1" source="recovery_check" target="replan" label="No: Retry">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="450" y="500" as="sourcePoint" />
+            <mxPoint x="500" y="500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_retry_fail" edge="1" parent="1" source="recovery_check" target="escalate" label="Yes: Escalate">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="450" y="500" as="sourcePoint" />
+            <mxPoint x="700" y="500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Escalate to researcher decision -->
+        <mxCell id="e_escalate" edge="1" parent="1" source="escalate" target="researcher_decision">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Researcher decisions -->
+        <mxCell id="e_res_retry" edge="1" parent="1" source="researcher_decision" target="opt_retry" label="Retry">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="680" y="610" as="sourcePoint" />
+            <mxPoint x="545" y="675" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_res_abandon" edge="1" parent="1" source="researcher_decision" target="opt_abandon" label="Abandon">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="700" y="610" as="sourcePoint" />
+            <mxPoint x="655" y="675" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_res_edit" edge="1" parent="1" source="researcher_decision" target="opt_edit" label="Edit Input">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="720" y="610" as="sourcePoint" />
+            <mxPoint x="765" y="675" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_res_clarify" edge="1" parent="1" source="researcher_decision" target="opt_clarify" label="Clarify">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="610" as="sourcePoint" />
+            <mxPoint x="875" y="675" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Options to final states -->
+        <mxCell id="e_opt_success" edge="1" parent="1" source="opt_retry" target="success">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="545" y="675" as="sourcePoint" />
+            <mxPoint x="410" y="780" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_opt_failed" edge="1" parent="1" source="opt_abandon" target="failed">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="655" y="675" as="sourcePoint" />
+            <mxPoint x="660" y="780" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_opt_restart" edge="1" parent="1" source="opt_clarify" target="restart">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="875" y="675" as="sourcePoint" />
+            <mxPoint x="910" y="780" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
