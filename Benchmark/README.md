@@ -40,6 +40,20 @@ pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/h2o
 With `--engine both` the runner also compares the engines against each other
 (energy and final positions must agree within tolerance).
 
+### Fragments from the semantic parser (Intelligence Layer)
+
+The Layer 3 semantic parser emits per-engine *fragments* (e.g. `data.json`
+with a top-level `pymatgen` key) rather than full IntentSpecifications.
+The runner accepts these directly, validating against the per-engine schema
+and attaching synthetic benchmark metadata:
+
+```bash
+pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/graphite_fragment.json --fragment pymatgen --check
+```
+
+This makes the benchmark an end-to-end test of parser output: anything the
+LLM produces can be validated, executed, and regression-checked here.
+
 ### How the two engines work
 
 - **ase** — builds `ase.Atoms` directly from the spec's `query.ase` block.
@@ -58,5 +72,9 @@ floating-point results vary slightly across platforms.
 
 - [x] M1 — ASE engine path (EMT static/relax), reference store + check
 - [x] M2 — Pymatgen engine path + cross-engine agreement check
-- [ ] M3 — ExecutionLog-compatible output; richer comparison report
-- [ ] M4 — Remaining sample structures + results write-up
+- [x] M3 — Accept semantic-parser fragments (`--fragment pymatgen`)
+- [ ] M4 — ExecutionLog-compatible output; ASE fragment schema; third sample structure + results write-up
+
+Known vocabulary drift: `Schema.json` uses category `structure` while
+`PymatgenSchema.json` fragments use `lattice` for the same concept. The
+runner accepts both for now; tracked as a schema issue.

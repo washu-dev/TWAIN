@@ -1,0 +1,33 @@
+{
+  "engine": "pymatgen",
+  "engineVersion": "2026.5.18",
+  "submissionId": "fragment-graphite_fragment",
+  "calculator": "emt",
+  "method": "MPRelaxSet",
+  "calculationType": "relax",
+  "energy_eV": 0.8398674866922136,
+  "finalPositions": [
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      -1.2300000000612747e-06,
+      1.42000071,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      3.355
+    ],
+    [
+      -1.2300000000612747e-06,
+      1.42000071,
+      3.355
+    ]
+  ],
+  "optimizerSteps": 0,
+  "walltime_s": 0.0075
+}

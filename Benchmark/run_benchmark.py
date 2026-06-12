@@ -13,8 +13,15 @@ input representations should agree within tolerance -- that agreement is the
 cross-engine consistency check. (Pymatgen's MP input sets target VASP, which
 needs the cluster; that path comes later.)
 
+Input formats:
+  full spec   an IntentSpecification document (validated against Schema.json)
+  fragment    a per-engine fragment as emitted by the Intelligence Layer's
+              semantic parser, e.g. {"pymatgen": {...}} (validated against
+              Schema/PymatgenSchema.json); pass --fragment pymatgen
+
 Usage:
     python Benchmark/run_benchmark.py <spec.json> [--engine ase|pymatgen|both]
+    python Benchmark/run_benchmark.py <fragment.json> --fragment pymatgen
     ... --write-reference   store the result(s) as reference output
     ... --check             compare the result(s) against stored references
 """
@@ -29,6 +36,9 @@ from jsonschema import Draft202012Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "Schema" / "Schema.json"
+FRAGMENT_SCHEMAS = {
+    "pymatgen": REPO_ROOT / "Schema" / "PymatgenSchema.json",
+}
 REFERENCES_DIR = Path(__file__).resolve().parent / "references"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
@@ -62,6 +72,43 @@ def load_and_validate_spec(spec_path: Path) -> dict:
         sys.exit(1)
     print(f"Spec validated against {SCHEMA_PATH.relative_to(REPO_ROOT)}")
     return spec
+
+
+def load_and_validate_fragment(fragment_path: Path, kind: str) -> dict:
+    """Validate a per-engine fragment and wrap it as a full spec.
+
+    The semantic parser emits engine fragments without userConstraints, so we
+    attach synthetic benchmark metadata to reuse the normal engine paths.
+    """
+    schema_path = FRAGMENT_SCHEMAS[kind]
+    with open(schema_path) as f:
+        schema = json.load(f)
+    with open(fragment_path) as f:
+        fragment = json.load(f)
+
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(fragment), key=str)
+    if errors:
+        print(f"Fragment {fragment_path} FAILS validation against {schema_path.name}:")
+        for e in errors:
+            print(f"  - {'/'.join(map(str, e.absolute_path)) or '<root>'}: {e.message}")
+        sys.exit(1)
+    if kind not in fragment:
+        print(f"Fragment has no top-level '{kind}' key")
+        sys.exit(1)
+    print(f"Fragment validated against Schema/{schema_path.name}")
+
+    return {
+        "userConstraints": {
+            "metadata": {
+                "user": "benchmark-suite",
+                "submissionId": f"fragment-{fragment_path.stem}",
+                "inputType": "chemistry",
+                "timeStamp": "1970-01-01T00:00:00Z",
+            }
+        },
+        "query": {"chemical": fragment[kind]},
+    }
 
 
 def normalize_species(symbols):
@@ -159,7 +206,9 @@ def run_pymatgen(spec: dict) -> dict:
     species = normalize_species([a["species"] for a in chemical["atoms"]])
     coords = [a["coordinates"] for a in chemical["atoms"]]
 
-    if chemical["category"] == "structure":
+    # "structure" is Schema.json vocabulary; "lattice" is PymatgenSchema.json
+    # (fragment) vocabulary for the same concept -- see enum-drift issue.
+    if chemical["category"] in ("structure", "lattice"):
         # pymatgen Structures take fractional coordinates by convention
         pmg_obj = Structure(Lattice(chemical["lattice"]), species, coords)
     else:
@@ -226,14 +275,19 @@ ENGINES = {"ase": run_ase, "pymatgen": run_pymatgen}
 
 def main():
     parser = argparse.ArgumentParser(description="TWAIN benchmark runner")
-    parser.add_argument("spec", type=Path, help="IntentSpecification JSON file")
+    parser.add_argument("spec", type=Path, help="IntentSpecification JSON file (or engine fragment with --fragment)")
     parser.add_argument("--engine", choices=["ase", "pymatgen", "both"], default="ase")
+    parser.add_argument("--fragment", choices=sorted(FRAGMENT_SCHEMAS), help="treat input as a per-engine fragment from the semantic parser")
     parser.add_argument("--write-reference", action="store_true", help="store result(s) as reference output")
     parser.add_argument("--check", action="store_true", help="compare result(s) against stored references")
     args = parser.parse_args()
 
-    spec = load_and_validate_spec(args.spec)
-    engine_names = ["ase", "pymatgen"] if args.engine == "both" else [args.engine]
+    if args.fragment:
+        spec = load_and_validate_fragment(args.spec, args.fragment)
+        engine_names = [args.fragment]
+    else:
+        spec = load_and_validate_spec(args.spec)
+        engine_names = ["ase", "pymatgen"] if args.engine == "both" else [args.engine]
 
     ok = True
     results = {}

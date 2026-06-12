@@ -1,0 +1,19 @@
+{
+  "pymatgen": {
+    "category": "lattice",
+    "atoms": [
+      { "species": "C", "coordinates": [0.0, 0.0, 0.0] },
+      { "species": "C", "coordinates": [0.333333, 0.666667, 0.0] },
+      { "species": "C", "coordinates": [0.0, 0.0, 0.5] },
+      { "species": "C", "coordinates": [0.333333, 0.666667, 0.5] }
+    ],
+    "lattice": [
+      [2.46, 0.0, 0.0],
+      [-1.23, 2.13, 0.0],
+      [0.0, 0.0, 6.71]
+    ],
+    "experiment": {
+      "method": "MPRelaxSet"
+    }
+  }
+}
