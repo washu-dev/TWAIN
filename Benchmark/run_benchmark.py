@@ -38,6 +38,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "Schema" / "Schema.json"
 FRAGMENT_SCHEMAS = {
     "pymatgen": REPO_ROOT / "Schema" / "PymatgenSchema.json",
+    "ase": REPO_ROOT / "Schema" / "AseSchema.json",
+}
+# where each fragment's engine block lives inside a full IntentSpecification
+FRAGMENT_QUERY_KEY = {
+    "pymatgen": "chemical",
+    "ase": "ase",
 }
 REFERENCES_DIR = Path(__file__).resolve().parent / "references"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -107,7 +113,7 @@ def load_and_validate_fragment(fragment_path: Path, kind: str) -> dict:
                 "timeStamp": "1970-01-01T00:00:00Z",
             }
         },
-        "query": {"chemical": fragment[kind]},
+        "query": {FRAGMENT_QUERY_KEY[kind]: fragment[kind]},
     }
 
 
@@ -299,8 +305,11 @@ def main():
         reference_path = REFERENCES_DIR / f"{args.spec.stem}_{name}.json"
         if args.write_reference:
             REFERENCES_DIR.mkdir(exist_ok=True)
+            # walltime varies run-to-run; keeping it out of references means
+            # regenerating them doesn't dirty git when physics is unchanged
+            reference = {k: v for k, v in result.items() if k != "walltime_s"}
             with open(reference_path, "w") as f:
-                json.dump(result, f, indent=2)
+                json.dump(reference, f, indent=2)
             print(f"Reference written to {reference_path.relative_to(REPO_ROOT)}")
         elif args.check:
             ok = check_against_reference(result, reference_path) and ok

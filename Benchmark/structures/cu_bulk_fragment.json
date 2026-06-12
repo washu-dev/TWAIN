@@ -1,0 +1,29 @@
+{
+  "ase": {
+    "structure": {
+      "category": "structure",
+      "coordinateSystem": "fractional",
+      "pbc": true,
+      "atoms": [
+        { "species": "Cu", "coordinates": [0.0, 0.0, 0.0] },
+        { "species": "Cu", "coordinates": [0.0, 0.5, 0.5] },
+        { "species": "Cu", "coordinates": [0.5, 0.0, 0.5] },
+        { "species": "Cu", "coordinates": [0.5, 0.5, 0.0] }
+      ],
+      "cell": [
+        [3.615, 0.0, 0.0],
+        [0.0, 3.615, 0.0],
+        [0.0, 0.0, 3.615]
+      ]
+    },
+    "calculation": {
+      "calculator": "emt",
+      "calculationType": "relax",
+      "relax": {
+        "optimizer": "BFGS",
+        "fmax": 0.05,
+        "maxSteps": 200
+      }
+    }
+  }
+}

@@ -49,6 +49,7 @@ and attaching synthetic benchmark metadata:
 
 ```bash
 pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/graphite_fragment.json --fragment pymatgen --check
+pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/cu_bulk_fragment.json --fragment ase --check
 ```
 
 This makes the benchmark an end-to-end test of parser output: anything the
@@ -73,7 +74,12 @@ floating-point results vary slightly across platforms.
 - [x] M1 — ASE engine path (EMT static/relax), reference store + check
 - [x] M2 — Pymatgen engine path + cross-engine agreement check
 - [x] M3 — Accept semantic-parser fragments (`--fragment pymatgen`)
-- [ ] M4 — ExecutionLog-compatible output; ASE fragment schema; third sample structure + results write-up
+- [x] M4 — `--fragment ase` (via `Schema/AseSchema.json`); third sample
+  structure (bulk Cu); references no longer store walltime
+- [ ] M5 — ExecutionLog-compatible run records; results write-up
+
+The three committed sample structures: H2O molecule (full spec, both
+engines), graphite (pymatgen fragment), bulk Cu (ase fragment).
 
 Known vocabulary drift: `Schema.json` uses category `structure` while
 `PymatgenSchema.json` fragments use `lattice` for the same concept. The
