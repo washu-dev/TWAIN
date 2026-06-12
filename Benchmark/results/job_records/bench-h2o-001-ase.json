@@ -1,0 +1,20 @@
+{
+  "submissionId": "bench-h2o-001-ase",
+  "jobName": "benchmark:h2o_molecule:ase",
+  "user": "benchmark-suite",
+  "submitTime": "2026-06-12T18:31:48.374553+00:00",
+  "startTime": "2026-06-12T18:31:48.374692+00:00",
+  "endTime": "2026-06-12T18:31:48.800316+00:00",
+  "status": "SUCCESS",
+  "errorMessage": null,
+  "metadata": {
+    "engine": "ase",
+    "engineVersion": "3.28.0",
+    "submissionId": "bench-h2o-001",
+    "calculator": "emt",
+    "calculationType": "relax",
+    "energy_eV": 1.8792568477426137,
+    "optimizerSteps": 4,
+    "walltime_s": 0.1174
+  }
+}

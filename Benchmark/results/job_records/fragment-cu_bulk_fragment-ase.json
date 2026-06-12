@@ -1,0 +1,20 @@
+{
+  "submissionId": "fragment-cu_bulk_fragment-ase",
+  "jobName": "benchmark:cu_bulk_fragment:ase",
+  "user": "benchmark-suite",
+  "submitTime": "2026-06-12T18:11:22.633939+00:00",
+  "startTime": "2026-06-12T18:11:22.634068+00:00",
+  "endTime": "2026-06-12T18:11:22.902577+00:00",
+  "status": "SUCCESS",
+  "errorMessage": null,
+  "metadata": {
+    "engine": "ase",
+    "engineVersion": "3.28.0",
+    "submissionId": "fragment-cu_bulk_fragment",
+    "calculator": "emt",
+    "calculationType": "relax",
+    "energy_eV": -0.019744210612913093,
+    "optimizerSteps": 0,
+    "walltime_s": 0.0736
+  }
+}

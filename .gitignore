@@ -12,8 +12,12 @@ __pycache__/
 venv/
 env/
 
-# pixi
-.pixi/
-
 # SQLite databases (generated at runtime by Job Monitoring)
 *.db
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# API Key
+.env

@@ -1,0 +1,28 @@
+{
+  "engine": "pymatgen",
+  "engineVersion": "2026.5.18",
+  "submissionId": "bench-h2o-001",
+  "calculator": "emt",
+  "method": "MPRelaxSet",
+  "calculationType": "relax",
+  "energy_eV": 1.8792568477426137,
+  "finalPositions": [
+    [
+      0.0,
+      -0.09443144610452496,
+      -4.065974030621135e-18
+    ],
+    [
+      0.8240413930351054,
+      0.6332157230522624,
+      -1.55033086731919e-19
+    ],
+    [
+      -0.8240413930351054,
+      0.6332157230522624,
+      -2.6107598551346565e-20
+    ]
+  ],
+  "optimizerSteps": 4,
+  "walltime_s": 0.0019
+}
