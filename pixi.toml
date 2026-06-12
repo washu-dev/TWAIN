@@ -12,8 +12,15 @@ python = "3.12.*"
 jsonschema = "*"
 
 # Per-workstream features: branches add their own dependencies here as needed,
-# e.g. [feature.sim.dependencies] ase/pymatgen for Benchmark,
-# [feature.workflows.dependencies] quacc/jobflow for WorkflowManagers.
+# e.g. [feature.workflows.dependencies] quacc/jobflow for WorkflowManagers.
+
+[feature.sim.dependencies]
+ase = "*"
+pymatgen = "*"
+
+[feature.sim.tasks]
+benchmark = "python Benchmark/run_benchmark.py"
 
 [environments]
 default = []
+benchmark = ["sim"]

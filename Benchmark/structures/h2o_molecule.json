@@ -1,0 +1,44 @@
+{
+  "userConstraints": {
+    "metadata": {
+      "user": "benchmark-suite",
+      "submissionId": "bench-h2o-001",
+      "inputType": "chemistry",
+      "timeStamp": "2026-06-12T09:30:00Z"
+    }
+  },
+  "query": {
+    "chemical": {
+      "category": "molecule",
+      "atoms": [
+        { "species": "O", "coordinates": [0.0, 0.0, 0.0] },
+        { "species": "H", "coordinates": [0.757, 0.586, 0.0] },
+        { "species": "H", "coordinates": [-0.757, 0.586, 0.0] }
+      ],
+      "experiment": {
+        "method": "MPRelaxSet"
+      }
+    },
+    "ase": {
+      "structure": {
+        "category": "molecule",
+        "coordinateSystem": "cartesian",
+        "pbc": false,
+        "atoms": [
+          { "species": "O", "coordinates": [0.0, 0.0, 0.0] },
+          { "species": "H", "coordinates": [0.757, 0.586, 0.0] },
+          { "species": "H", "coordinates": [-0.757, 0.586, 0.0] }
+        ]
+      },
+      "calculation": {
+        "calculator": "emt",
+        "calculationType": "relax",
+        "relax": {
+          "optimizer": "BFGS",
+          "fmax": 0.05,
+          "maxSteps": 200
+        }
+      }
+    }
+  }
+}

@@ -21,3 +21,6 @@ env/
 
 # API Key
 .env
+
+# Benchmark scratch output (references/ ARE committed)
+Benchmark/results/
