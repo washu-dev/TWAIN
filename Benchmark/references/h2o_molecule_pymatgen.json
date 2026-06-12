@@ -1,8 +1,9 @@
 {
-  "engine": "ase",
-  "engineVersion": "3.28.0",
+  "engine": "pymatgen",
+  "engineVersion": "2026.5.18",
   "submissionId": "bench-h2o-001",
   "calculator": "emt",
+  "method": "MPRelaxSet",
   "calculationType": "relax",
   "energy_eV": 1.8792568477426137,
   "finalPositions": [
@@ -23,5 +24,5 @@
     ]
   ],
   "optimizerSteps": 4,
-  "walltime_s": 0.1168
+  "walltime_s": 0.0026
 }

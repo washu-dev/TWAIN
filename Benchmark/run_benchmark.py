@@ -1,13 +1,22 @@
-"""TWAIN benchmark runner (M1: ASE engine).
+"""TWAIN benchmark runner.
 
-Reads an IntentSpecification JSON, validates it against the schema,
-builds an ASE Atoms object from the `query.ase` block, runs the requested
-calculation, and reports the result.
+Reads an IntentSpecification JSON, validates it against the schema, runs the
+requested calculation through one or both engines, and reports the results.
+
+Engines:
+  ase       builds an ase.Atoms from the `query.ase` block
+  pymatgen  builds a pymatgen Molecule/Structure from the `query.chemical`
+            block, then converts to ase.Atoms via AseAtomsAdaptor
+
+Both engines execute with ASE's local EMT calculator, so results from the two
+input representations should agree within tolerance -- that agreement is the
+cross-engine consistency check. (Pymatgen's MP input sets target VASP, which
+needs the cluster; that path comes later.)
 
 Usage:
-    python Benchmark/run_benchmark.py Benchmark/structures/h2o_molecule.json
-    ... --write-reference   store the result as the reference output
-    ... --check             compare the result against the stored reference
+    python Benchmark/run_benchmark.py <spec.json> [--engine ase|pymatgen|both]
+    ... --write-reference   store the result(s) as reference output
+    ... --check             compare the result(s) against stored references
 """
 
 import argparse
@@ -23,10 +32,19 @@ SCHEMA_PATH = REPO_ROOT / "Schema" / "Schema.json"
 REFERENCES_DIR = Path(__file__).resolve().parent / "references"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
-# Tolerances for --check: results are floats and may differ slightly
-# across platforms/library versions, so exact equality is too strict.
+# Tolerances: results are floats and may differ slightly across
+# platforms/library versions, so exact equality is too strict.
 ENERGY_TOL_EV = 1e-6
 POSITION_TOL_ANGSTROM = 1e-4
+
+# The Pymatgen block expresses the calculation as an MP input-set method;
+# locally we map it onto the equivalent EMT calculation.
+METHOD_TO_CALC_TYPE = {
+    "MPRelaxSet": "relax",
+    "MPStaticSet": "static",
+}
+
+DEFAULT_RELAX = {"optimizer": "BFGS", "fmax": 0.05, "maxSteps": 200}
 
 
 def load_and_validate_spec(spec_path: Path) -> dict:
@@ -46,17 +64,60 @@ def load_and_validate_spec(spec_path: Path) -> dict:
     return spec
 
 
-def build_ase_atoms(ase_block: dict):
+def normalize_species(symbols):
+    # tolerate lowercase symbols like "au" in specs
+    return [s.capitalize() for s in symbols]
+
+
+def run_calculation(atoms, calc_type: str, relax_params: dict) -> dict:
+    """Attach EMT and run; shared by both engines."""
+    from ase.calculators.emt import EMT
+
+    atoms.calc = EMT()
+    start = time.perf_counter()
+    steps = None
+
+    if calc_type == "static":
+        energy = atoms.get_potential_energy()
+    elif calc_type == "relax":
+        from ase import optimize
+
+        optimizer_cls = getattr(optimize, relax_params.get("optimizer", "BFGS"))
+        opt = optimizer_cls(atoms, logfile=None)
+        opt.run(fmax=relax_params.get("fmax", 0.05), steps=relax_params.get("maxSteps", 200))
+        steps = opt.get_number_of_steps()
+        energy = atoms.get_potential_energy()
+    else:
+        print(f"calculationType '{calc_type}' is not implemented yet (supported: static, relax)")
+        sys.exit(1)
+
+    return {
+        "calculationType": calc_type,
+        "energy_eV": energy,
+        "finalPositions": atoms.get_positions().tolist(),
+        "optimizerSteps": steps,
+        "walltime_s": round(time.perf_counter() - start, 4),
+    }
+
+
+def run_ase(spec: dict) -> dict:
+    import ase
     from ase import Atoms
 
+    ase_block = spec["query"].get("ase")
+    if ase_block is None:
+        print("Spec has no query.ase block; cannot run the ase engine")
+        sys.exit(1)
+
     structure = ase_block["structure"]
-    symbols = [a["species"] for a in structure["atoms"]]
+    calc_block = ase_block["calculation"]
+
+    symbols = normalize_species([a["species"] for a in structure["atoms"]])
     coords = [a["coordinates"] for a in structure["atoms"]]
-    pbc = structure.get("pbc", False)
     cell = structure.get("cell")
     fractional = structure.get("coordinateSystem", "cartesian") == "fractional"
 
-    kwargs = {"symbols": symbols, "pbc": pbc}
+    kwargs = {"symbols": symbols, "pbc": structure.get("pbc", False)}
     if cell is not None:
         kwargs["cell"] = cell
     if fractional:
@@ -66,58 +127,59 @@ def build_ase_atoms(ase_block: dict):
         kwargs["scaled_positions"] = coords
     else:
         kwargs["positions"] = coords
-    return Atoms(**kwargs)
 
-
-def make_calculator(name: str):
-    if name == "emt":
-        from ase.calculators.emt import EMT
-
-        return EMT()
-    print(f"Calculator '{name}' is not runnable locally; only 'emt' is supported for now")
-    sys.exit(1)
-
-
-def run_ase(spec: dict) -> dict:
-    import ase
-
-    ase_block = spec["query"]["ase"]
-    calc_block = ase_block["calculation"]
-    calc_type = calc_block["calculationType"]
-
-    atoms = build_ase_atoms(ase_block)
-    atoms.calc = make_calculator(calc_block["calculator"])
-
-    start = time.perf_counter()
-    steps = None
-
-    if calc_type == "static":
-        energy = atoms.get_potential_energy()
-    elif calc_type == "relax":
-        from ase import optimize
-
-        params = calc_block.get("relax", {})
-        optimizer_cls = getattr(optimize, params.get("optimizer", "BFGS"))
-        opt = optimizer_cls(atoms, logfile=None)
-        opt.run(fmax=params.get("fmax", 0.05), steps=params.get("maxSteps", 200))
-        steps = opt.get_number_of_steps()
-        energy = atoms.get_potential_energy()
-    else:
-        print(f"calculationType '{calc_type}' is not implemented yet (M1 supports static/relax)")
+    if calc_block["calculator"] != "emt":
+        print(f"Calculator '{calc_block['calculator']}' is not runnable locally; only 'emt' for now")
         sys.exit(1)
 
-    walltime = time.perf_counter() - start
-
+    result = run_calculation(
+        Atoms(**kwargs),
+        calc_block["calculationType"],
+        calc_block.get("relax", DEFAULT_RELAX),
+    )
     return {
         "engine": "ase",
         "engineVersion": ase.__version__,
         "submissionId": spec["userConstraints"]["metadata"]["submissionId"],
-        "calculator": calc_block["calculator"],
-        "calculationType": calc_type,
-        "energy_eV": energy,
-        "finalPositions": atoms.get_positions().tolist(),
-        "optimizerSteps": steps,
-        "walltime_s": round(walltime, 4),
+        "calculator": "emt",
+        **result,
+    }
+
+
+def run_pymatgen(spec: dict) -> dict:
+    import pymatgen.core
+    from pymatgen.core import Lattice, Molecule, Structure
+    from pymatgen.io.ase import AseAtomsAdaptor
+
+    chemical = spec["query"].get("chemical")
+    if chemical is None:
+        print("Spec has no query.chemical block; cannot run the pymatgen engine")
+        sys.exit(1)
+
+    species = normalize_species([a["species"] for a in chemical["atoms"]])
+    coords = [a["coordinates"] for a in chemical["atoms"]]
+
+    if chemical["category"] == "structure":
+        # pymatgen Structures take fractional coordinates by convention
+        pmg_obj = Structure(Lattice(chemical["lattice"]), species, coords)
+    else:
+        pmg_obj = Molecule(species, coords)
+
+    method = chemical["experiment"]["method"]
+    calc_type = METHOD_TO_CALC_TYPE.get(method)
+    if calc_type is None:
+        print(f"experiment.method '{method}' has no local equivalent (supported: {list(METHOD_TO_CALC_TYPE)})")
+        sys.exit(1)
+
+    atoms = AseAtomsAdaptor.get_atoms(pmg_obj)
+    result = run_calculation(atoms, calc_type, DEFAULT_RELAX)
+    return {
+        "engine": "pymatgen",
+        "engineVersion": pymatgen.core.__version__,
+        "submissionId": spec["userConstraints"]["metadata"]["submissionId"],
+        "calculator": "emt",
+        "method": method,
+        **result,
     }
 
 
@@ -131,7 +193,7 @@ def check_against_reference(result: dict, reference_path: Path) -> bool:
     ok = True
     energy_delta = abs(result["energy_eV"] - reference["energy_eV"])
     if energy_delta > ENERGY_TOL_EV:
-        print(f"FAIL energy: |{result['energy_eV']} - {reference['energy_eV']}| = {energy_delta:.2e} eV > {ENERGY_TOL_EV}")
+        print(f"FAIL energy: delta {energy_delta:.2e} eV > {ENERGY_TOL_EV}")
         ok = False
 
     for i, (got, want) in enumerate(zip(result["finalPositions"], reference["finalPositions"])):
@@ -140,40 +202,66 @@ def check_against_reference(result: dict, reference_path: Path) -> bool:
             print(f"FAIL atom {i} position: max delta {delta:.2e} A > {POSITION_TOL_ANGSTROM}")
             ok = False
 
-    print("Reference check PASSED" if ok else "Reference check FAILED")
+    print(f"[{result['engine']}] reference check {'PASSED' if ok else 'FAILED'}")
     return ok
+
+
+def compare_engines(ase_result: dict, pmg_result: dict) -> bool:
+    energy_delta = abs(ase_result["energy_eV"] - pmg_result["energy_eV"])
+    max_pos_delta = max(
+        abs(g - w)
+        for got, want in zip(ase_result["finalPositions"], pmg_result["finalPositions"])
+        for g, w in zip(got, want)
+    )
+    ok = energy_delta <= ENERGY_TOL_EV and max_pos_delta <= POSITION_TOL_ANGSTROM
+    print("--- engine comparison (ase vs pymatgen) ---")
+    print(f"energy delta:        {energy_delta:.3e} eV (tol {ENERGY_TOL_EV})")
+    print(f"max position delta:  {max_pos_delta:.3e} A  (tol {POSITION_TOL_ANGSTROM})")
+    print(f"engines {'AGREE' if ok else 'DISAGREE'}")
+    return ok
+
+
+ENGINES = {"ase": run_ase, "pymatgen": run_pymatgen}
 
 
 def main():
     parser = argparse.ArgumentParser(description="TWAIN benchmark runner")
     parser.add_argument("spec", type=Path, help="IntentSpecification JSON file")
-    parser.add_argument("--write-reference", action="store_true", help="store result as reference output")
-    parser.add_argument("--check", action="store_true", help="compare result against stored reference")
+    parser.add_argument("--engine", choices=["ase", "pymatgen", "both"], default="ase")
+    parser.add_argument("--write-reference", action="store_true", help="store result(s) as reference output")
+    parser.add_argument("--check", action="store_true", help="compare result(s) against stored references")
     args = parser.parse_args()
 
     spec = load_and_validate_spec(args.spec)
-    if "ase" not in spec.get("query", {}):
-        print("Spec has no query.ase block; M1 only runs the ASE engine")
+    engine_names = ["ase", "pymatgen"] if args.engine == "both" else [args.engine]
+
+    ok = True
+    results = {}
+    for name in engine_names:
+        result = ENGINES[name](spec)
+        results[name] = result
+        print(json.dumps({k: v for k, v in result.items() if k != "finalPositions"}, indent=2))
+
+        reference_path = REFERENCES_DIR / f"{args.spec.stem}_{name}.json"
+        if args.write_reference:
+            REFERENCES_DIR.mkdir(exist_ok=True)
+            with open(reference_path, "w") as f:
+                json.dump(result, f, indent=2)
+            print(f"Reference written to {reference_path.relative_to(REPO_ROOT)}")
+        elif args.check:
+            ok = check_against_reference(result, reference_path) and ok
+        else:
+            RESULTS_DIR.mkdir(exist_ok=True)
+            out = RESULTS_DIR / f"{args.spec.stem}_{name}.json"
+            with open(out, "w") as f:
+                json.dump(result, f, indent=2)
+            print(f"Result written to {out.relative_to(REPO_ROOT)}")
+
+    if len(results) == 2:
+        ok = compare_engines(results["ase"], results["pymatgen"]) and ok
+
+    if not ok:
         sys.exit(1)
-
-    result = run_ase(spec)
-    print(json.dumps({k: v for k, v in result.items() if k != "finalPositions"}, indent=2))
-
-    reference_path = REFERENCES_DIR / f"{args.spec.stem}_ase.json"
-    if args.write_reference:
-        REFERENCES_DIR.mkdir(exist_ok=True)
-        with open(reference_path, "w") as f:
-            json.dump(result, f, indent=2)
-        print(f"Reference written to {reference_path.relative_to(REPO_ROOT)}")
-    elif args.check:
-        if not check_against_reference(result, reference_path):
-            sys.exit(1)
-    else:
-        RESULTS_DIR.mkdir(exist_ok=True)
-        out = RESULTS_DIR / f"{args.spec.stem}_ase.json"
-        with open(out, "w") as f:
-            json.dump(result, f, indent=2)
-        print(f"Result written to {out.relative_to(REPO_ROOT)}")
 
 
 if __name__ == "__main__":

@@ -27,12 +27,29 @@ no licenses, no sensitive data.
 # one-off run (writes to results/)
 pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/h2o_molecule.json
 
-# store the result as the canonical reference
-pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/h2o_molecule.json --write-reference
+# choose the engine: ase (default), pymatgen, or both
+pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/h2o_molecule.json --engine both
 
-# regression check against the stored reference (non-zero exit on drift)
-pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/h2o_molecule.json --check
+# store the result(s) as the canonical reference
+pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/h2o_molecule.json --engine both --write-reference
+
+# regression check against stored references (non-zero exit on drift)
+pixi run -e benchmark python Benchmark/run_benchmark.py Benchmark/structures/h2o_molecule.json --engine both --check
 ```
+
+With `--engine both` the runner also compares the engines against each other
+(energy and final positions must agree within tolerance).
+
+### How the two engines work
+
+- **ase** — builds `ase.Atoms` directly from the spec's `query.ase` block.
+- **pymatgen** — builds a pymatgen `Molecule`/`Structure` from `query.chemical`
+  (the `experiment.method` is mapped locally: `MPRelaxSet` → relax,
+  `MPStaticSet` → static), converts via `AseAtomsAdaptor`.
+
+Both execute with ASE's local EMT calculator, so agreement between them
+verifies that the two schema blocks describe the same physical system. The
+real VASP path behind the MP input sets comes with cluster integration.
 
 Comparisons use tolerances (energy `1e-6` eV, positions `1e-4` Å) because
 floating-point results vary slightly across platforms.
@@ -40,6 +57,6 @@ floating-point results vary slightly across platforms.
 ## Status / roadmap
 
 - [x] M1 — ASE engine path (EMT static/relax), reference store + check
-- [ ] M2 — Pymatgen engine path for the same specs
-- [ ] M3 — Engine-vs-engine comparison report; ExecutionLog-compatible output
+- [x] M2 — Pymatgen engine path + cross-engine agreement check
+- [ ] M3 — ExecutionLog-compatible output; richer comparison report
 - [ ] M4 — Remaining sample structures + results write-up
