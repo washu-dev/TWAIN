@@ -1,0 +1,27 @@
+{
+  "selected_method": {
+      "tool_name": "VASP"
+  },
+  "compute_estimate": {
+      "cpu_hours": 160.0
+  },
+  "slurm_request": {
+      "cpu_count": 8,
+      "gpu_count": 1,
+      "max_time": 24.0,
+      "ram": 16
+  },
+  "cost_estimate": {
+      "min_tokens": 1500,
+      "min_cost": 12.50
+  },
+  "metadata": {
+      "timestamp": "2026-06-15T12:00:00Z",
+      "goal_id": "Depends on Tim's Implementation",
+      "candidate_rank": 1
+  },
+  "acceptance_metrics": [
+      {"metric_name": "energy", "target_value": -5.2, "tolerance": 0.1}
+  ],
+  "safety_notes": ["Verify SLURM partition limits before submission"]
+}

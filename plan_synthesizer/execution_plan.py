@@ -1,0 +1,160 @@
+from dataclasses import dataclass, field
+from typing import List, Union
+
+
+@dataclass
+class SelectedMethod:
+    tool_name: str
+    def __post_init__(self):
+        if self.tool_name is None or type(self.tool_name) is not str:
+            raise ValueError("SelectedMethod tool_name must be of type str")
+
+
+@dataclass
+class ComputeEstimate:
+    cpu_hours: float
+    def __post_init__(self):
+        if self.cpu_hours is None or type(self.cpu_hours) not in (int, float):
+            raise ValueError("ComputeEstimate cpu_hours must be of type number")
+
+
+@dataclass
+class SlurmRequest:
+    cpu_count: int
+    gpu_count: int
+    max_time: float
+    ram: int
+    def __post_init__(self):
+        if self.cpu_count is None or type(self.cpu_count) is not int:
+            raise ValueError("SlurmRequest cpu_count must be of type int")
+        if self.gpu_count is None or type(self.gpu_count) is not int:
+            raise ValueError("SlurmRequest gpu_count must be of type int")
+        if self.max_time is None or type(self.max_time) not in (int, float):
+            raise ValueError("SlurmRequest max_time must be of type number")
+        if self.ram is None or type(self.ram) is not int:
+            raise ValueError("SlurmRequest ram must be of type int")
+
+
+@dataclass
+class CostEstimate:
+    min_tokens: int
+    min_cost: float
+    def __post_init__(self):
+        if self.min_tokens is None or type(self.min_tokens) is not int:
+            raise ValueError("CostEstimate min_tokens must be of type int")
+        if self.min_cost is None or type(self.min_cost) not in (int, float):
+            raise ValueError("CostEstimate min_cost must be of type number (USD)")
+
+
+@dataclass
+class ExecutionPlanMetadata:
+    timestamp: str
+    goal_id: str
+    candidate_rank: int
+    def __post_init__(self):
+        if self.timestamp is None or type(self.timestamp) is not str:
+            raise ValueError("ExecutionPlanMetadata timestamp must be of type str (date-time)")
+        if self.goal_id is None or type(self.goal_id) is not str:
+            raise ValueError("ExecutionPlanMetadata goal_id must be of type str")
+        if self.candidate_rank is None or type(self.candidate_rank) is not int:
+            raise ValueError("ExecutionPlanMetadata candidate_rank must be of type int")
+
+
+@dataclass
+class AcceptanceMetric:
+    metric_name: str
+    target_value: float
+    tolerance: float
+    def __post_init__(self):
+        if self.metric_name is None or type(self.metric_name) is not str:
+            raise ValueError("AcceptanceMetric metric_name must be of type str")
+        if self.target_value is None or type(self.target_value) not in (int, float):
+            raise ValueError("AcceptanceMetric target_value must be of type number")
+        if self.tolerance is None or type(self.tolerance) not in (int, float):
+            raise ValueError("AcceptanceMetric tolerance must be of type number")
+
+
+@dataclass
+class ExecutionPlan:
+    selected_method: Union[SelectedMethod, dict]
+    compute_estimate: Union[ComputeEstimate, dict]
+    slurm_request: Union[SlurmRequest, dict]
+    cost_estimate: Union[CostEstimate, dict]
+    metadata: Union[ExecutionPlanMetadata, dict]
+    acceptance_metrics: List[Union[AcceptanceMetric, dict]] = field(default_factory=list)
+    safety_notes: List[str] = field(default_factory=list)
+    def __post_init__(self):
+        if type(self.selected_method) is dict:
+            self.selected_method = SelectedMethod(**self.selected_method)
+        elif type(self.selected_method) is not SelectedMethod:
+            raise ValueError("selected_method must be of type dict or SelectedMethod")
+
+        if type(self.compute_estimate) is dict:
+            self.compute_estimate = ComputeEstimate(**self.compute_estimate)
+        elif type(self.compute_estimate) is not ComputeEstimate:
+            raise ValueError("compute_estimate must be of type dict or ComputeEstimate")
+
+        if type(self.slurm_request) is dict:
+            self.slurm_request = SlurmRequest(**self.slurm_request)
+        elif type(self.slurm_request) is not SlurmRequest:
+            raise ValueError("slurm_request must be of type dict or SlurmRequest")
+
+        if type(self.cost_estimate) is dict:
+            self.cost_estimate = CostEstimate(**self.cost_estimate)
+        elif type(self.cost_estimate) is not CostEstimate:
+            raise ValueError("cost_estimate must be of type dict or CostEstimate")
+
+        if type(self.metadata) is dict:
+            self.metadata = ExecutionPlanMetadata(**self.metadata)
+        elif type(self.metadata) is not ExecutionPlanMetadata:
+            raise ValueError("metadata must be of type dict or ExecutionPlanMetadata")
+
+        validated_acceptance_metrics = []
+        for metric in self.acceptance_metrics:
+            if type(metric) is dict:
+                validated_acceptance_metrics.append(AcceptanceMetric(**metric))
+            elif type(metric) is AcceptanceMetric:
+                validated_acceptance_metrics.append(metric)
+            else:
+                raise ValueError("acceptance_metrics items must be of type dict or AcceptanceMetric")
+        self.acceptance_metrics = validated_acceptance_metrics
+
+        if type(self.safety_notes) is not list or any(type(note) is not str for note in self.safety_notes):
+            raise ValueError("safety_notes must be a list of str")
+
+
+if __name__ == "__main__":
+    raw_json_data = {
+        "selected_method": {
+            "tool_name": "VASP"
+        },
+        "compute_estimate": {
+            "cpu_hours": 128.0
+        },
+        "slurm_request": {
+            "cpu_count": 32,
+            "gpu_count": 4,
+            "max_time": 24.0,
+            "ram": 64
+        },
+        "cost_estimate": {
+            "min_tokens": 1500,
+            "min_cost": 12.50
+        },
+        "metadata": {
+            "timestamp": "2026-06-15T12:00:00Z",
+            "goal_id": "goal-001",
+            "candidate_rank": 1
+        },
+        "acceptance_metrics": [
+            {"metric_name": "energy", "target_value": -5.2, "tolerance": 0.1}
+        ],
+        "safety_notes": ["Verify SLURM partition limits before submission"]
+    }
+
+    # The __post_init__ automatically hydrates the nested structures
+    plan = ExecutionPlan(**raw_json_data)
+
+    # Downstream modules can now use clean object dot-notation:
+    print(plan.selected_method.tool_name)  # Output: VASP
+    print(type(plan))  # Output: <class '__main__.ExecutionPlan'>

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "IntentSchema",
+  "type": "object",
+  "required": [],
+  "properties": {
+    "selected_method": {
+      "type": "object",
+      "properties": {
+        "tool_name": {
+          "type": "string"
+        }
+      }
+    },
+    "compute_estimate": {
+      "type": "object",
+      "properties": {
+        "cpu_hours": {
+          "type": "number"
+        }
+      }
+    },
+    "slurm_request": {
+      "type": "object",
+      "properties": {
+        "cpu_count": {
+          "type":"integer"
+        },
+        "gpu_count": {
+          "type":"integer"
+        },
+        "max_time": {
+          "type": "number"
+        },
+        "ram": {
+          "type": "integer"
+        }
+      }
+    },
+    "cost_estimate": {
+      "type": "object",
+      "min_tokens": {
+        "type": "integer"
+      },
+      "min_cost": {
+        "description": "USD",
+        "type": "number"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "timestamp":{
+          "type": "string",
+          "format": "date-time"
+        },
+        "goal_id": {
+          "type": "string"
+        },
+        "candidate_rank": {
+          "type": "integer"
+        }
+      }
+    },
+    "acceptance_metrics": {
+      "type":"array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric_name": {
+            "type": "string"
+          },
+          "target_value": {
+            "type":"number"
+          },
+          "tolerance":{
+            "type":"number"
+          }
+        }
+      }
+    },
+    "safety_notes": {
+      "type":"array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
