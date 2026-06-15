@@ -8,7 +8,7 @@
       "SMILES": "CC(=O)O"
     }
   },
-  "acceptance_metrics": [
+  "acceptance_criteria": [
     {
       "metric_name": "Metric1",
       "target_value": 1,
@@ -21,8 +21,11 @@
     }
   ],
   "metadata": {
-    "objective_confidence": 1,
-    "domain_confidence": 0.99,
-    "SMILES_confidence": 0.2
+    "confidence_scores": {
+      "objective_confidence": 1,
+      "domain_confidence": 0.99,
+      "SMILES_confidence": 0.2
+    },
+    "ambiguity": false
   }
 }

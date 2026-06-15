@@ -54,20 +54,38 @@
       "description": "[0,1] confidence levels",
       "type": "object",
       "properties": {
-        "objective_confidence": {
-          "type": "number"
+        "ambiguity": {
+          "type": "boolean"
         },
-        "domain_confidence": {
-          "type":"number"
-        },
-        "name_confidence": {
-          "type":"number"
-        },
-        "SMILES_confidence": {
-          "type": "number"
-        },
-        "formula_confidence": {
-          "type": "number"
+        "confidence_scores": {
+          "type": "object",
+          "properties": {
+            "objective_confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "domain_confidence": {
+              "type":"number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "name_confidence": {
+              "type":"number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "SMILES_confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "formula_confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
         }
       }
     }

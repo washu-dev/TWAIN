@@ -42,6 +42,9 @@ class IntentSpecMetadata:
     def __post_init__(self):
         if self.confidence_scores is None or type(self.confidence_scores) is not dict:
             raise ValueError("Confidence scores must be of type Dict")
+        for value in self.confidence_scores.values():
+            if(value < 0 or value > 1):
+                raise ValueError("Confidence scores must be between 0 and 1")
 
 
 @dataclass
@@ -59,7 +62,7 @@ class IntentSpec:
                 self.domain = Domain(self.domain)
             except ValueError:
                 raise ValueError(f"Invalid domain string. Viable options: {[d.value for d in Domain]}")
-        elif isinstance(self.domain, Domain):
+        elif not isinstance(self.domain, Domain):
             raise ValueError("Domain must be either a Domain enum or a string corresponding to the domain")
         if self.system_descriptors and type(self.system_descriptors) is dict:
             self.system_descriptors = SystemDescriptors(**self.system_descriptors)
@@ -69,36 +72,12 @@ class IntentSpec:
         for criterion in self.acceptance_criteria:
             if type(criterion) is dict:
                 validated_acceptance_criteria.append(AcceptanceCriterion(**criterion))
-            if type(criterion) is AcceptanceCriterion:
+            elif type(criterion) is AcceptanceCriterion:
                 validated_acceptance_criteria.append(criterion)
+            else:
+                raise ValueError("Invalid criterion type, must be a dict or AcceptanceCriterion object")
 
         self.acceptance_criteria = validated_acceptance_criteria
 
         if type(self.metadata) is dict:
             self.metadata = IntentSpecMetadata(**self.metadata)
-
-if __name__ == "__main__":
-    raw_json_data = {
-        "objective": "Minimize energy of amorphous silicon structure",
-        "metadata": {
-            "confidence_scores": {"objective": 0.95},
-            "ambiguity": False
-        },
-        "domain":"materials",
-        "system_descriptors": {
-            "molecule": {
-                "name": "graphite",
-                "SMILES":"carbon 0.6667"
-            },
-            "formula":"MPRelaxSet"
-        },
-        "acceptance_criteria": [
-        ]
-    }
-
-    # The __post_init__ automatically hydates the nested structures
-    intent = IntentSpec(**raw_json_data)
-
-    # Downstream modules can now use clean object dot-notation:
-    print(intent.acceptance_criteria)  # Output: temperature
-    print(type(intent))  # Output: <class '__main__.Constrain
