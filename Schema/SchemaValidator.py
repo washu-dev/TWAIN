@@ -32,4 +32,4 @@ class SchemaValidator:
 
 if __name__ == "__main__":
     schema = SchemaValidator()
-    schema.validate("test.json")
+    schema.validate('../Intelligence Layer/data.json')
