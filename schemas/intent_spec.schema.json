@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "IntentSchema",
+  "type": "object",
+  "required": ["objective"],
+  "properties": {
+    "objective": {
+      "type": "string"
+    },
+    "domain": {
+      "type":"string",
+      "enum": ["materials"]
+    },
+    "system_descriptors": {
+      "type": "object",
+      "properties": {
+        "molecule": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "SMILES": {},
+            "type": "string"
+          }
+        },
+        "formula": {
+          "description": "the NAME of the formula being applied",
+          "type": "string"
+        }
+      }
+    },
+    "acceptance_metrics": {
+      "type":"array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric_name": {
+            "type": "string"
+          },
+          "target_value": {
+            "type":"number"
+          },
+          "tolerance":{
+            "type":"number"
+          }
+        }
+      }
+    },
+    "metadata": {
+      "description": "[0,1] confidence levels",
+      "type": "object",
+      "properties": {
+        "objective_confidence": {
+          "type": "number"
+        },
+        "domain_confidence": {
+          "type":"number"
+        },
+        "name_confidence": {
+          "type":"number"
+        },
+        "SMILES_confidence": {
+          "type": "number"
+        },
+        "formula_confidence": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}
