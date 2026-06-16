@@ -10,14 +10,14 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "type", "description", "owner_agent"],
+        "required": ["id", "category", "purpose", "owner_agent"],
         "properties": {
           "id": {
             "type": "string",
             "description": "Unique identifier for the goal within this graph.",
             "minLength": 1
           },
-          "type": {
+          "category": {
             "type": "string",
             "description": "Goal category. Aligns with sub-goal classes called out in the architecture (model choice, data prep, compute plan, validation strategy).",
             "enum": [
@@ -30,7 +30,7 @@
               "review"
             ]
           },
-          "description": {
+          "purpose": {
             "type": "string",
             "description": "Human-readable description of the sub-goal.",
             "minLength": 1
@@ -52,7 +52,7 @@
       "description": "Directed edges expressing dependencies between goals.",
       "items": {
         "type": "object",
-        "required": ["source", "target", "type"],
+        "required": ["source", "target", "category"],
         "properties": {
           "source": {
             "type": "string",
@@ -64,14 +64,14 @@
             "description": "ID of the target goal (depends on source).",
             "minLength": 1
           },
-          "type": {
+          "category": {
             "type": "string",
             "description": "Edge semantics. seq = strict ordering; parallel = no ordering preference; conditional = guarded by a predicate.",
             "enum": ["seq", "parallel", "conditional"]
           },
           "condition": {
             "type": "string",
-            "description": "Predicate string when type is conditional; ignored otherwise."
+            "description": "Predicate string when category is conditional; ignored otherwise."
           }
         }
       }
