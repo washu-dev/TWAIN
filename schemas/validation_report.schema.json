@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ValidationReportSchema",
+  "type": "object",
+  "properties": {
+    "acceptance_status": {
+      "type": "string",
+      "enum": ["accepted","rejected","needs_review"]
+    },
+    "metadata": {
+      "ID": {
+        "type": "string"
+      },
+      "timestamp": {
+        "type": "string",
+        "format": "time"
+      }
+    }
+  }
+}
