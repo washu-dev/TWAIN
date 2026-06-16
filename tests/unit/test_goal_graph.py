@@ -6,7 +6,7 @@ Covers:
     and reference verification.
   * JSON Schema 2020-12 validation against the shipped example.
 
-Run from the repo root with:  python -m pytest tests/unit/test_goal_graph.py
+Run from the repo root with:  pixi run pytest tests/unit/test_goal_graph.py
 """
 import json
 from copy import deepcopy

@@ -5,7 +5,7 @@ SystemDescriptors, AcceptanceCriterion, IntentSpecMetadata): valid
 construction from the shipped example, type coercion of nested dicts,
 validation/rejection of bad input, and an asdict round-trip.
 
-Run from the repo root with:  python -m pytest tests/unit/test_intent_spec.py
+Run from the repo root with:  pixi run pytest tests/unit/test_intent_spec.py
 """
 import json
 from dataclasses import asdict
