@@ -24,6 +24,15 @@
                 "minimum": 0,
                 "maximum": 1
               }
+            },
+            "expected": {
+              "description": "expected is the average. Paired with the MSE used to calculate CI",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "mean_squared_error": {
+              "type": "number"
             }
           }
         },

@@ -3,6 +3,19 @@
   "$id": "ValidationReportSchema",
   "type": "object",
   "properties": {
+    "comparison": {
+      "literature_results": {
+        "type": "string"
+      },
+      "agreement": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "difference_analysis": {
+        "type": "string"
+      }
+    },
     "acceptance_status": {
       "type": "string",
       "enum": ["accepted","rejected","needs_review"]
