@@ -6,7 +6,6 @@
   "properties": {
     "goals": {
       "type": "array",
-      "description": "Sub-goals produced by the Goal Decomposer (03_goal_decomposer).",
       "minItems": 1,
       "items": {
         "type": "object",
@@ -14,12 +13,10 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Unique identifier for the goal within this graph.",
             "minLength": 1
           },
           "type": {
             "type": "string",
-            "description": "Goal category. Aligns with sub-goal classes called out in the architecture (model choice, data prep, compute plan, validation strategy).",
             "enum": [
               "discovery",
               "model_selection",
@@ -32,16 +29,13 @@
           },
           "description": {
             "type": "string",
-            "description": "Human-readable description of the sub-goal.",
             "minLength": 1
           },
           "owner_agent": {
-            "type": "string",
-            "description": "Identifier of the agent/module responsible for this goal (e.g. \"04_method_discovery\")."
+            "type": "string"
           },
           "acceptance_criteria": {
             "type": "array",
-            "description": "Free-text acceptance criteria for declaring this sub-goal complete.",
             "items": { "type": "string", "minLength": 1 }
           }
         }
@@ -49,29 +43,26 @@
     },
     "edges": {
       "type": "array",
-      "description": "Directed edges expressing dependencies between goals.",
       "items": {
         "type": "object",
         "required": ["source", "target", "type"],
         "properties": {
           "source": {
             "type": "string",
-            "description": "ID of the source goal (the prerequisite).",
             "minLength": 1
           },
           "target": {
             "type": "string",
-            "description": "ID of the target goal (depends on source).",
             "minLength": 1
           },
           "type": {
             "type": "string",
-            "description": "Edge semantics. seq = strict ordering; parallel = no ordering preference; conditional = guarded by a predicate.",
+            "description": "seq = strict ordering; parallel = no ordering preference; conditional = guarded by a predicate.",
             "enum": ["seq", "parallel", "conditional"]
           },
           "condition": {
             "type": "string",
-            "description": "Predicate string when type is conditional; ignored otherwise."
+            "description": "Predicate string; only meaningful when type is conditional."
           }
         }
       }
@@ -82,17 +73,14 @@
       "properties": {
         "created_at": {
           "type": "string",
-          "format": "date-time",
-          "description": "ISO-8601 timestamp at which the GoalGraph was produced."
+          "format": "date-time"
         },
         "source_intent_id": {
           "type": "string",
-          "description": "Identifier of the upstream IntentSpec this graph was decomposed from.",
           "minLength": 1
         },
         "rationale": {
-          "type": "string",
-          "description": "Brief explanation of why this decomposition was chosen."
+          "type": "string"
         }
       }
     }
