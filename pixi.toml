@@ -2,9 +2,13 @@
 authors = ["Tim Yang <manchestim@hotmail.com>"]
 channels = ["conda-forge"]
 name = "TWAIN"
-platforms = ["osx-arm64"]
+platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
+test = "pytest tests/"
 
 [dependencies]
+python = "3.12.*"
+jsonschema = "*"
+pytest = "*"
