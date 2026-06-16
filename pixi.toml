@@ -1,0 +1,10 @@
+[workspace]
+authors = ["Tim Yang <manchestim@hotmail.com>"]
+channels = ["conda-forge"]
+name = "TWAIN"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]

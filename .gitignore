@@ -20,3 +20,6 @@ env/
 
 # API Key
 .env
+# pixi environments
+.pixi/*
+!.pixi/config.toml
