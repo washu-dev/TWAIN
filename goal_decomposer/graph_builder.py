@@ -31,24 +31,24 @@ class EdgeType(str, Enum):
 @dataclass
 class Goal:
     id: str
-    type: Union[str, GoalType]
-    description: str
+    category: Union[str, GoalType]
+    purpose: str
     owner_agent: str
     acceptance_criteria: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.id or type(self.id) is not str:
             raise ValueError("Goal id must be a non-empty str")
-        if type(self.type) is str:
+        if type(self.category) is str:
             try:
-                self.type = GoalType(self.type)
+                self.category = GoalType(self.category)
             except ValueError:
                 raise ValueError(
                     f"Invalid goal type. Viable options: {[t.value for t in GoalType]}"
                 )
-        elif not isinstance(self.type, GoalType):
+        elif not isinstance(self.category, GoalType):
             raise ValueError("Goal type must be a GoalType enum or matching string")
-        if not self.description or type(self.description) is not str:
+        if not self.purpose or type(self.purpose) is not str:
             raise ValueError("Goal description must be a non-empty str")
         if not self.owner_agent or type(self.owner_agent) is not str:
             raise ValueError("Goal owner_agent must be a non-empty str")
@@ -62,7 +62,7 @@ class Goal:
 class Edge:
     source: str
     target: str
-    type: Union[str, EdgeType]
+    category: Union[str, EdgeType]
     condition: Optional[str] = None
 
     def __post_init__(self):
@@ -72,14 +72,14 @@ class Edge:
             raise ValueError("Edge target must be a non-empty str")
         if self.source == self.target:
             raise ValueError(f"Self-loop edge is not allowed (id={self.source!r})")
-        if type(self.type) is str:
+        if type(self.category) is str:
             try:
-                self.type = EdgeType(self.type)
+                self.category = EdgeType(self.category)
             except ValueError:
                 raise ValueError(
                     f"Invalid edge type. Viable options: {[t.value for t in EdgeType]}"
                 )
-        elif not isinstance(self.type, EdgeType):
+        elif not isinstance(self.category, EdgeType):
             raise ValueError("Edge type must be an EdgeType enum or matching string")
         if self.condition is not None and type(self.condition) is not str:
             raise ValueError("Edge condition must be a str when provided")

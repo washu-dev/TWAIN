@@ -47,13 +47,13 @@ def _minimal_graph_dict():
     """A tiny valid graph: a -> b -> c."""
     return {
         "goals": [
-            {"id": "a", "type": "discovery", "description": "A", "owner_agent": "01"},
-            {"id": "b", "type": "execution", "description": "B", "owner_agent": "08"},
-            {"id": "c", "type": "validation", "description": "C", "owner_agent": "11"},
+            {"id": "a", "category": "discovery", "purpose": "A", "owner_agent": "01"},
+            {"id": "b", "category": "execution", "purpose": "B", "owner_agent": "08"},
+            {"id": "c", "category": "validation", "purpose": "C", "owner_agent": "11"},
         ],
         "edges": [
-            {"source": "a", "target": "b", "type": "seq"},
-            {"source": "b", "target": "c", "type": "seq"},
+            {"source": "a", "target": "b", "category": "seq"},
+            {"source": "b", "target": "c", "category": "seq"},
         ],
         "metadata": {
             "created_at": "2026-06-16T12:00:00Z",
@@ -66,32 +66,32 @@ def _minimal_graph_dict():
 # Goal
 # --------------------------------------------------------------------------- #
 class TestGoal:
-    def test_valid_coerces_type_string(self):
-        g = Goal(id="g1", type="discovery", description="d", owner_agent="04")
-        assert g.type is GoalType.DISCOVERY
+    def test_valid_coerces_category_string(self):
+        g = Goal(id="g1", category="discovery", purpose="d", owner_agent="04")
+        assert g.category is GoalType.DISCOVERY
 
     def test_accepts_enum_directly(self):
-        g = Goal(id="g1", type=GoalType.VALIDATION, description="d", owner_agent="11")
-        assert g.type is GoalType.VALIDATION
+        g = Goal(id="g1", category=GoalType.VALIDATION, purpose="d", owner_agent="11")
+        assert g.category is GoalType.VALIDATION
 
     def test_empty_id_rejected(self):
         with pytest.raises(ValueError):
-            Goal(id="", type="discovery", description="d", owner_agent="04")
+            Goal(id="", category="discovery", purpose="d", owner_agent="04")
 
-    def test_invalid_type_rejected(self):
+    def test_invalid_category_rejected(self):
         with pytest.raises(ValueError):
-            Goal(id="g1", type="not-a-type", description="d", owner_agent="04")
+            Goal(id="g1", category="not-a-category", purpose="d", owner_agent="04")
 
-    def test_empty_description_rejected(self):
+    def test_empty_purpose_rejected(self):
         with pytest.raises(ValueError):
-            Goal(id="g1", type="discovery", description="", owner_agent="04")
+            Goal(id="g1", category="discovery", purpose="", owner_agent="04")
 
     def test_non_string_acceptance_criterion_rejected(self):
         with pytest.raises(ValueError):
             Goal(
                 id="g1",
-                type="discovery",
-                description="d",
+                category="discovery",
+                purpose="d",
                 owner_agent="04",
                 acceptance_criteria=["ok", 5],
             )
@@ -102,26 +102,26 @@ class TestGoal:
 # --------------------------------------------------------------------------- #
 class TestEdge:
     def test_valid(self):
-        e = Edge(source="a", target="b", type="seq")
-        assert e.type is EdgeType.SEQ
+        e = Edge(source="a", target="b", category="seq")
+        assert e.category is EdgeType.SEQ
         assert e.condition is None
 
     def test_conditional_keeps_condition(self):
-        e = Edge(source="a", target="b", type="conditional", condition="x > 0")
-        assert e.type is EdgeType.CONDITIONAL
+        e = Edge(source="a", target="b", category="conditional", condition="x > 0")
+        assert e.category is EdgeType.CONDITIONAL
         assert e.condition == "x > 0"
 
     def test_self_loop_rejected(self):
         with pytest.raises(ValueError):
-            Edge(source="a", target="a", type="seq")
+            Edge(source="a", target="a", category="seq")
 
-    def test_invalid_type_rejected(self):
+    def test_invalid_category_rejected(self):
         with pytest.raises(ValueError):
-            Edge(source="a", target="b", type="not-a-type")
+            Edge(source="a", target="b", category="not-a-category")
 
     def test_empty_endpoint_rejected(self):
         with pytest.raises(ValueError):
-            Edge(source="", target="b", type="seq")
+            Edge(source="", target="b", category="seq")
 
 
 # --------------------------------------------------------------------------- #
@@ -159,7 +159,7 @@ class TestGoalGraph:
     def test_duplicate_goal_ids_rejected(self):
         d = _minimal_graph_dict()
         d["goals"].append(
-            {"id": "a", "type": "analysis", "description": "dup", "owner_agent": "10"}
+            {"id": "a", "category": "analysis", "purpose": "dup", "owner_agent": "10"}
         )
         with pytest.raises(ValueError, match="Duplicate goal id"):
             GoalGraph(**d)
@@ -175,7 +175,7 @@ class TestGraphBuilder:
 
     def test_verify_references_rejects_dangling_target(self):
         d = _minimal_graph_dict()
-        d["edges"].append({"source": "c", "target": "missing", "type": "seq"})
+        d["edges"].append({"source": "c", "target": "missing", "category": "seq"})
         g = GoalGraph(**d)
         with pytest.raises(ValueError, match="not a known goal id"):
             GraphBuilder.verify_edge_references(g)
@@ -208,7 +208,7 @@ class TestGraphBuilder:
 
     def test_cycle_is_detected(self):
         d = _minimal_graph_dict()
-        d["edges"].append({"source": "c", "target": "a", "type": "seq"})
+        d["edges"].append({"source": "c", "target": "a", "category": "seq"})
         g = GoalGraph(**d)
         assert GraphBuilder.has_cycle(g) is True
         with pytest.raises(ValueError, match="not a DAG"):
@@ -234,9 +234,9 @@ class TestSchema:
     def test_example_validates_against_schema(self, schema_dict, example_dict):
         Draft202012Validator(schema_dict).validate(example_dict)
 
-    def test_invalid_edge_type_fails_schema(self, schema_dict, example_dict):
+    def test_invalid_edge_category_fails_schema(self, schema_dict, example_dict):
         bad = deepcopy(example_dict)
-        bad["edges"][0]["type"] = "not-a-type"
+        bad["edges"][0]["category"] = "not-a-category"
         with pytest.raises(Exception):
             Draft202012Validator(schema_dict).validate(bad)
 

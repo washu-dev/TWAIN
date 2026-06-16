@@ -58,15 +58,15 @@ class OutputLog:
 
 @dataclass
 class ResourceUsage:
-    total_cost: Optional[float] = None
-    tokens_used: Optional[int] = None
-    token_cost: Optional[float] = None
-    cpu_hours: Optional[float] = None
-    gpu_hours: Optional[float] = None
-    slurm_cost: Optional[float] = None
-    total_time: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
+    total_cost: float
+    tokens_used: int
+    token_cost: float
+    cpu_hours: float
+    gpu_hours: float
+    slurm_cost: float
+    total_time: str
+    start_time: str
+    end_time: str
 
     def __post_init__(self):
         for name in ("total_cost", "token_cost", "cpu_hours", "gpu_hours", "slurm_cost"):
@@ -95,9 +95,9 @@ class ToolUsed:
 
 @dataclass
 class Metadata:
-    timestamp: Optional[str] = None
-    ID: Optional[str] = None
-    tools_used: Optional[List[Union[ToolUsed, Dict]]] = None
+    timestamp: str
+    id: str
+    tools_used: List[Union[ToolUsed, Dict]]
 
     def __post_init__(self):
         if self.timestamp is not None and not isinstance(self.timestamp, str):

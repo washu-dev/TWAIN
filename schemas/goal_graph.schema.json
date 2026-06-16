@@ -9,13 +9,13 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["id", "type", "description", "owner_agent"],
+        "required": ["id", "category", "purpose", "owner_agent"],
         "properties": {
           "id": {
             "type": "string",
             "minLength": 1
           },
-          "type": {
+          "category": {
             "type": "string",
             "enum": [
               "discovery",
@@ -27,7 +27,7 @@
               "review"
             ]
           },
-          "description": {
+          "purpose": {
             "type": "string",
             "minLength": 1
           },
@@ -45,7 +45,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["source", "target", "type"],
+        "required": ["source", "target", "category"],
         "properties": {
           "source": {
             "type": "string",
@@ -55,14 +55,14 @@
             "type": "string",
             "minLength": 1
           },
-          "type": {
+          "category": {
             "type": "string",
             "description": "seq = strict ordering; parallel = no ordering preference; conditional = guarded by a predicate.",
             "enum": ["seq", "parallel", "conditional"]
           },
           "condition": {
             "type": "string",
-            "description": "Predicate string; only meaningful when type is conditional."
+            "description": "Predicate string; only meaningful when category is conditional."
           }
         }
       }
