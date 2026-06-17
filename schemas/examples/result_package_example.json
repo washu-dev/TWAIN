@@ -1,0 +1,35 @@
+{
+  "result": {
+    "experiment_name": "aspirin_solubility_run",
+    "conclusion": "Predicted aqueous solubility within target tolerance.",
+    "certainty": {
+      "confidence_interval": [0.82, 0.91],
+      "expected": 0.87,
+      "mean_squared_error": 0.013
+    },
+    "exit_code": 0
+  },
+  "output": [
+    {"name": "solubility_predictions", "path_to_file": "/runs/001/predictions.csv"},
+    {"name": "training_log", "path_to_file": "/runs/001/train.log"}
+  ],
+  "resource_usage": {
+    "total_cost": 4.75,
+    "tokens_used": 12000,
+    "token_cost": 0.36,
+    "cpu_hours": 6.5,
+    "gpu_hours": 1.25,
+    "slurm_cost": 4.39,
+    "total_time": "02:30:00",
+    "start_time": "12:00:00",
+    "end_time": "14:30:00"
+  },
+  "metadata": {
+    "timestamp": "14:30:05",
+    "ID": "result-001",
+    "tools_used": [
+      {"name": "scikit-learn", "version": 1.5},
+      {"name": "rdkit", "version": 2024.3}
+    ]
+  }
+}

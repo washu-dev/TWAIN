@@ -1,0 +1,12 @@
+{
+  "comparison": {
+    "literature_results": "Delaney (2004) reported aqueous solubility within 0.05 logS.",
+    "agreement": 0.93,
+    "difference_analysis": "Predicted value is 0.02 logS below the literature mean, within reported error."
+  },
+  "acceptance_status": "accepted",
+  "metadata": {
+    "ID": "validation-001",
+    "timestamp": "14:31:00"
+  }
+}

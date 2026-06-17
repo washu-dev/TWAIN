@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "IntentSchema",
+  "$id": "IntentSpecSchema",
   "type": "object",
   "required": ["objective","domain","system_descriptors","metadata"],
   "properties": {
