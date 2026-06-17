@@ -9,7 +9,7 @@
     },
     "domain": {
       "type":"string",
-      "enum": ["materials"]
+      "enum": ["materials", "quantum"]
     },
     "system_descriptors": {
       "type": "object",
@@ -22,8 +22,9 @@
             "name": {
               "type": "string"
             },
-            "SMILES": {},
-            "type": "string"
+            "SMILES": {
+              "type": "string"
+            }
           }
         },
         "formula": {
