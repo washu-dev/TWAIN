@@ -12,3 +12,10 @@ test = "pytest tests/"
 python = "3.12.*"
 jsonschema = "*"
 pytest = "*"
+
+# Per-workstream features: branches add their own dependencies here as needed,
+# e.g. [feature.sim.dependencies] ase/pymatgen for Benchmark,
+# [feature.workflows.dependencies] quacc/jobflow for WorkflowManagers.
+
+[environments]
+default = []
