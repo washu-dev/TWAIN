@@ -150,7 +150,7 @@ class TestMetadata:
 class TestResultPackage:
     def test_builds_from_example(self, example_dict):
         pkg = ResultPackage(**example_dict)
-        assert pkg.result.experiment_name == "aspirin_solubility_run"
+        assert pkg.result.experiment_name == "aspirin_solubility"
 
     def test_nested_types_are_coerced(self, example_dict):
         pkg = ResultPackage(**example_dict)
@@ -163,9 +163,9 @@ class TestResultPackage:
     def test_metric_extraction(self, example_dict):
         """The primary metric and uncertainty can be read off programmatically."""
         pkg = ResultPackage(**example_dict)
-        assert pkg.result.certainty.expected == 0.87
-        assert pkg.result.certainty.confidence_interval == [0.82, 0.91]
-        assert pkg.result.certainty.mean_squared_error == 0.013
+        assert pkg.result.certainty.expected == 0.2
+        assert pkg.result.certainty.confidence_interval == [0.1, 0.3]
+        assert pkg.result.certainty.mean_squared_error == 0.05
         assert pkg.result.exit_code == 0
 
     def test_resource_usage_now_required(self, example_dict):

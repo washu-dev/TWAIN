@@ -102,7 +102,7 @@ class TestValidationReportMetadata:
 class TestValidationReport:
     def test_builds_from_example(self, example_dict):
         report = ValidationReport(**example_dict)
-        assert report.acceptance_status == "accepted"
+        assert report.acceptance_status == "rejected"
 
     def test_nested_types_are_coerced(self, example_dict):
         report = ValidationReport(**example_dict)

@@ -290,8 +290,22 @@ def _result_package():
             },
         },
         "output": [{"name": "run_log", "path_to_file": "/runs/aspirin-001/out.log"}],
-        "resource_usage": {"total_cost": 1.25, "cpu_hours": 0.5},
-        "metadata": {"ID": "result-aspirin-001", "timestamp": "2026-06-16T13:00:00Z"},
+        "resource_usage": {
+            "total_cost": 1.25,
+            "tokens_used": 1800,
+            "token_cost": 0.25,
+            "cpu_hours": 0.5,
+            "gpu_hours": 0.0,
+            "slurm_cost": 1.0,
+            "total_time": "00:30:00",
+            "start_time": "13:00:00",
+            "end_time": "13:30:00",
+        },
+        "metadata": {
+            "ID": "result-aspirin-001",
+            "timestamp": "13:30:00",
+            "tools_used": [{"name": "solubility_predictor", "version": 1.2}],
+        },
     }
 
 
