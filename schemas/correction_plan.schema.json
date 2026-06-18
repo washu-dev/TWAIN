@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "CorrectionPlanSchema",
+  "type": "object",
+  "required": ["diagnosis", "proposed_corrections", "fallback_strategy", "metadata"],
+  "properties": {
+    "diagnosis": {
+      "type": "string",
+      "minLength": 1
+    },
+    "proposed_corrections": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["modification_type", "target", "new_value", "rationale"],
+        "properties": {
+          "modification_type": {
+            "type": "string",
+            "enum": [
+              "relax_constraints",
+              "change_hyperparameters",
+              "switch_model",
+              "request_more_data"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "enum": ["input", "model", "param", "solver"]
+          },
+          "new_value": {
+            "description": "Concrete type depends on the target."
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "expected_gain": {
+      "type": "object",
+      "properties": {
+        "primary_metric_delta": {
+          "type": "number"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "rerun_budget": {
+      "type": "object",
+      "properties": {
+        "token_budget": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "iteration_allowance": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cost_ceiling": {
+          "type": "number",
+          "minimum": 0,
+          "description": "USD"
+        }
+      }
+    },
+    "fallback_strategy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["validation_report_id", "iteration_count"],
+      "properties": {
+        "validation_report_id": {
+          "type": "string"
+        },
+        "iteration_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ID": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

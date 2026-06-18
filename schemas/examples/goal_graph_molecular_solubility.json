@@ -1,0 +1,79 @@
+{
+  "goals": [
+    {
+      "id": "g1_discover_methods",
+      "category": "discovery",
+      "purpose": "Search internal registry and PyPI for solubility prediction tools.",
+      "owner_agent": "04_method_discovery",
+      "acceptance_criteria": [
+        "At least 3 candidate tools returned with license + maturity info"
+      ]
+    },
+    {
+      "id": "g2_select_model",
+      "category": "model_selection",
+      "purpose": "Pick the highest-ranked solubility predictor that satisfies policy constraints.",
+      "owner_agent": "05_plan_synthesis",
+      "acceptance_criteria": [
+        "Top candidate has permissive license",
+        "Reproducibility evidence > 0.5"
+      ]
+    },
+    {
+      "id": "g3_prepare_input",
+      "category": "data_preparation",
+      "purpose": "Normalize the input SMILES (e.g. CC(=O)Oc1ccccc1C(=O)O for aspirin) and load solvent parameters for water at 25 C.",
+      "owner_agent": "06_code_configuration_builder",
+      "acceptance_criteria": [
+        "SMILES parses without error",
+        "Solvent + temperature constraints attached to the run bundle"
+      ]
+    },
+    {
+      "id": "g4_run_prediction",
+      "category": "execution",
+      "purpose": "Run the selected solubility predictor on the prepared input locally.",
+      "owner_agent": "08_execution_adapter",
+      "acceptance_criteria": [
+        "Process exits 0",
+        "Primary output file is produced"
+      ]
+    },
+    {
+      "id": "g5_validate_vs_literature",
+      "category": "validation",
+      "purpose": "Compare predicted log-solubility against the literature baseline value for aspirin in water at 25 C.",
+      "owner_agent": "11_cross_validation",
+      "acceptance_criteria": [
+        "Absolute error vs. literature baseline within 15%"
+      ]
+    },
+    {
+      "id": "g6_researcher_review",
+      "category": "review",
+      "purpose": "Surface the validated result to the researcher for final approval.",
+      "owner_agent": "13_human_in_the_loop",
+      "acceptance_criteria": [
+        "Researcher records accept/reject decision"
+      ]
+    }
+  ],
+  "edges": [
+    { "source": "g1_discover_methods", "target": "g2_select_model",        "category": "seq" },
+    { "source": "g2_select_model",     "target": "g3_prepare_input",      "category": "parallel" },
+    { "source": "g2_select_model",     "target": "g4_run_prediction",     "category": "seq" },
+    { "source": "g3_prepare_input",    "target": "g4_run_prediction",     "category": "seq" },
+    { "source": "g4_run_prediction",   "target": "g5_validate_vs_literature", "category": "seq" },
+    {
+      "source": "g5_validate_vs_literature",
+      "target": "g6_researcher_review",
+      "category": "conditional",
+      "condition": "validation_status == 'accepted'"
+    }
+  ],
+  "metadata": {
+    "created_at": "2026-06-16T12:30:00Z",
+    "source_intent_id": "intent-solubility-aspirin-water-25C",
+    "rationale": "Linear discovery -> selection -> prep -> run -> validate -> review pipeline for the molecular-solubility pilot."
+  }
+}

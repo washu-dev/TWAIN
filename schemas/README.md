@@ -125,7 +125,7 @@ Additional branches for `physics`, `biophysics`, and `materials` are not yet def
 Any JSON Schema 2020-12 validator works. Example with [`ajv`](https://ajv.js.org/):
 
 ```bash
-npx ajv-cli validate -s Schema.json -d your-request.json --spec=draft2020
+npx ajv-cli validate -s schemas.json -d your-request.json --spec=draft2020
 ```
 
 Or in Python with [`jsonschema`](https://python-jsonschema.readthedocs.io/):
