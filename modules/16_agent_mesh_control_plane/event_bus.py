@@ -49,3 +49,6 @@ class EventBus:
         for handler in self.handlers.get(event.event_type, []):
             handler(event)
         return True
+    def __del__(self):
+        self.log.flush()
+        self.log.close()
