@@ -23,8 +23,8 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.ACCEPT, State.TERMINATE): lambda c: True,
     (State.REPLAN, State.PLAN): lambda c: True,
     (State.CORRECT, State.BUILD): lambda c: c.plan_approved,
-
 }
+
 
 class StateMachine:
     def __init__(self, data_path: str = ""):
