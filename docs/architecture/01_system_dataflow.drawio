@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" modified="2026-06-03" version="25.0" type="device">
+  <diagram id="system_dataflow" name="TWAIN Complete System Dataflow">
+    <mxGraphModel dx="1400" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="TWAIN Complete System Dataflow" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="50" y="10" width="1300" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- RESEARCHER INPUT -->
+        <mxCell id="researcher" value="🧪 Researcher&#10;Natural Language Request" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#01579b;strokeWidth=2;fontSize=11;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="50" y="60" width="120" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- PHASE 1: INTAKE & CLARIFICATION -->
+        <mxCell id="phase1" value="Phase 1: Intake & Clarification" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+          <mxGeometry x="190" y="40" width="200" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="intake" value="01_Intake_NLU&#10;Parse → IntentSpec" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="190" y="65" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="clarify" value="02_Clarification&#10;Q&amp;A → RefinedIntentSpec" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="295" y="65" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- PHASE 2: PLANNING -->
+        <mxCell id="phase2" value="Phase 2: Planning" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+          <mxGeometry x="400" y="40" width="200" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="decompose" value="03_Goal_Decomposer&#10;SubGoals → GoalGraph" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="400" y="65" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="discover" value="04_Method_Discovery&#10;Search → CandidateSet" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="505" y="65" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="plan" value="05_Plan_Synthesis&#10;Select → ExecutionPlan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="610" y="65" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- APPROVAL GATE 1 -->
+        <mxCell id="approve1" value="Plan&#10;Approval" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;fontSize=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="720" y="70" width="70" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- PHASE 3: CODE GENERATION & EXECUTION -->
+        <mxCell id="phase3" value="Phase 3: Code Gen & Execution" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+          <mxGeometry x="800" y="40" width="220" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="codegen" value="06_Code_Config_Builder&#10;Generate → RunBundle" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="800" y="65" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="policy" value="15_Policy_Safety&#10;Check & Approve" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="905" y="65" width="85" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="execute" value="08_Execution_Adapter&#10;Run Code (Local/HPC)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="1005" y="65" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- PHASE 4: VALIDATION & INTERPRETATION -->
+        <mxCell id="phase4" value="Phase 4: Validation & Interpretation" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+          <mxGeometry x="50" y="160" width="250" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="monitor" value="09_Observability_Monitor&#10;Capture → Logs/Metrics" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="50" y="185" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="interpret" value="10_Result_Interpreter&#10;Parse → ResultPackage" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="155" y="185" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="validate" value="11_Cross_Validation&#10;Compare → ValidationReport" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="260" y="185" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- PHASE 5: CORRECTION & REVIEW -->
+        <mxCell id="phase5" value="Phase 5: Correction & Final Review" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+          <mxGeometry x="370" y="160" width="250" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="correct" value="12_Self_Correction&#10;Diagnose &amp; Propose" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="370" y="185" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="decision" value="Accept or&#10;Rerun?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=1.5;fontSize=9;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="475" y="185" width="80" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="review" value="13_Human_In_Loop&#10;Final Review &amp; Approval" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;fontSize=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="580" y="185" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- PHASE 6: ARCHIVE & OUTPUT -->
+        <mxCell id="phase6" value="Phase 6: Archive & Output" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+          <mxGeometry x="700" y="160" width="200" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="provenance" value="14_Provenance_Memory&#10;Archive Run Record" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+          <mxGeometry x="700" y="185" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="output" value="✅ Final Artifacts&#10;(Code, Config, Results)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=2;fontSize=10;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="810" y="185" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ORCHESTRATOR & CONTROL PLANE (Side annotation) -->
+        <mxCell id="control_title" value="🔧 Cross-Cutting: Control Plane &amp; Governance" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=1;fontColor=#1565c0" vertex="1" parent="1">
+          <mxGeometry x="50" y="280" width="320" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cp" value="16_Agent_Mesh_Control_Plane&#10;• State Machine&#10;• Retry Logic&#10;• Timeouts&#10;• Budget Tracking" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor:#1565c0;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="50" y="305" width="155" height="75" as="geometry" />
+        </mxCell>
+
+        <mxCell id="prov" value="14_Provenance_Memory&#10;• Event Log&#10;• Immutable Record&#10;• Replay Enabled" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="230" y="305" width="155" height="75" as="geometry" />
+        </mxCell>
+
+        <mxCell id="policy2" value="15_Policy_Governance&#10;• License Checks&#10;• Budget Enforcement&#10;• Tool Allow-list" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="410" y="305" width="155" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- LEGEND -->
+        <mxCell id="legend_title" value="Legend" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="50" y="410" width="100" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg1" value="◼ Research Input" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#01579b;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="50" y="435" width="120" height="25" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg2" value="◼ Agent Module" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#4a148c;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="175" y="435" width="120" height="25" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg3" value="◼ Approval Gate" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="300" y="435" width="120" height="25" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg4" value="◼ Support/Output" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1;fontSize=9" vertex="1" parent="1">
+          <mxGeometry x="425" y="435" width="120" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- MAIN FLOW EDGES -->
+        <mxCell id="e1" edge="1" parent="1" source="researcher" target="intake">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" edge="1" parent="1" source="intake" target="clarify">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" edge="1" parent="1" source="clarify" target="decompose">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" edge="1" parent="1" source="decompose" target="discover">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" edge="1" parent="1" source="discover" target="plan">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" edge="1" parent="1" source="plan" target="approve1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" edge="1" parent="1" source="approve1" target="codegen">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" edge="1" parent="1" source="codegen" target="policy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" edge="1" parent="1" source="policy" target="execute">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Execution to Validation (flow down) -->
+        <mxCell id="e10" edge="1" parent="1" source="execute" target="monitor">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1050" y="130" as="sourcePoint" />
+            <mxPoint x="95" y="185" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e11" edge="1" parent="1" source="monitor" target="interpret">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e12" edge="1" parent="1" source="interpret" target="validate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e13" edge="1" parent="1" source="validate" target="correct">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e14" edge="1" parent="1" source="correct" target="decision">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Decision branches -->
+        <mxCell id="e15" edge="1" parent="1" source="decision" target="review" label="Accept">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="570" y="215" as="sourcePoint" />
+            <mxPoint x="630" y="215" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e16" edge="1" parent="1" source="decision" target="plan" label="Rerun">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="515" y="160" as="sourcePoint" />
+            <mxPoint x="640" y="130" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Final path -->
+        <mxCell id="e17" edge="1" parent="1" source="review" target="provenance">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e18" edge="1" parent="1" source="provenance" target="output">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
