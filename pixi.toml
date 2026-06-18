@@ -10,6 +10,7 @@ version = "0.1.0"
 [dependencies]
 python = "3.12.*"
 jsonschema = "*"
+pytest = ">=9.1.0,<10"
 
 # Per-workstream features: branches add their own dependencies here as needed,
 # e.g. [feature.sim.dependencies] ase/pymatgen for Benchmark,
