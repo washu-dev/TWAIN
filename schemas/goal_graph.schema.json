@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "GoalGraphSchema",
+  "type": "object",
+  "required": ["goals", "edges", "metadata"],
+  "properties": {
+    "goals": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "category", "purpose", "owner_agent"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "discovery",
+              "model_selection",
+              "data_preparation",
+              "execution",
+              "validation",
+              "analysis",
+              "review"
+            ]
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner_agent": {
+            "type": "string"
+          },
+          "acceptance_criteria": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "target", "category"],
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "type": "string",
+            "description": "seq = strict ordering; parallel = no ordering preference; conditional = guarded by a predicate.",
+            "enum": ["seq", "parallel", "conditional"]
+          },
+          "condition": {
+            "type": "string",
+            "description": "Predicate string; only meaningful when category is conditional."
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["created_at", "source_intent_id"],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source_intent_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rationale": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

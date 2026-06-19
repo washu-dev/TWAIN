@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ResultPackageSchema",
+  "type": "object",
+  "required": ["result","output","resource_usage","metadata"],
+  "properties": {
+    "result": {
+      "type": "object",
+      "required": ["experiment_name","conclusion","certainty","exit_code"],
+      "properties": {
+        "experiment_name": {
+          "type": "string"
+        },
+        "conclusion":{
+          "type": "string"
+        },
+        "certainty": {
+          "type":"object",
+          "required": ["confidence_interval","expected","mean_squared_error"],
+          "properties": {
+            "confidence_interval": {
+              "type":"array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "expected": {
+              "description": "expected is the average. Paired with the MSE used to calculate CI",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "mean_squared_error": {
+              "type": "number"
+            }
+          }
+        },
+        "exit_code": {
+          "type": "number"
+        }
+      }
+    },
+    "output": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name","path_to_file"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path_to_file": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "resource_usage": {
+      "type": "object",
+      "required": ["total_cost","tokens_used","token_cost","cpu_hours","gpu_hours","slurm_cost","total_time","start_time","end_time"],
+      "properties": {
+        "total_cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tokens_used": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "token_cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cpu_hours": {
+          "type":"number",
+          "minimum": 0
+        },
+        "gpu_hours": {
+          "type": "number",
+          "minimum": 0
+        },
+        "slurm_cost": {
+          "type":"number",
+          "minimum": 0
+        },
+        "total_time": {
+          "type": "string",
+          "format": "time"
+        },
+        "start_time": {
+          "type":"string",
+          "format": "time"
+        },
+        "end_time": {
+          "type": "string",
+          "format": "time"
+        }
+      }
+    },
+    "metadata": {
+      "type":"object",
+      "required": ["timestamp","ID","tools_used"],
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "time"
+        },
+        "ID": {
+          "type": "string"
+        },
+        "tools_used": {
+          "type":"array",
+          "items": {
+            "type": "object",
+            "required": ["name","version"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version":{
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

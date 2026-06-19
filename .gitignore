@@ -54,7 +54,7 @@ build/
 .pixi/*
 !.pixi/config.toml
 
-# ── Deployment ─────────────────────────────────────────────────────────────────
 _deploy.yaml
 app.yaml.bak
-
+# API Key
+.env

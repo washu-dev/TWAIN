@@ -1,0 +1,12 @@
+{
+  "comparison": {
+    "literature_results": "aspirin logS = -1.72 (Wang et al. 2009)",
+    "agreement": 0.6,
+    "difference_analysis": "Predicted -1.30 vs. literature -1.72; 0.42 above baseline, outside the 15% tolerance."
+  },
+  "acceptance_status": "rejected",
+  "metadata": {
+    "ID": "validation-aspirin-001",
+    "timestamp": "13:35:00"
+  }
+}

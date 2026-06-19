@@ -7,7 +7,7 @@ from jsonschema.exceptions import ValidationError, SchemaError
 
 class SchemaValidator:
     def __init__(self):
-        self.schemaPath = "Schema.json"
+        self.schemaPath = "schemas.json"
     def validate(self, jsonFile):
         try:
             with open(self.schemaPath, "r") as _schema:
@@ -15,7 +15,7 @@ class SchemaValidator:
             with open(jsonFile) as _jsonFile:
                 jsonData = json.load(_jsonFile)
             validate(instance=jsonData, schema=schemaData)
-            print("Validated Schema")
+            print("Validated schemas")
             return True
         except FileNotFoundError as e:
             print(f"Could not find file: Filename -- {e}")
