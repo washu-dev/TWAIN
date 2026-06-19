@@ -1,4 +1,4 @@
-name: App — Quality, Security & Deploy
+name: App Interface - Base for Browser and other devices
 
 on:
   push:
