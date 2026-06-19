@@ -4,7 +4,7 @@ import { Colors } from '@/constants/theme';
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
-  const colors = Colors[colorScheme ?? 'light'];
+  const colors = Colors[colorScheme === 'dark' ? 'dark' : 'light'];
 
   return (
     <Stack
