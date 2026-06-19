@@ -1,6 +1,7 @@
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
 from database import query_greetings
 
 app = FastAPI(title="TWAIN API", version="0.1.0")
@@ -53,4 +54,4 @@ async def get_greetings():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)  # noqa: S104

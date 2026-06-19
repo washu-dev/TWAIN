@@ -1,8 +1,9 @@
-import os
 import json
+import os
+
 import psycopg2
-from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from psycopg2.extras import RealDictCursor
 
 load_dotenv()
 
@@ -15,6 +16,7 @@ DB_USER = os.getenv("DB_USER", "postgres")
 def _get_secret_from_aws(secret_arn: str) -> str:
     import boto3
     from botocore.exceptions import ClientError
+
     client = boto3.client("secretsmanager", region_name=os.getenv("AWS_REGION", "us-east-1"))
     try:
         response = client.get_secret_value(SecretId=secret_arn)
@@ -24,7 +26,7 @@ def _get_secret_from_aws(secret_arn: str) -> str:
         except json.JSONDecodeError:
             return secret
     except ClientError as e:
-        raise Exception(f"Failed to retrieve secret from Secrets Manager: {e}")
+        raise Exception(f"Failed to retrieve secret from Secrets Manager: {e}") from e
 
 
 def _resolve_db_password() -> str:
@@ -37,14 +39,13 @@ def _resolve_db_password() -> str:
 
 def get_connection():
     """Create and return a database connection, resolving credentials on demand."""
-    conn = psycopg2.connect(
+    return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
         database=DB_NAME,
         user=DB_USER,
-        password=_resolve_db_password(),  # resolved here, not at import time
+        password=_resolve_db_password(),
     )
-    return conn
 
 
 def query_greetings():
@@ -57,4 +58,4 @@ def query_greetings():
         conn.close()
         return results
     except Exception as e:
-        raise Exception(f"Database query failed: {e}")
+        raise Exception(f"Database query failed: {e}") from e
