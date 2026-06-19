@@ -83,7 +83,7 @@ jobs:
       - name: Build Expo web app
         working-directory: app
         env:
-          REACT_APP_API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          EXPO_PUBLIC_API_BASE_URL: ${{ secrets.API_BASE_URL }}
         run: npx expo export --platform web
 
       - name: Configure AWS credentials

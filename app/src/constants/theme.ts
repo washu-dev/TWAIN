@@ -69,7 +69,7 @@ export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
 export const MaxContentWidth = 800;
 
 export const API_CONFIG = {
-  baseURL: process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000',
+  baseURL: process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:8000',
   timeout: 10000,
 };
 
