@@ -1,13 +1,13 @@
-const { defineConfig } = require('eslint/config');
+const { FlatCompat } = require('@eslint/eslintrc');
+const path = require('path');
 
-module.exports = defineConfig([
+const compat = new FlatCompat({ baseDirectory: __dirname });
+
+module.exports = [
+  ...compat.extends('expo'),
   {
-    files: ['src/**/*.{ts,tsx}'],
     rules: {
-      'no-unused-vars': 'warn',
       'no-console': ['warn', { allow: ['warn', 'error'] }],
-      'prefer-const': 'error',
-      'no-var': 'error',
     },
   },
-]);
+];

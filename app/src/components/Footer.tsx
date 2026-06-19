@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { APP_STRINGS, Spacing } from '@/constants/theme';
+import { Spacing } from '@/constants/theme';
 
 export const Footer: React.FC = () => {
   return (
