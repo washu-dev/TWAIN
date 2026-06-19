@@ -56,7 +56,8 @@ jobs:
           pytest test_api.py -v \
             --cov=. \
             --cov-report=term-missing \
-            --cov-fail-under=50
+            --cov-fail-under=50 \
+            --import-mode=importlib
 
   # ── Deploy to ECS (only on push/dispatch to master, not on PRs) ───────────
   deploy:
