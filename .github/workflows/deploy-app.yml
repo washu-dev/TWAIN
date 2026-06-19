@@ -1,0 +1,115 @@
+name: App — Quality, Security & Deploy
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'app/**'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'app/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  S3_BUCKET: twain-dev-1781888831
+  CLOUDFRONT_DISTRIBUTION_ID: E3PINHJ1G0F5PS
+  NODE_VERSION: '20'
+
+jobs:
+  # ── Quality & Security Checks ──────────────────────────────────────────────
+  quality:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: app
+        run: npx tsc --noEmit
+
+      - name: Lint — ESLint
+        working-directory: app
+        run: npx expo lint
+
+      - name: Vulnerability scan — npm audit
+        working-directory: app
+        run: npm audit --audit-level=high
+
+      - name: Dependency license check
+        working-directory: app
+        run: |
+          npx license-checker \
+            --onlyAllow 'MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;CC0-1.0;CC-BY-3.0;CC-BY-4.0;Python-2.0;Unlicense;0BSD' \
+            --excludePrivatePackages \
+            --summary || echo "License check complete — review any flagged packages above"
+
+  # ── Build & Deploy to S3/CloudFront (only on push/dispatch to master) ─────
+  deploy:
+    name: Deploy App → S3/CloudFront
+    runs-on: ubuntu-latest
+    needs: quality
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build Expo web app
+        working-directory: app
+        env:
+          REACT_APP_API_BASE_URL: ${{ secrets.API_BASE_URL }}
+        run: npx expo export --platform web
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        working-directory: app
+        run: |
+          # Long-cache static assets (JS, CSS, images)
+          aws s3 sync dist/ s3://${{ env.S3_BUCKET }}/ \
+            --delete \
+            --exclude "*.html" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          # No-cache HTML so users always get the latest shell
+          aws s3 sync dist/ s3://${{ env.S3_BUCKET }}/ \
+            --exclude "*" \
+            --include "*.html" \
+            --cache-control "no-cache, no-store, must-revalidate"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"

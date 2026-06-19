@@ -1,0 +1,141 @@
+name: API — Quality, Security & Deploy
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'api/**'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'api/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: twain-ecr
+  ECS_CLUSTER: twain-cluster
+  ECS_SERVICE: twain-api
+  ECS_TASK_DEFINITION: twain-api
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # ── Quality & Security Checks ──────────────────────────────────────────────
+  quality:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: api/requirements.txt
+
+      - name: Install dependencies
+        working-directory: api
+        run: |
+          pip install -r requirements.txt
+          pip install ruff bandit safety pytest-cov
+
+      - name: Lint — ruff
+        working-directory: api
+        run: ruff check . --output-format=github
+
+      - name: Security — bandit (static analysis)
+        working-directory: api
+        run: |
+          bandit -r . \
+            --exclude ./.venv,./tests,./test_*.py \
+            --severity-level medium \
+            --confidence-level medium \
+            -f json -o bandit-report.json || true
+          bandit -r . \
+            --exclude ./.venv,./tests,./test_*.py \
+            --severity-level medium \
+            --confidence-level medium
+
+      - name: Vulnerability scan — pip-audit
+        working-directory: api
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --format markdown
+
+      - name: Unit tests
+        working-directory: api
+        run: |
+          pytest test_api.py -v \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-fail-under=50
+
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-security-report
+          path: api/bandit-report.json
+          retention-days: 30
+
+  # ── Deploy to ECS (only on push/dispatch to master, not on PRs) ───────────
+  deploy:
+    name: Deploy API → ECS
+    runs-on: ubuntu-latest
+    needs: quality
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            ./api
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --query taskDefinition \
+            > api/task-definition.json
+
+      - name: Update ECS task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: api/task-definition.json
+          container-name: twain-api
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
