@@ -40,30 +40,15 @@ jobs:
         working-directory: api
         run: |
           pip install -r requirements.txt
-          pip install ruff bandit safety pytest-cov
+          pip install ruff pip-audit pytest-cov
 
-      - name: Lint — ruff
+      - name: Lint & security — ruff
         working-directory: api
         run: ruff check . --output-format=github
 
-      - name: Security — bandit (static analysis)
-        working-directory: api
-        run: |
-          bandit -r . \
-            --exclude ./.venv,./tests,./test_*.py \
-            --severity-level medium \
-            --confidence-level medium \
-            -f json -o bandit-report.json || true
-          bandit -r . \
-            --exclude ./.venv,./tests,./test_*.py \
-            --severity-level medium \
-            --confidence-level medium
-
       - name: Vulnerability scan — pip-audit
         working-directory: api
-        run: |
-          pip install pip-audit
-          pip-audit -r requirements.txt --format markdown
+        run: pip-audit -r requirements.txt --format markdown
 
       - name: Unit tests
         working-directory: api
@@ -72,14 +57,6 @@ jobs:
             --cov=. \
             --cov-report=term-missing \
             --cov-fail-under=50
-
-      - name: Upload bandit report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bandit-security-report
-          path: api/bandit-report.json
-          retention-days: 30
 
   # ── Deploy to ECS (only on push/dispatch to master, not on PRs) ───────────
   deploy:
