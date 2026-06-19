@@ -1,4 +1,4 @@
-name: API — Quality, Security & Deploy
+name: API Server - Build & Deploy
 
 on:
   push:
