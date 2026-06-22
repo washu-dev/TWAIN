@@ -5,9 +5,12 @@ from typing import List, Union
 @dataclass
 class SelectedMethod:
     tool_name: str
+    tool_version: float
     def __post_init__(self):
         if self.tool_name is None or type(self.tool_name) is not str:
             raise ValueError("SelectedMethod tool_name must be of type str")
+        if self.tool_version is None or type(self.tool_version) not in (int, float):
+            raise ValueError("SelectedMethod tool_version must be of type number")
 
 
 @dataclass
@@ -126,7 +129,8 @@ class ExecutionPlan:
 if __name__ == "__main__":
     raw_json_data = {
         "selected_method": {
-            "tool_name": "VASP"
+            "tool_name": "VASP",
+            "tool_version": 6.3
         },
         "compute_estimate": {
             "cpu_hours": 128.0

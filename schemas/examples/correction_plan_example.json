@@ -1,0 +1,33 @@
+{
+  "diagnosis": "Predicted log-solubility for aspirin was 0.42 above the literature baseline; the relaxation did not converge within the step cap.",
+  "proposed_corrections": [
+    {
+      "modification_type": "change_hyperparameters",
+      "target": "solver",
+      "new_value": { "fmax": 0.02, "maxSteps": 500 },
+      "rationale": "Tighten force convergence and allow more optimizer steps so the geometry fully relaxes."
+    },
+    {
+      "modification_type": "switch_model",
+      "target": "model",
+      "new_value": "next_best_solubility_predictor",
+      "rationale": "Fall back to the second-ranked predictor if tightening convergence does not close the gap."
+    }
+  ],
+  "expected_gain": {
+    "primary_metric_delta": 0.35,
+    "confidence": 0.6
+  },
+  "rerun_budget": {
+    "token_budget": 50000,
+    "iteration_allowance": 3,
+    "cost_ceiling": 5.0
+  },
+  "fallback_strategy": "Escalate to the researcher with the two best results and a summary of the remaining gap.",
+  "metadata": {
+    "validation_report_id": "validation-aspirin-001",
+    "iteration_count": 1,
+    "ID": "correction-aspirin-001",
+    "timestamp": "2026-06-16T13:30:00Z"
+  }
+}

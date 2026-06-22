@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ProvenanceEventSchema",
+  "type": "object",
+  "description": "Immutable, hash-chained entry in the append-only provenance event log.",
+  "required": [
+    "seq",
+    "event_id",
+    "event_type",
+    "timestamp",
+    "agent_id",
+    "inputs",
+    "outputs",
+    "input_hash",
+    "output_hash",
+    "decision_rationale",
+    "prev_hash",
+    "hash"
+  ],
+  "properties": {
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_type": {
+      "type": "string",
+      "enum": ["request", "plan", "execute", "validate", "correct", "approve"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "inputs": {
+      "type": "object"
+    },
+    "outputs": {
+      "type": "object"
+    },
+    "input_hash": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "description": "sha256 hex of the canonical inputs."
+    },
+    "output_hash": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "description": "sha256 hex of the canonical outputs."
+    },
+    "decision_rationale": {
+      "type": "string"
+    },
+    "prev_hash": {
+      "type": "string",
+      "description": "sha256 hex of the previous event, or empty string for the first event."
+    },
+    "hash": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "description": "sha256 hex of this event's canonical content (all fields except hash)."
+    }
+  }
+}

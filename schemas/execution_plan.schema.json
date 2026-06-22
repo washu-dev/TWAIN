@@ -1,19 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "IntentSchema",
+  "$id": "ExecutionPlanSchema",
   "type": "object",
-  "required": [],
+  "required": ["selected_method","compute_estimate","slurm_request","cost_estimate","metadata","acceptance_metrics","safety_notes"],
   "properties": {
     "selected_method": {
       "type": "object",
+      "required": ["tool_name","tool_version"],
       "properties": {
         "tool_name": {
           "type": "string"
+        },
+        "tool_version": {
+          "type": "number"
         }
       }
     },
     "compute_estimate": {
       "type": "object",
+      "required": ["cpu_hours"],
       "properties": {
         "cpu_hours": {
           "type": "number"
@@ -22,6 +27,7 @@
     },
     "slurm_request": {
       "type": "object",
+      "required": ["cpu_count","gpu_count","max_time","ram"],
       "properties": {
         "cpu_count": {
           "type":"integer"
@@ -39,16 +45,20 @@
     },
     "cost_estimate": {
       "type": "object",
-      "min_tokens": {
-        "type": "integer"
-      },
-      "min_cost": {
-        "description": "USD",
-        "type": "number"
+      "required": ["min_tokens","min_cost"],
+      "properties": {
+        "min_tokens": {
+          "type": "integer"
+        },
+        "min_cost": {
+          "description": "USD",
+          "type": "number"
+        }
       }
     },
     "metadata": {
       "type": "object",
+      "required": ["timestamp","goal_id","candidate_rank"],
       "properties": {
         "timestamp":{
           "type": "string",
@@ -66,6 +76,7 @@
       "type":"array",
       "items": {
         "type": "object",
+        "required": ["metric_name","target_value","tolerance"],
         "properties": {
           "metric_name": {
             "type": "string"

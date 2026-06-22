@@ -2,9 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ResultPackageSchema",
   "type": "object",
+  "required": ["result","output","resource_usage","metadata"],
   "properties": {
     "result": {
       "type": "object",
+      "required": ["experiment_name","conclusion","certainty","exit_code"],
       "properties": {
         "experiment_name": {
           "type": "string"
@@ -14,6 +16,7 @@
         },
         "certainty": {
           "type":"object",
+          "required": ["confidence_interval","expected","mean_squared_error"],
           "properties": {
             "confidence_interval": {
               "type":"array",
@@ -45,6 +48,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "required": ["name","path_to_file"],
         "properties": {
           "name": {
             "type": "string"
@@ -57,6 +61,7 @@
     },
     "resource_usage": {
       "type": "object",
+      "required": ["total_cost","tokens_used","token_cost","cpu_hours","gpu_hours","slurm_cost","total_time","start_time","end_time"],
       "properties": {
         "total_cost": {
           "type": "number",
@@ -98,6 +103,7 @@
     },
     "metadata": {
       "type":"object",
+      "required": ["timestamp","ID","tools_used"],
       "properties": {
         "timestamp": {
           "type": "string",
@@ -110,6 +116,7 @@
           "type":"array",
           "items": {
             "type": "object",
+            "required": ["name","version"],
             "properties": {
               "name": {
                 "type": "string"

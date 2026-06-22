@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "IntentSchema",
+  "$id": "IntentSpecSchema",
   "type": "object",
   "required": ["objective","domain","system_descriptors","metadata"],
   "properties": {
@@ -9,7 +9,7 @@
     },
     "domain": {
       "type":"string",
-      "enum": ["materials"]
+      "enum": ["materials", "quantum"]
     },
     "system_descriptors": {
       "type": "object",
@@ -22,8 +22,9 @@
             "name": {
               "type": "string"
             },
-            "SMILES": {},
-            "type": "string"
+            "SMILES": {
+              "type": "string"
+            }
           }
         },
         "formula": {

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Union
 
 Number = (int, float)
 
@@ -71,13 +71,13 @@ class ResourceUsage:
     def __post_init__(self):
         for name in ("total_cost", "token_cost", "cpu_hours", "gpu_hours", "slurm_cost"):
             value = getattr(self, name)
-            if value is not None and (not isinstance(value, Number) or isinstance(value, bool) or value < 0):
+            if value is None or not isinstance(value, Number) or isinstance(value, bool) or value < 0:
                 raise ValueError(f"{name} must be a non-negative number")
-        if self.tokens_used is not None and (not isinstance(self.tokens_used, int) or isinstance(self.tokens_used, bool) or self.tokens_used < 0):
+        if self.tokens_used is None or not isinstance(self.tokens_used, int) or isinstance(self.tokens_used, bool) or self.tokens_used < 0:
             raise ValueError("tokens_used must be a non-negative integer")
         for name in ("total_time", "start_time", "end_time"):
             value = getattr(self, name)
-            if value is not None and not isinstance(value, str):
+            if value is None or not isinstance(value, str):
                 raise ValueError(f"{name} must be a string")
 
 
@@ -96,34 +96,33 @@ class ToolUsed:
 @dataclass
 class Metadata:
     timestamp: str
-    id: str
+    ID: str
     tools_used: List[Union[ToolUsed, Dict]]
 
     def __post_init__(self):
-        if self.timestamp is not None and not isinstance(self.timestamp, str):
+        if self.timestamp is None or not isinstance(self.timestamp, str):
             raise ValueError("Timestamp must be a string")
-        if self.ID is not None and not isinstance(self.ID, str):
+        if self.ID is None or not isinstance(self.ID, str):
             raise ValueError("ID must be a string")
-        if self.tools_used is not None:
-            if not isinstance(self.tools_used, list):
+        if self.tools_used is None or not isinstance(self.tools_used, list):
+            raise ValueError("tools_used must be a list of ToolUsed objects or dicts")
+        validated_tools: List[ToolUsed] = []
+        for tool in self.tools_used:
+            if isinstance(tool, dict):
+                validated_tools.append(ToolUsed(**tool))
+            elif isinstance(tool, ToolUsed):
+                validated_tools.append(tool)
+            else:
                 raise ValueError("tools_used must be a list of ToolUsed objects or dicts")
-            validated_tools: List[ToolUsed] = []
-            for tool in self.tools_used:
-                if isinstance(tool, dict):
-                    validated_tools.append(ToolUsed(**tool))
-                elif isinstance(tool, ToolUsed):
-                    validated_tools.append(tool)
-                else:
-                    raise ValueError("tools_used must be a list of ToolUsed objects or dicts")
-            self.tools_used = validated_tools
+        self.tools_used = validated_tools
 
 
 @dataclass
 class ResultPackage:
     result: Union[Result, Dict]
     output: List[Union[OutputLog, Dict]]
-    resource_usage: Optional[Union[ResourceUsage, Dict]] = None
-    metadata: Optional[Union[Metadata, Dict]] = None
+    resource_usage: Union[ResourceUsage, Dict]
+    metadata: Union[Metadata, Dict]
 
     def __post_init__(self):
         if isinstance(self.result, dict):
@@ -145,10 +144,10 @@ class ResultPackage:
 
         if isinstance(self.resource_usage, dict):
             self.resource_usage = ResourceUsage(**self.resource_usage)
-        elif self.resource_usage is not None and not isinstance(self.resource_usage, ResourceUsage):
+        elif self.resource_usage is None or not isinstance(self.resource_usage, ResourceUsage):
             raise ValueError("Resource usage must be a ResourceUsage object or a Dict")
 
         if isinstance(self.metadata, dict):
             self.metadata = Metadata(**self.metadata)
-        elif self.metadata is not None and not isinstance(self.metadata, Metadata):
+        elif self.metadata is None or not isinstance(self.metadata, Metadata):
             raise ValueError("Metadata must be a Metadata object or a Dict")

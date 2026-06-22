@@ -2,18 +2,23 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ValidationReportSchema",
   "type": "object",
+  "required": ["comparison","acceptance_status","metadata"],
   "properties": {
     "comparison": {
-      "literature_results": {
-        "type": "string"
-      },
-      "agreement": {
-        "type": "number",
-        "minimum": 0,
-        "maximum": 1
-      },
-      "difference_analysis": {
-        "type": "string"
+      "type": "object",
+      "required": ["literature_results","agreement","difference_analysis"],
+      "properties": {
+        "literature_results": {
+          "type": "string"
+        },
+        "agreement": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "difference_analysis": {
+          "type": "string"
+        }
       }
     },
     "acceptance_status": {
@@ -21,12 +26,16 @@
       "enum": ["accepted","rejected","needs_review"]
     },
     "metadata": {
-      "ID": {
-        "type": "string"
-      },
-      "timestamp": {
-        "type": "string",
-        "format": "time"
+      "type": "object",
+      "required": ["ID","timestamp"],
+      "properties": {
+        "ID": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "time"
+        }
       }
     }
   }

@@ -1,6 +1,7 @@
 {
   "selected_method": {
-      "tool_name": "VASP"
+      "tool_name": "VASP",
+      "tool_version": 6.3
   },
   "compute_estimate": {
       "cpu_hours": 160.0

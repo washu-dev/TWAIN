@@ -1,26 +1,60 @@
-# JetBrains IDEs (PyCharm/IntelliJ)
-.idea/
+# ── Environment & Secrets ──────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*_credentials.json
+*_serviceaccount.json
+secrets/
+gcp-db-*.conf
 
-# macOS
+# ── macOS ──────────────────────────────────────────────────────────────────────
 .DS_Store
+.AppleDouble
+.LSOverride
 
-# Python
+# ── Claude Code ────────────────────────────────────────────────────────────────
+.claude/
+
+# ── IDEs ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+
+# ── Python ─────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
 env/
+dist/
+*.so
 
-# SQLite databases (generated at runtime by Job Monitoring)
+# ── Node / Expo ────────────────────────────────────────────────────────────────
+node_modules/
+.expo/
+dist/
+web-build/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Build artifacts ────────────────────────────────────────────────────────────
+build/
 *.db
+*.sqlite
 
-# pixi environments
+# ── Pixi ───────────────────────────────────────────────────────────────────────
 .pixi/*
 !.pixi/config.toml
 
+_deploy.yaml
+app.yaml.bak
 # API Key
 .env
-# pixi environments
-.pixi/*
-!.pixi/config.toml
