@@ -57,7 +57,7 @@ class Budget_Tracker:
     def add_project(self, Project):
         self.projectBudgets.append(Project)
     def set_budget(self,budget):
-        self.globalBudget = budget
+        self.globalBudget = budgetB
     def request_project(self, project):
         if(self.budget_exceeded()):
             raise OverBudget()
