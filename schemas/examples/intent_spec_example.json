@@ -1,0 +1,31 @@
+{
+  "objective": "Super cool and complex chemistry question here",
+  "domain": "quantum",
+  "system_descriptors": {
+    "formula": "Schrodinger's formula is probably something, right?",
+    "molecule": {
+      "name": "Graphite!",
+      "SMILES": "CC(=O)O"
+    }
+  },
+  "acceptance_criteria": [
+    {
+      "metric_name": "Metric1",
+      "target_value": 1,
+      "tolerance": 10
+    },
+    {
+      "metric_name": "Metric2",
+      "target_value": 10,
+      "tolerance": 0.0001
+    }
+  ],
+  "metadata": {
+    "confidence_scores": {
+      "objective_confidence": 1,
+      "domain_confidence": 0.99,
+      "SMILES_confidence": 0.2
+    },
+    "ambiguity": false
+  }
+}

@@ -1,0 +1,64 @@
+@import url('https://use.typekit.net/mav2zlt.css');
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --font-display: 'system-ui', -apple-system, 'Segoe UI', 'Roboto';
+  --font-serif: 'ui-serif', 'Georgia', serif;
+  --font-rounded: 'ui-rounded', 'system-ui';
+  --font-mono: 'ui-monospace', 'Menlo', monospace;
+
+  --color-washu-primary: #00205B;
+  --color-washu-secondary: #E6A10A;
+  --color-washu-accent: #C6007E;
+
+  color-scheme: light;
+}
+
+html,
+body {
+  font-family: var(--font-display);
+  background-color: #ffffff;
+  color: #000000;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: 700;
+}
+
+/* Accessibility */
+a {
+  color: var(--color-washu-secondary);
+  text-decoration: underline;
+}
+
+a:hover,
+a:focus {
+  color: var(--color-washu-primary);
+}
+
+button {
+  cursor: pointer;
+  border-radius: 6px;
+  border: none;
+  font-weight: 600;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--color-washu-secondary);
+  outline-offset: 2px;
+}

@@ -1,0 +1,15 @@
+.env
+.env.*
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.db
+*.log
+test_*.py
+Dockerfile
+.dockerignore
+README.md
+QUICKSTART.md
+task-definition.json

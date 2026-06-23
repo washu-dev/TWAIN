@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ExecutionPlanSchema",
+  "type": "object",
+  "required": ["selected_method","compute_estimate","slurm_request","cost_estimate","metadata","acceptance_metrics","safety_notes"],
+  "properties": {
+    "selected_method": {
+      "type": "object",
+      "required": ["tool_name","tool_version"],
+      "properties": {
+        "tool_name": {
+          "type": "string"
+        },
+        "tool_version": {
+          "type": "number"
+        }
+      }
+    },
+    "compute_estimate": {
+      "type": "object",
+      "required": ["cpu_hours"],
+      "properties": {
+        "cpu_hours": {
+          "type": "number"
+        }
+      }
+    },
+    "slurm_request": {
+      "type": "object",
+      "required": ["cpu_count","gpu_count","max_time","ram"],
+      "properties": {
+        "cpu_count": {
+          "type":"integer"
+        },
+        "gpu_count": {
+          "type":"integer"
+        },
+        "max_time": {
+          "type": "number"
+        },
+        "ram": {
+          "type": "integer"
+        }
+      }
+    },
+    "cost_estimate": {
+      "type": "object",
+      "required": ["min_tokens","min_cost"],
+      "properties": {
+        "min_tokens": {
+          "type": "integer"
+        },
+        "min_cost": {
+          "description": "USD",
+          "type": "number"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["timestamp","goal_id","candidate_rank"],
+      "properties": {
+        "timestamp":{
+          "type": "string",
+          "format": "date-time"
+        },
+        "goal_id": {
+          "type": "string"
+        },
+        "candidate_rank": {
+          "type": "integer"
+        }
+      }
+    },
+    "acceptance_metrics": {
+      "type":"array",
+      "items": {
+        "type": "object",
+        "required": ["metric_name","target_value","tolerance"],
+        "properties": {
+          "metric_name": {
+            "type": "string"
+          },
+          "target_value": {
+            "type":"number"
+          },
+          "tolerance":{
+            "type":"number"
+          }
+        }
+      }
+    },
+    "safety_notes": {
+      "type":"array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -6,10 +6,12 @@ platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 [tasks]
+test = "pytest tests/"
 
 [dependencies]
 python = "3.12.*"
 jsonschema = "*"
+pytest = "*"
 
 # Per-workstream features: branches add their own dependencies here as needed,
 # e.g. [feature.sim.dependencies] ase/pymatgen for Benchmark,

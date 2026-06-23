@@ -1,0 +1,21 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "S",   # bandit (security)
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+]
+ignore = [
+  "S101", # assert statements (used in tests)
+  "S105", # hardcoded passwords (false positives in env var names)
+  "S106",
+]
+
+[lint.per-file-ignores]
+"test_*.py" = ["S", "E501"]

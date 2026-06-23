@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "IntentSpecSchema",
+  "type": "object",
+  "required": ["objective","domain","system_descriptors","metadata"],
+  "properties": {
+    "objective": {
+      "type": "string"
+    },
+    "domain": {
+      "type":"string",
+      "enum": ["materials", "quantum"]
+    },
+    "system_descriptors": {
+      "type": "object",
+      "required": ["formula","molecule"],
+      "properties": {
+        "molecule": {
+          "type": "object",
+          "required": ["SMILES"],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "SMILES": {
+              "type": "string"
+            }
+          }
+        },
+        "formula": {
+          "description": "the NAME of the formula being applied",
+          "type": "string"
+        }
+      }
+    },
+    "acceptance_metrics": {
+      "type":"array",
+      "items": {
+        "required": ["metric_name","target_value","tolerance"],
+        "type": "object",
+        "properties": {
+          "metric_name": {
+            "type": "string"
+          },
+          "target_value": {
+            "type":"number"
+          },
+          "tolerance":{
+            "type":"number"
+          }
+        }
+      }
+    },
+    "metadata": {
+      "description": "[0,1] confidence levels",
+      "type": "object",
+      "properties": {
+        "ambiguity": {
+          "type": "boolean"
+        },
+        "confidence_scores": {
+          "type": "object",
+          "properties": {
+            "objective_confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "domain_confidence": {
+              "type":"number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "name_confidence": {
+              "type":"number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "SMILES_confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "formula_confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}
