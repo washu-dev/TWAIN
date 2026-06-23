@@ -28,8 +28,9 @@ class AgentInterface:
                    "X-Api-Key": self.apiKey,
                    "Content-Type": "application/json"}
 
+
     # Prompt agent and get response
-    def callAgent(self, prompt, model="claude-sonnet-4-6",max_tokens=1024,system=""):
+    def callAgent(self, prompt, model="claude-opus-4-8",max_tokens=1024,system=""):
         _json = {
             "model": model,
             "max_tokens": max_tokens,
@@ -47,4 +48,8 @@ class AgentInterface:
         )
 
         resp.raise_for_status()
+        # Location of actual message -> resp.json()["content"][0]["text"]
         return resp.json()
+
+if __name__ == "__main__":
+    agent = AgentInterface();

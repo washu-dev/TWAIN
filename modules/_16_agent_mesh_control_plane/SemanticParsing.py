@@ -1,6 +1,5 @@
-import AgentInterface
-import PromptCompiler
-import json
+from modules._16_agent_mesh_control_plane import AgentInterface, PromptCompiler
+
 
 class Prompter:
     def __init__(self):
@@ -12,6 +11,8 @@ class Prompter:
         self.cost = 0
         self.validSubjects = ["Pymatgen","AtomicSimulationEnvironment"]
         self.data = {}
+
+
 
 
     def nextState(self, input = ""):
@@ -65,7 +66,7 @@ class Prompter:
                     self.nextState()
                 case "DATA_OUTPUT":
                     print(self.data)
-                    with open("data.json", "w") as outfile:
+                    with open("../../Intelligence Layer/data.json", "w") as outfile:
                         outfile.write(self.data["content"][0]["text"].strip("`").strip("json"))
                     exit()
 
