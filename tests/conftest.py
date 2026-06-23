@@ -25,18 +25,18 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULES = REPO_ROOT / "modules"
 
-# Clean package name -> directory holding its submodules. We need to add the packages that are not in the modules directory.
+# Clean package name -> directory holding its submodules. Feel free to add more packages here.
 _PACKAGE_ALIASES = {
     "intake": MODULES / "01_intake_nlu",
     "goal_decomposer": MODULES / "03_goal_decomposer",
     "method_discovery": MODULES / "04_method_discovery",
-    "plan_synthesizer": MODULES / "05_plan_synthesis",ß
+    "plan_synthesizer": MODULES / "05_plan_synthesis",
     "result_interpreter": MODULES / "10_result_interpreter",
     "cross_validation": MODULES / "11_cross_validation",
     "provenance_memory": MODULES / "14_provenance_memory",
 }
 
-# Dirs whose modules import siblings by bare name (e.g. `from states import State`).
+# Dirs whose modules import siblings by bare name (e.g. `from states import State`). Feel free to add more directories here.
 _BARE_IMPORT_DIRS = [
     MODULES / "16_agent_mesh_control_plane",
 ]

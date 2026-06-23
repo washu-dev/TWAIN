@@ -5,12 +5,10 @@
   "required": ["registry_version", "entries"],
   "properties": {
     "registry_version": {
-      "type": "string",
-      "description": "Semantic version of the registry file format/content."
+      "type": "string"
     },
     "entries": {
       "type": "array",
-      "description": "Curated catalog of chemistry tools and models.",
       "items": { "$ref": "#/$defs/registryEntry" }
     }
   },
@@ -32,32 +30,25 @@
       ],
       "properties": {
         "id": {
-          "type": "string",
-          "description": "Stable unique identifier for the tool (slug)."
+          "type": "string"
         },
         "name": {
-          "type": "string",
-          "description": "Human-readable tool name."
+          "type": "string"
         },
         "version": {
-          "type": "string",
-          "description": "Tool version string (kept as text to allow e.g. '2023.9.1')."
+          "type": "string"
         },
         "description": {
-          "type": "string",
-          "description": "Short description of what the tool does."
+          "type": "string"
         },
         "author": {
-          "type": "string",
-          "description": "Author or maintaining organisation."
+          "type": "string"
         },
         "repo_url": {
-          "type": "string",
-          "description": "Source repository or homepage URL."
+          "type": "string"
         },
         "paper_doi": {
-          "type": "string",
-          "description": "DOI of the canonical paper, if any."
+          "type": "string"
         },
         "capability_tags": {
           "type": "array",
@@ -72,12 +63,10 @@
         },
         "output_properties": {
           "type": "array",
-          "description": "Properties/quantities the tool can produce.",
           "items": { "type": "string" }
         },
         "uncertainty_method": {
-          "type": "string",
-          "description": "How the tool reports uncertainty, e.g. 'ensemble', 'none'."
+          "type": "string"
         },
         "license": {
           "type": "string",
@@ -85,13 +74,11 @@
         },
         "license_class": {
           "type": "string",
-          "enum": ["permissive", "copyleft", "restrictive"],
-          "description": "Coarse license category used by the scoring rubric."
+          "enum": ["permissive", "copyleft", "restrictive"]
         },
         "maturity": {
           "type": "string",
-          "enum": ["alpha", "beta", "stable", "deprecated"],
-          "description": "Release maturity stage."
+          "enum": ["alpha", "beta", "stable", "deprecated"]
         },
         "trust_tier": {
           "type": "integer",
@@ -101,21 +88,17 @@
         },
         "stars": {
           "type": "integer",
-          "minimum": 0,
-          "description": "Community adoption proxy (e.g. GitHub stars)."
+          "minimum": 0
         },
         "citations": {
           "type": "integer",
-          "minimum": 0,
-          "description": "Citation count of the canonical paper, if known."
+          "minimum": 0
         },
         "has_tests": {
-          "type": "boolean",
-          "description": "Whether the tool ships an automated test suite."
+          "type": "boolean"
         },
         "has_examples": {
-          "type": "boolean",
-          "description": "Whether the tool ships usage examples/tutorials."
+          "type": "boolean"
         }
       }
     }
