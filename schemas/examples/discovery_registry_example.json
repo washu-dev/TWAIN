@@ -1,0 +1,44 @@
+{
+  "registry_version": "1.0",
+  "entries": [
+    {
+      "id": "rdkit",
+      "name": "RDKit",
+      "version": "2024.03.5",
+      "description": "Open-source cheminformatics toolkit for molecular representations and descriptors.",
+      "author": "RDKit Project",
+      "repo_url": "https://github.com/rdkit/rdkit",
+      "paper_doi": "10.5281/zenodo.591637",
+      "capability_tags": ["molecular_representation", "descriptors", "property_prediction"],
+      "input_formats": ["SMILES", "SDF", "MOL"],
+      "output_properties": ["TPSA", "logP", "molecular_weight"],
+      "uncertainty_method": "none",
+      "license": "BSD-3-Clause",
+      "license_class": "permissive",
+      "maturity": "stable",
+      "trust_tier": 1,
+      "stars": 2800,
+      "citations": 1200,
+      "has_tests": true,
+      "has_examples": true
+    },
+    {
+      "id": "deepchem",
+      "name": "DeepChem",
+      "version": "2.8.0",
+      "description": "Deep learning library for molecular property prediction.",
+      "repo_url": "https://github.com/deepchem/deepchem",
+      "capability_tags": ["property_prediction", "machine_learning"],
+      "input_formats": ["SMILES", "CSV"],
+      "output_properties": ["solubility", "toxicity"],
+      "license": "MIT",
+      "license_class": "permissive",
+      "maturity": "stable",
+      "trust_tier": 2,
+      "stars": 5300,
+      "citations": 900,
+      "has_tests": true,
+      "has_examples": true
+    }
+  ]
+}

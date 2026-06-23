@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "DiscoveryRegistrySchema",
+  "type": "object",
+  "required": ["registry_version", "entries"],
+  "properties": {
+    "registry_version": {
+      "type": "string"
+    },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/registryEntry" }
+    }
+  },
+  "$defs": {
+    "registryEntry": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "version",
+        "description",
+        "capability_tags",
+        "input_formats",
+        "output_properties",
+        "license",
+        "license_class",
+        "maturity",
+        "trust_tier"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "repo_url": {
+          "type": "string"
+        },
+        "paper_doi": {
+          "type": "string"
+        },
+        "capability_tags": {
+          "type": "array",
+          "description": "What the tool can do, e.g. 'property_prediction', 'molecular_dynamics'.",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "input_formats": {
+          "type": "array",
+          "description": "Accepted input data formats, e.g. 'SMILES', 'SDF', 'molecular_graph'.",
+          "items": { "type": "string" }
+        },
+        "output_properties": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "uncertainty_method": {
+          "type": "string"
+        },
+        "license": {
+          "type": "string",
+          "description": "SPDX license identifier, e.g. 'MIT', 'Apache-2.0', 'GPL-3.0-only'."
+        },
+        "license_class": {
+          "type": "string",
+          "enum": ["permissive", "copyleft", "restrictive"]
+        },
+        "maturity": {
+          "type": "string",
+          "enum": ["alpha", "beta", "stable", "deprecated"]
+        },
+        "trust_tier": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3,
+          "description": "0=internal validated, 1=peer-reviewed, 2=popular OSS, 3=candidate."
+        },
+        "stars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "citations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "has_tests": {
+          "type": "boolean"
+        },
+        "has_examples": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
