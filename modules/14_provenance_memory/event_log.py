@@ -27,7 +27,16 @@ from typing import Dict, List
 
 from jsonschema import Draft202012Validator
 
-_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "provenance_event.schema.json"
+def _repo_root() -> Path:
+    """Locate the repo root (the directory holding pixi.toml), regardless of depth."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pixi.toml").exists():
+            return parent
+    return here.parents[1]
+
+
+_SCHEMA_PATH = _repo_root() / "schemas" / "provenance_event.schema.json"
 
 EVENT_TYPES = ("request", "plan", "execute", "validate", "correct", "approve")
 

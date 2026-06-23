@@ -15,7 +15,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-MODULE_DIR = Path(__file__).resolve().parents[2] / "modules" / "_16_agent_mesh_control_plane"
+MODULE_DIR = Path(__file__).resolve().parents[2] / "modules" / "16_agent_mesh_control_plane"
 sys.path.insert(0, str(MODULE_DIR))
 
 from states import State, Context, InvalidTransition, GuardsBroken

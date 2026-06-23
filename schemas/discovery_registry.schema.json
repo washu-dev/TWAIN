@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "DiscoveryRegistrySchema",
+  "type": "object",
+  "required": ["registry_version", "entries"],
+  "properties": {
+    "registry_version": {
+      "type": "string",
+      "description": "Semantic version of the registry file format/content."
+    },
+    "entries": {
+      "type": "array",
+      "description": "Curated catalog of chemistry tools and models.",
+      "items": { "$ref": "#/$defs/registryEntry" }
+    }
+  },
+  "$defs": {
+    "registryEntry": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "version",
+        "description",
+        "capability_tags",
+        "input_formats",
+        "output_properties",
+        "license",
+        "license_class",
+        "maturity",
+        "trust_tier"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable unique identifier for the tool (slug)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable tool name."
+        },
+        "version": {
+          "type": "string",
+          "description": "Tool version string (kept as text to allow e.g. '2023.9.1')."
+        },
+        "description": {
+          "type": "string",
+          "description": "Short description of what the tool does."
+        },
+        "author": {
+          "type": "string",
+          "description": "Author or maintaining organisation."
+        },
+        "repo_url": {
+          "type": "string",
+          "description": "Source repository or homepage URL."
+        },
+        "paper_doi": {
+          "type": "string",
+          "description": "DOI of the canonical paper, if any."
+        },
+        "capability_tags": {
+          "type": "array",
+          "description": "What the tool can do, e.g. 'property_prediction', 'molecular_dynamics'.",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "input_formats": {
+          "type": "array",
+          "description": "Accepted input data formats, e.g. 'SMILES', 'SDF', 'molecular_graph'.",
+          "items": { "type": "string" }
+        },
+        "output_properties": {
+          "type": "array",
+          "description": "Properties/quantities the tool can produce.",
+          "items": { "type": "string" }
+        },
+        "uncertainty_method": {
+          "type": "string",
+          "description": "How the tool reports uncertainty, e.g. 'ensemble', 'none'."
+        },
+        "license": {
+          "type": "string",
+          "description": "SPDX license identifier, e.g. 'MIT', 'Apache-2.0', 'GPL-3.0-only'."
+        },
+        "license_class": {
+          "type": "string",
+          "enum": ["permissive", "copyleft", "restrictive"],
+          "description": "Coarse license category used by the scoring rubric."
+        },
+        "maturity": {
+          "type": "string",
+          "enum": ["alpha", "beta", "stable", "deprecated"],
+          "description": "Release maturity stage."
+        },
+        "trust_tier": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3,
+          "description": "0=internal validated, 1=peer-reviewed, 2=popular OSS, 3=candidate."
+        },
+        "stars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Community adoption proxy (e.g. GitHub stars)."
+        },
+        "citations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Citation count of the canonical paper, if known."
+        },
+        "has_tests": {
+          "type": "boolean",
+          "description": "Whether the tool ships an automated test suite."
+        },
+        "has_examples": {
+          "type": "boolean",
+          "description": "Whether the tool ships usage examples/tutorials."
+        }
+      }
+    }
+  }
+}
