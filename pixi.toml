@@ -1,0 +1,19 @@
+[workspace]
+authors = ["Tim Yang <manchestim@hotmail.com>"]
+channels = ["conda-forge"]
+name = "TWAIN"
+platforms = ["osx-arm64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "3.12.*"
+jsonschema = "*"
+
+# Per-workstream features: branches add their own dependencies here as needed,
+# e.g. [feature.sim.dependencies] ase/pymatgen for Benchmark,
+# [feature.workflows.dependencies] quacc/jobflow for WorkflowManagers.
+
+[environments]
+default = []

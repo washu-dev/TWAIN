@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "AseInfo",
+  "type": "object",
+  "required": ["ase"],
+  "properties": {
+    "ase": {
+      "type": "object",
+      "required": ["structure", "calculation"],
+      "properties": {
+        "structure": {
+          "type": "object",
+          "description": "Mirrors an ASE Atoms object: elements, positions, cell, and periodicity",
+          "required": ["category", "atoms"],
+          "properties": {
+            "category": {
+              "type": "string",
+              "enum": ["structure", "molecule"],
+              "description": "structure -> periodic Atoms with a cell; molecule -> non-periodic Atoms"
+            },
+            "coordinateSystem": {
+              "type": "string",
+              "enum": ["cartesian", "fractional"],
+              "default": "cartesian",
+              "description": "cartesian -> ASE positions; fractional -> ASE scaled_positions"
+            },
+            "pbc": {
+              "description": "Periodic boundary conditions. Either one boolean applied to all axes, or three booleans for [a, b, c].",
+              "oneOf": [
+                { "type": "boolean" },
+                {
+                  "type": "array",
+                  "minItems": 3,
+                  "maxItems": 3,
+                  "items": { "type": "boolean" }
+                }
+              ]
+            },
+            "atoms": {
+              "type": "array",
+              "description": "List of atoms; each has an element symbol and a 3D coordinate",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["species", "coordinates"],
+                "properties": {
+                  "species": {
+                    "type": "string",
+                    "description": "Chemical symbol of the atom, e.g. \"Fe\""
+                  },
+                  "coordinates": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "description": "Position of the atom; interpreted as cartesian or fractional per coordinateSystem",
+                    "items": { "type": "number" }
+                  }
+                }
+              }
+            },
+            "cell": {
+              "type": "array",
+              "description": "ASE cell as a 3x3 matrix of lattice vectors. Required when category is 'structure'.",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "number" }
+              }
+            }
+          }
+        },
+        "calculation": {
+          "type": "object",
+          "required": ["calculator", "calculationType"],
+          "description": "What to compute on the structure",
+          "properties": {
+            "calculator": {
+              "type": "string",
+              "enum": ["emt", "vasp", "gpaw", "espresso", "lammps"],
+              "description": "ASE calculator that provides energies and forces"
+            },
+            "calculationType": {
+              "type": "string",
+              "enum": ["static", "relax", "md", "neb", "eos", "vibrations"],
+              "description": "Type of ASE calculation to perform"
+            },
+            "relax": {
+              "type": "object",
+              "description": "Parameters for a structure optimization (calculationType = relax)",
+              "properties": {
+                "optimizer": {
+                  "type": "string",
+                  "enum": ["BFGS", "LBFGS", "FIRE", "GPMin", "MDMin"],
+                  "default": "BFGS",
+                  "description": "ASE optimizer algorithm"
+                },
+                "fmax": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Force convergence criterion in eV/Angstrom. Default: 0.05"
+                },
+                "maxSteps": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Maximum number of optimizer steps"
+                }
+              }
+            },
+            "md": {
+              "type": "object",
+              "description": "Parameters for molecular dynamics (calculationType = md)",
+              "properties": {
+                "ensemble": {
+                  "type": "string",
+                  "enum": ["NVE", "NVT", "NPT"],
+                  "description": "Thermodynamic ensemble"
+                },
+                "timeStep": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Integration time step in femtoseconds"
+                },
+                "steps": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Number of MD steps"
+                },
+                "temperature": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Target temperature in Kelvin (required for NVT/NPT)"
+                }
+              }
+            },
+            "neb": {
+              "type": "object",
+              "description": "Parameters for a Nudged Elastic Band calculation (calculationType = neb)",
+              "properties": {
+                "images": {
+                  "type": "integer",
+                  "minimum": 3,
+                  "description": "Number of images along the band, including the two endpoints"
+                },
+                "fmax": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "Force convergence criterion in eV/Angstrom"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ase": {
+            "properties": {
+              "structure": {
+                "properties": {
+                  "category": { "const": "structure" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "ase": {
+            "properties": {
+              "structure": {
+                "required": ["cell"]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
