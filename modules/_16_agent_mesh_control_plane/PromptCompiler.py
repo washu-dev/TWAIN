@@ -1,3 +1,6 @@
+import twain_paths
+
+
 class PromptCompiler:
     # Setup
     def __init__(self):
@@ -33,14 +36,14 @@ class PromptCompiler:
     # SHORTCUTS
     def dataPrompt(self, subject):
         self.resetPrompt()
-        self.promptFromFile("../../Intelligence Layer/Restraints.txt")
-        self.promptFromFile(f"../Schema/{subject[:1].upper()}{subject[1:].lower()}Schema.json")
+        self.promptFromFile(twain_paths.INTELLIGENCE_DIR / "Restraints.txt")
+        self.promptFromFile(twain_paths.SCHEMAS_DIR / f"{subject[:1].upper()}{subject[1:].lower()}Schema.json")
         self.promptFromText(self.userPrompt)
         return self.getPrompt()
 
     def subjectPrompt(self):
         self.resetPrompt()
-        self.promptFromFile("../../Intelligence Layer/SubjectPrompt.txt")
+        self.promptFromFile(twain_paths.INTELLIGENCE_DIR / "SubjectPrompt.txt")
         self.promptFromText(self.userPrompt)
         return self.getPrompt()
 

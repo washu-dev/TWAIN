@@ -26,6 +26,7 @@ from budget_tracker import Budget_Tracker
 GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.INTAKE, State.CLARIFY): lambda c: True,
     (State.CLARIFY, State.DECOMPOSE): lambda c: c.clarified,
+    (State.CLARIFY, State.CLARIFY) : lambda c: True,
     (State.DECOMPOSE, State.DISCOVER): lambda c: True,
     (State.DISCOVER, State.PLAN): lambda c: True,
     (State.PLAN, State.BUILD): lambda c: c.plan_approved,
@@ -72,6 +73,7 @@ class StateMachine:
         self.storage = DataStorage(data_path)
         self.recoveryData = self.storage.load()
         self.promptGenerator = PromptGenerator()
+
         if not self.recoveryData:
             self.context = Context()
             self.current_state = State.INTAKE
@@ -118,7 +120,7 @@ class StateMachine:
         return str(path)
 
     def intake(self) -> State:
-        INTAKE_SCHEMA = "/Users/Daniel/Desktop/TWAIN/schemas/intent_spec.schema.json"
+        INTAKE_SCHEMA = str(twain_paths.SCHEMAS_DIR / "intent_spec.schema.json")
         query = input("What is your prompt:")
         prompt = self.promptGenerator.jsonSchemaPrompt(INTAKE_SCHEMA, query)
         resp = self.agent.callAgent(prompt)
@@ -137,12 +139,13 @@ class StateMachine:
         path = self.context.artifacts.get("intent_spec")
         with(open(path, "r")) as f:
             text = f.read();
-            questions_from_agent = self.agent.callAgent(self.promptGenerator.clarificationPrompt(text))
-            print("\n \n \n")
-            user_response = input(f'Answer the following questions about your prompt \n {questions_from_agent["content"][0]["text"]}')
-            clarified_json = self.agent.callAgent(self.promptGenerator.modifyJsonSchema(text, user_response))
-            self.context.artifacts["intent_spec"] = self._write_artifact(
-                "intent_spec", json.loads(clarified_json["content"][0]["text"]))
+        questions_from_agent = self.agent.callAgent(self.promptGenerator.clarificationPrompt(text))
+        print("\n \n \n")
+        user_response = input(f'Answer the following questions about your prompt \n {questions_from_agent["content"][0]["text"]}')
+        clarified_json = self.agent.callAgent(self.promptGenerator.modifyJsonSchema(text, user_response))
+        self.context.artifacts["intent_spec"] = self._write_artifact(
+            "intent_spec", json.loads(clarified_json["content"][0]["text"]))
+
         # if ref and Path(ref).is_file():
         #     #from intake.clarification import ClarificationDialogue
         #     with open(ref, encoding="utf-8") as f:
@@ -156,7 +159,15 @@ class StateMachine:
         #             "intent_spec", asdict(spec))
         #     if dialogue.is_sufficient(spec):
         #         self.context.clarified = True
-        return State.DECOMPOSE
+        print("TEST")
+        with(open(path, "r")) as f:
+            conf_scores = json.loads(f.read())["metadata"]["confidence_scores"]
+        self.context.clarified = True
+        for key, value in conf_scores.items():
+            if value < self.confidence_threshold:
+                self.context.clarified = False
+        if(self.context.clarified): return State.DECOMPOSE
+        return State.CLARIFY
     def decompose(self) -> State:
         return State.DISCOVER
     def discover(self) -> State:

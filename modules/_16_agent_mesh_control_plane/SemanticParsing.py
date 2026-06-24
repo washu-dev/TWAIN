@@ -1,4 +1,5 @@
 from modules._16_agent_mesh_control_plane import AgentInterface, PromptCompiler
+import twain_paths
 
 
 class Prompter:
@@ -66,7 +67,7 @@ class Prompter:
                     self.nextState()
                 case "DATA_OUTPUT":
                     print(self.data)
-                    with open("../../Intelligence Layer/data.json", "w") as outfile:
+                    with open(twain_paths.INTELLIGENCE_DIR / "data.json", "w") as outfile:
                         outfile.write(self.data["content"][0]["text"].strip("`").strip("json"))
                     exit()
 

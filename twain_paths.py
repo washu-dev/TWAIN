@@ -16,6 +16,12 @@ from pathlib import Path
 # This module sits at the repository root, so its parent IS the repo root.
 REPO_ROOT = Path(__file__).resolve().parent
 
+# Static, version-controlled inputs (JSON schemas, etc.) shipped with the repo.
+SCHEMAS_DIR = REPO_ROOT / "schemas"
+
+# Prompt/constraint text + scratch data used by the semantic-parsing layer.
+INTELLIGENCE_DIR = REPO_ROOT / "Intelligence Layer"
+
 # The one place all runtime output goes.
 LOGS_ROOT = REPO_ROOT / "logs"
 
