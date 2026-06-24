@@ -33,6 +33,7 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.CLARIFY, State.CLARIFY) : lambda c: True,
     (State.DECOMPOSE, State.DISCOVER): lambda c: True,
     (State.DISCOVER, State.PLAN): lambda c: True,
+    (State.DECOMPOSE,State.INTAKE): lambda c: True,
     (State.PLAN, State.BUILD): lambda c: c.plan_approved,
     (State.BUILD, State.EXECUTE): lambda c: c.plan_approved,
     (State.EXECUTE, State.INTERPRET): lambda c: c.execution_status,
@@ -325,7 +326,7 @@ class StateMachine:
         """
         intent = self._load_artifact("intent_spec")
         if intent is None:
-            return State.DISCOVER
+            return State.INTAKE
 
         graph_dict = self._canonical_goal_graph(intent)
         GraphBuilder.validate(GoalGraph(**graph_dict))  # raises on a bad/cyclic graph
