@@ -92,6 +92,7 @@ class Orchestrator:
         request: Optional[str] = None,
         agent=None,
         ask=None,
+        artifacts_dir: Optional[str] = None,
         event_bus=None,
         store: Optional[Store] = None,
         notifier=error_handler.default_notifier,
@@ -131,12 +132,17 @@ class Orchestrator:
         # ``<name>_<session_id>.json`` and trace straight back to this run. The
         # researcher's request + the NLU agent are forwarded so intake/clarify run
         # without prompting on stdin (an injected ``state_machine`` is used as-is).
+        # Artifacts default to a per-session subdir of the checkpoint dir so they
+        # stay scoped to this run (and so tests with a tmp checkpoint dir don't
+        # write into the shared logs/ tree).
+        sm_artifacts_dir = artifacts_dir or str(self.session.checkpoint_dir / "artifacts")
         self.sm = state_machine or StateMachine(
             data_path=sm_path,
             run_id=self.session_id,
             request=request,
             agent=agent,
             ask=ask,
+            artifacts_dir=sm_artifacts_dir,
         )
 
         if resuming:

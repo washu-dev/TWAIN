@@ -145,6 +145,7 @@ class TestGuardTable:
         (State.INTAKE, State.CLARIFY),
         (State.CLARIFY, State.DECOMPOSE),
         (State.CLARIFY, State.CLARIFY),  # clarification Q&A self-loop
+        (State.DECOMPOSE, State.INTAKE),  # no intent yet -> go back to intake
         (State.DECOMPOSE, State.DISCOVER),
         (State.DISCOVER, State.PLAN),
         (State.PLAN, State.BUILD),

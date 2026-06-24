@@ -152,8 +152,12 @@ def test_planning_sequence_chains_artifacts(machine, tmp_path):
 # ── no-op safety when upstream artifact is absent ────────────────────────────
 
 def test_handlers_noop_without_intent(machine):
-    """With no intent_spec artifact the handlers advance without writing."""
-    assert machine.decompose() == State.DISCOVER
+    """With no intent_spec artifact the handlers don't write any output.
+
+    decompose() routes back to INTAKE to obtain the missing intent; discover()
+    and plan() advance without producing an artifact.
+    """
+    assert machine.decompose() == State.INTAKE
     assert machine.discover() == State.PLAN
     assert machine.plan() == State.BUILD
     assert machine.context.artifacts == {}
