@@ -124,6 +124,18 @@ def _name_hits(exc: BaseException, *needles: str) -> bool:
     return any(n in haystack for n in needles)
 
 
+def _http_status(exc: BaseException) -> Optional[int]:
+    """Return the HTTP status code of a requests-style error, if it carries one.
+
+    ``requests.exceptions.HTTPError`` (raised by ``response.raise_for_status()``)
+    exposes the originating response on ``.response``; duck-typed here so we don't
+    import requests just to classify.
+    """
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    return code if isinstance(code, int) else None
+
+
 def classify(exc: BaseException, state: Optional[str] = None) -> ClassifiedError:
     """Classify ``exc`` (optionally raised in pipeline ``state``)."""
     # 1) Explicitly typed orchestrator errors win — they declared their category.
@@ -131,8 +143,24 @@ def classify(exc: BaseException, state: Optional[str] = None) -> ClassifiedError
         category = exc.category
         hint = exc.hint or _FALLBACKS[category]
     else:
-        category = _heuristic_category(exc)
-        hint = _FALLBACKS[category]
+        # 2) HTTP failures from the model API carry a status code; classify by it
+        #    so auth/quota issues don't get mistaken for a RESOURCE problem (an
+        #    HTTPError is an OSError subclass and would otherwise fall through).
+        status = _http_status(exc)
+        if status in (401, 403):
+            category = ErrorCategory.LLM
+            hint = (
+                f"Authorization failed (HTTP {status}). If you're calling the WUSTL AI API, "
+                "connect to the campus network/VPN and verify API_KEY / CLIENT_ID / "
+                "CLIENT_SECRET in .env, then resume."
+            )
+        elif status == 429:
+            category = ErrorCategory.LLM
+            hint = ("Rate limited (HTTP 429) by the model provider — wait for the limit "
+                    "to reset, then resume.")
+        else:
+            category = _heuristic_category(exc)
+            hint = _FALLBACKS[category]
 
     fallback = _STAGE_FALLBACKS.get(state or "", _FALLBACKS[category])
     message = f"{type(exc).__name__}: {exc}".strip().rstrip(":")

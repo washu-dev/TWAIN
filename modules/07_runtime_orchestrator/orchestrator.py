@@ -52,8 +52,11 @@ from store import Store
 from provenance_memory import event_log
 
 # Pipeline state -> provenance event_type (only the six the schema allows).
+# DECOMPOSE/DISCOVER/PLAN are all planning-phase work, so they log as "plan".
 _PROVENANCE_EVENT_TYPE = {
     State.INTAKE: "request",
+    State.DECOMPOSE: "plan",
+    State.DISCOVER: "plan",
     State.PLAN: "plan",
     State.EXECUTE: "execute",
     State.VALIDATE: "validate",
@@ -86,6 +89,9 @@ class Orchestrator:
         state_machine: Optional[StateMachine] = None,
         *,
         context=None,
+        request: Optional[str] = None,
+        agent=None,
+        ask=None,
         event_bus=None,
         store: Optional[Store] = None,
         notifier=error_handler.default_notifier,
@@ -122,8 +128,16 @@ class Orchestrator:
         # ---- the state machine we drive --------------------------------------
         sm_path = str(self.session.checkpoint_dir / f"{self.session_id}.sm.json")
         # Pass the session id as the machine's run_id so its artifacts are named
-        # ``<name>_<session_id>.json`` and trace straight back to this run.
-        self.sm = state_machine or StateMachine(data_path=sm_path, run_id=self.session_id)
+        # ``<name>_<session_id>.json`` and trace straight back to this run. The
+        # researcher's request + the NLU agent are forwarded so intake/clarify run
+        # without prompting on stdin (an injected ``state_machine`` is used as-is).
+        self.sm = state_machine or StateMachine(
+            data_path=sm_path,
+            run_id=self.session_id,
+            request=request,
+            agent=agent,
+            ask=ask,
+        )
 
         if resuming:
             # The session is the orchestrator's record of truth; align the SM to it.

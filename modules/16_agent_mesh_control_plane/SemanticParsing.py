@@ -1,4 +1,5 @@
-from modules._16_agent_mesh_control_plane import AgentInterface, PromptCompiler
+import AgentInterface
+import PromptCompiler
 import twain_paths
 
 

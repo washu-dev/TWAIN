@@ -6,9 +6,9 @@ liveness (no deadlocks), and known bugs in the current implementation.
 
 Run from the repo root with:  pixi run pytest tests/unit/test_state_machine.py
 """
+import copy
 import json
 import sys
-import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -49,6 +49,64 @@ def _make_machine(tmp_path, **ctx_overrides) -> StateMachine:
     return m
 
 
+# A schema-shaped IntentSpec the fake agent emits; high confidence by default so
+# clarify() marks the run clarified and advances to DECOMPOSE.
+VALID_INTENT = {
+    "objective": "Predict the aqueous solubility of aspirin",
+    "domain": "materials",
+    "system_descriptors": {
+        "formula": "C9H8O4",
+        "molecule": {"name": "aspirin", "SMILES": "CC(=O)Oc1ccccc1C(=O)O"},
+    },
+    "acceptance_metrics": [
+        {"metric_name": "logS", "target_value": -1.7, "tolerance": 0.5}
+    ],
+    "metadata": {
+        "ambiguity": False,
+        "confidence_scores": {
+            "objective_confidence": 0.95,
+            "domain_confidence": 0.95,
+            "name_confidence": 0.95,
+            "SMILES_confidence": 0.95,
+            "formula_confidence": 0.95,
+        },
+    },
+}
+
+
+class FakeAgent:
+    """Deterministic, offline stand-in for AgentInterface.
+
+    Returns clarifying questions for a clarification prompt and the canned
+    IntentSpec JSON for any generate/rewrite prompt, matching the
+    ``resp["content"][0]["text"]`` shape the handlers expect.
+    """
+
+    def __init__(self, low_confidence: bool = False):
+        intent = copy.deepcopy(VALID_INTENT)
+        if low_confidence:
+            intent["metadata"]["confidence_scores"]["SMILES_confidence"] = 0.4
+        self._intent_json = json.dumps(intent)
+
+    def callAgent(self, prompt, **kwargs):
+        if "questions" in str(prompt).lower():
+            return {"content": [{"text": "1. Which solvent and temperature?"}]}
+        return {"content": [{"text": self._intent_json}]}
+
+
+def _offline_machine(tmp_path, *, agent=None, **ctx_overrides) -> StateMachine:
+    """A StateMachine wired with a fake agent + tmp artifacts dir, so the
+    interactive intake/clarify handlers run fully offline (still needs
+    ``patch('builtins.input', ...)`` around any call that reads input)."""
+    data_path = str(tmp_path / "state.json")
+    with patch.object(DataStorage, "load", return_value=None):
+        m = StateMachine(data_path=data_path, run_id="t", agent=agent or FakeAgent())
+    m.artifacts_dir = tmp_path
+    if ctx_overrides:
+        m.context = Context(**ctx_overrides)
+    return m
+
+
 HAPPY_CONTEXT = dict(
     clarified=True,
     plan_approved=True,
@@ -86,6 +144,7 @@ class TestGuardTable:
     EXPECTED_TRANSITIONS = {
         (State.INTAKE, State.CLARIFY),
         (State.CLARIFY, State.DECOMPOSE),
+        (State.CLARIFY, State.CLARIFY),  # clarification Q&A self-loop
         (State.DECOMPOSE, State.DISCOVER),
         (State.DISCOVER, State.PLAN),
         (State.PLAN, State.BUILD),
@@ -118,13 +177,19 @@ class TestGuardTable:
 
 class TestHappyPath:
     def test_full_pipeline_accept(self, tmp_path):
-        m = _make_machine(tmp_path, **HAPPY_CONTEXT)
-        with patch.object(m.storage, "commit"):
-            result = m.run()
-        assert result == 0
+        # run() advances one transition at a time (the orchestrator loops it), so
+        # we drive it to a fixed point here. A fake agent + canned input let the
+        # interactive intake/clarify stages run offline.
+        m = _offline_machine(tmp_path, **HAPPY_CONTEXT)
+        with patch.object(m.storage, "commit"), \
+                patch("builtins.input", return_value="predict the solubility of aspirin"):
+            for _ in range(len(State) + 5):
+                if m.current_state == State.TERMINATE:
+                    break
+                m.run()
         assert m.current_state == State.TERMINATE
 
-    def test_handler_returns_match_guards(self):
+    def test_handler_returns_match_guards(self, tmp_path):
         handlers_next = {
             "intake": State.CLARIFY,
             "clarify": State.DECOMPOSE,
@@ -139,11 +204,14 @@ class TestHappyPath:
             "correct": State.BUILD,
             "replan": State.PLAN,
         }
-        m = _make_machine(Path(tempfile.mkdtemp()))
-        for name, expected_next in handlers_next.items():
-            handler = getattr(m, name)
-            assert handler() == expected_next, \
-                f"{name}() should return {expected_next}"
+        # Called in order: intake() writes the intent_spec that clarify()/
+        # decompose() then consume.
+        m = _offline_machine(tmp_path)
+        with patch("builtins.input", return_value="predict the solubility of aspirin"):
+            for name, expected_next in handlers_next.items():
+                handler = getattr(m, name)
+                assert handler() == expected_next, \
+                    f"{name}() should return {expected_next}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -151,13 +219,15 @@ class TestHappyPath:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestGuardRejection:
-    def test_clarify_blocked_without_clarified(self, tmp_path):
-        m = _make_machine(tmp_path, clarified=False, plan_approved=True,
-                          execution_status=True, validation_result="accepted")
-        m.current_state = State.CLARIFY
-        with patch.object(m.storage, "commit"):
-            with pytest.raises(GuardsBroken):
-                m.run()
+    def test_clarify_loops_when_not_confident(self, tmp_path):
+        # Low-confidence intent: clarify() must stay in the CLARIFY Q&A loop
+        # (return CLARIFY, leave clarified False) rather than advance to DECOMPOSE.
+        m = _offline_machine(tmp_path, agent=FakeAgent(low_confidence=True))
+        with patch("builtins.input", return_value="answer"):
+            m.intake()                      # seed a low-confidence intent_spec
+            next_state = m.clarify()
+        assert next_state == State.CLARIFY
+        assert m.context.clarified is False
 
     def test_plan_to_build_blocked_without_plan_approved(self, tmp_path):
         m = _make_machine(tmp_path, clarified=True, plan_approved=False,
@@ -225,16 +295,17 @@ class TestLiveness:
         assert missing == set(), \
             f"States with no outgoing transition (potential deadlock): {missing}"
 
-    def test_every_handler_returns_a_state(self):
-        m = _make_machine(Path(tempfile.mkdtemp()))
-        for s in State:
-            if s == State.TERMINATE:
-                continue
-            handler = getattr(m, s.name.lower(), None)
-            assert handler is not None, f"No handler for {s.name}"
-            result = handler()
-            assert isinstance(result, State), \
-                f"{s.name} handler returned {result!r}, not a State"
+    def test_every_handler_returns_a_state(self, tmp_path):
+        m = _offline_machine(tmp_path)
+        with patch("builtins.input", return_value="predict the solubility of aspirin"):
+            for s in State:
+                if s == State.TERMINATE:
+                    continue
+                handler = getattr(m, s.name.lower(), None)
+                assert handler is not None, f"No handler for {s.name}"
+                result = handler()
+                assert isinstance(result, State), \
+                    f"{s.name} handler returned {result!r}, not a State"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -51,7 +51,8 @@ HAPPY = dict(clarified=True, plan_approved=True, execution_status=True,
 HANDLER_NAMES = ["intake", "clarify", "decompose", "discover", "plan", "build",
                  "execute", "interpret", "validate", "accept"]
 
-# A valid IntentSpec the fake LLM returns for the intake/clarify integration test.
+# A valid, already-confident IntentSpec the fake LLM returns. Confidence is above
+# the StateMachine's 0.8 threshold so clarify() needs no follow-up questions.
 _SPEC_JSON = json.dumps({
     "objective": "Predict the aqueous solubility of aspirin at 25C",
     "domain": "materials",
@@ -64,10 +65,26 @@ _SPEC_JSON = json.dumps({
                  "ambiguity": False},
 })
 
+# Default request + offline agent so the real intake()/clarify() handlers run
+# without prompting on stdin or hitting the network.
+DEFAULT_REQUEST = "Predict the aqueous solubility of aspirin at 25C"
 
-def make_sm(tmp_path, name="sm", context=None, **handler_overrides):
-    """A real StateMachine with a seeded context and optional handler patches."""
-    sm = StateMachine(data_path=str(tmp_path / f"{name}.sm.json"))
+
+def fake_llm(_prompt):
+    """A prompt -> text agent that always returns the canned (confident) spec."""
+    return _SPEC_JSON
+
+
+def make_sm(tmp_path, name="sm", context=None, request=DEFAULT_REQUEST,
+            agent=fake_llm, **handler_overrides):
+    """A real StateMachine wired for offline intake/clarify (canned request +
+    agent), with a seeded context and optional handler patches."""
+    sm = StateMachine(
+        data_path=str(tmp_path / f"{name}.sm.json"),
+        request=request,
+        agent=agent,
+        artifacts_dir=str(tmp_path / f"{name}_artifacts"),
+    )
     sm.context = Context(**(context or HAPPY))
     for handler, fn in handler_overrides.items():
         setattr(sm, handler, fn)
@@ -135,6 +152,10 @@ def build(env, session_id, sm=None, context=None, **kwargs):
         kwargs.pop("researcher_id", "researcher@lab"),
         state_machine=sm,
         context=context if context is not None else (None if sm else dict(HAPPY)),
+        # Forwarded to the SM the orchestrator builds (ignored when sm is given),
+        # so its intake()/clarify() run offline.
+        request=kwargs.pop("request", DEFAULT_REQUEST),
+        agent=kwargs.pop("agent", fake_llm),
         event_bus=kwargs.pop("event_bus", env["bus"]),
         store=kwargs.pop("store", env["store"]),
         notifier=kwargs.pop("notifier", env["notes"].append),
@@ -193,8 +214,10 @@ class TestDrivesStateMachine:
         o = build(env, "prov")
         o.run()
         events = o.event_log.read_all()
+        # DECOMPOSE, DISCOVER and PLAN are all planning-phase stages, so each logs
+        # a "plan" provenance event.
         assert [e["event_type"] for e in events] == [
-            "request", "plan", "execute", "validate", "approve"
+            "request", "plan", "plan", "plan", "execute", "validate", "approve"
         ]
         assert o.event_log.verify_chain() is True
 
@@ -220,12 +243,14 @@ class TestPersistenceAndResume:
 
         # (a) a clean, uninterrupted run
         clean = Orchestrator("clean", "r", context=dict(HAPPY), event_bus=None,
-                             store=store, checkpoint_dir=ck)
+                             store=store, checkpoint_dir=ck,
+                             request=DEFAULT_REQUEST, agent=fake_llm)
         assert clean.run() == RunStatus.COMPLETED
 
         # (b) an interrupted run: pause *before* EXECUTE, persist, drop the instance
         part = Orchestrator("job", "r", context=dict(HAPPY), event_bus=None,
-                            store=store, checkpoint_dir=ck)
+                            store=store, checkpoint_dir=ck,
+                            request=DEFAULT_REQUEST, agent=fake_llm)
         assert part.run(until=State.EXECUTE) == RunStatus.PAUSED
         assert part.sm.current_state == State.EXECUTE
         del part
@@ -236,16 +261,29 @@ class TestPersistenceAndResume:
         assert resumed.sm.current_state == State.EXECUTE  # resumed, not restarted
         assert resumed.run() == RunStatus.COMPLETED
 
-        # Identical outcome to the clean run (timestamps excluded).
+        # Identical outcome to the clean run. Artifact *paths* are namespaced by
+        # session id ("clean" vs "job"), so compare the control-flow context and
+        # the produced artifact *keys* rather than the session-specific paths.
         assert resumed.run_session.get_state() == State.TERMINATE
         assert resumed.run_session.transition_count == clean.run_session.transition_count
-        assert dict(resumed.run_session.context) == dict(clean.run_session.context)
+
+        def _without_artifacts(ctx):
+            return {k: v for k, v in dict(ctx).items() if k != "artifacts"}
+
+        def _artifact_keys(ctx):
+            return set(dict(ctx).get("artifacts", {}))
+
+        assert _without_artifacts(resumed.run_session.context) == \
+            _without_artifacts(clean.run_session.context)
+        assert _artifact_keys(resumed.run_session.context) == \
+            _artifact_keys(clean.run_session.context)
 
     def test_resume_reads_from_store_when_no_local_checkpoint(self, env):
         tmp = env["tmp"]
         dir_a, dir_b = str(tmp / "a"), str(tmp / "b")
         o1 = Orchestrator("xfer", "r", context=dict(HAPPY), event_bus=None,
-                          store=env["store"], checkpoint_dir=dir_a)
+                          store=env["store"], checkpoint_dir=dir_a,
+                          request=DEFAULT_REQUEST, agent=fake_llm)
         o1.run(until=State.PLAN)
         # "Move machines": fresh checkpoint dir, same store + id -> hydrate from store.
         o2 = Orchestrator("xfer", "r", event_bus=None, store=env["store"],
@@ -293,8 +331,12 @@ class TestErrorHandling:
         assert env["store"].resume_session("fail") is not None  # errored => resumable
 
     def test_unmet_guard_is_caught_and_classified(self, env):
-        # clarified=False -> the CLARIFY->DECOMPOSE guard rejects the transition.
-        sm = make_sm(env["tmp"], context=dict(HAPPY, clarified=False))
+        # Force clarify() to advance while clarified is still False, so the
+        # CLARIFY->DECOMPOSE guard rejects the transition. (Real clarify() now
+        # self-loops instead of advancing when it can't reach confidence, so we
+        # override it here to exercise the guard-rejection path directly.)
+        sm = make_sm(env["tmp"], context=dict(HAPPY, clarified=False),
+                     clarify=lambda: State.DECOMPOSE)
         o = build(env, "guard", sm=sm)
         assert o.run() == RunStatus.ERROR
         assert o.sm.current_state == State.CLARIFY
@@ -396,6 +438,33 @@ class TestErrorClassifier:
         assert classify(PolicyError("over budget")).category == ErrorCategory.POLICY
         assert classify(LLMError("rate limited")).category == ErrorCategory.LLM
         assert classify(AgentTimeout("slow")).category == ErrorCategory.TIMEOUT
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_http_auth_errors_are_llm_not_resource(self, status):
+        """A 401/403 from the model API must classify as LLM (auth), not RESOURCE.
+
+        requests.HTTPError subclasses OSError, so without status-aware handling it
+        would fall through to the OSError -> RESOURCE rule.
+        """
+        class _Resp:
+            status_code = status
+
+        class _HTTPError(OSError):  # mimics requests.exceptions.HTTPError
+            response = _Resp()
+
+        classified = classify(_HTTPError("Forbidden"), state="INTAKE")
+        assert classified.category == ErrorCategory.LLM
+        assert "vpn" in classified.hint.lower() or "credentials" in classified.hint.lower() \
+            or ".env" in classified.hint.lower()
+
+    def test_http_rate_limit_is_llm(self):
+        class _Resp:
+            status_code = 429
+
+        class _HTTPError(OSError):
+            response = _Resp()
+
+        assert classify(_HTTPError("Too Many Requests")).category == ErrorCategory.LLM
 
     def test_discover_failure_suggests_manual_tool(self):
         classified = classify(RuntimeError("no candidates"), state="DISCOVER")
