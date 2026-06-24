@@ -5,6 +5,8 @@ from schemas import schema_validator
 from enum import Enum, auto
 from dataclasses import dataclass
 
+import twain_paths
+
 class Priority(Enum):
     DEFAULT = auto()
     CRITICAL = auto()
@@ -16,7 +18,10 @@ class EventBus:
         self.schemaValidator = schema_validator.SchemaValidator()
         self.history = deque(maxlen=1000)
         self.batch = []
-        self.log = open("event_bus.log", "a")
+        # Repo-anchored log location (see twain_paths) instead of a CWD-relative
+        # file, so the event log lands in the shared logs/ tree.
+        twain_paths.ensure_dirs()
+        self.log = open(twain_paths.EVENT_BUS_LOG, "a")
     def subscribe(self, event_type: str, schema: str, handler):
         if event_type not in self.handlers:
             self.handlers[event_type] = []

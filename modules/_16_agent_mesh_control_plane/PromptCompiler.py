@@ -58,3 +58,18 @@ class PromptGenerator:
         prompt += "Your response MUST begin with '{', the first character of a json file, and end with '}', the last character of the json file"
 
         return prompt
+
+    def modifyJsonSchema(self, schema, query):
+        prompt = "You will be rewriting the json schema below with the purpose of clarifying ambiguities. Your goal is to resolve any uncertainty, but do not blindly overwrite anything"
+        prompt += "\n" + schema
+        prompt += "+\n The following is the additional information provided by the user to resolve ambiguities"
+        prompt += query
+        prompt += "Your response MUST begin with '{', the first character of a json file, and end with '}', the last character of the json file"
+        return prompt
+
+    def clarificationPrompt(self, intent_spec):
+        prompt = "You are to generate a list of questions for the following schema file to resolve the ambiguities. Based on the following json file, return an ordered list of specific questions whose answers will remove any uncertainty"
+        prompt += intent_spec
+        return prompt
+
+

@@ -30,10 +30,12 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from states import State, Context
+import twain_paths
 
-# Default location for checkpoint files: alongside this module so a run started
-# from any working directory persists to a stable, discoverable place.
-DEFAULT_CHECKPOINT_DIR = Path(__file__).resolve().parent / "session_logs"
+# Default location for checkpoint files: the repo-anchored logs/ tree (see
+# twain_paths) so a run started from any working directory persists to a stable,
+# discoverable place shared with the SM recovery + provenance logs.
+DEFAULT_CHECKPOINT_DIR = twain_paths.SESSIONS_DIR
 
 # Story 2.5: "Save to disk every 30s or after each stage transition."
 DEFAULT_CHECKPOINT_INTERVAL_S = 30

@@ -121,7 +121,9 @@ class Orchestrator:
 
         # ---- the state machine we drive --------------------------------------
         sm_path = str(self.session.checkpoint_dir / f"{self.session_id}.sm.json")
-        self.sm = state_machine or StateMachine(data_path=sm_path)
+        # Pass the session id as the machine's run_id so its artifacts are named
+        # ``<name>_<session_id>.json`` and trace straight back to this run.
+        self.sm = state_machine or StateMachine(data_path=sm_path, run_id=self.session_id)
 
         if resuming:
             # The session is the orchestrator's record of truth; align the SM to it.
@@ -330,9 +332,29 @@ class Orchestrator:
         )
 
 
-def _main() -> int:
-    orch = Orchestrator.demo()
-    print(f"▶ starting run {orch.session_id} (driving StateMachine)")
+def _main(argv=None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Drive the TWAIN StateMachine end to end (Story 5.3). "
+                    "Pass a SESSION_ID to resume a previous run from its last "
+                    "checkpoint; omit it to start a fresh run.",
+    )
+    parser.add_argument(
+        "session_id", nargs="?", default=None,
+        help="Resume the run with this id (from logs/sessions/<id>.json or the "
+             "session store). Omit to start a new run.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.session_id and Session.exists(args.session_id):
+        print(f"▶ resuming run {args.session_id} from its last checkpoint")
+    elif args.session_id:
+        print(f"▶ no checkpoint for {args.session_id}; starting a new run under that id")
+    else:
+        print("▶ starting a new run (driving StateMachine)")
+
+    orch = Orchestrator.demo(session_id=args.session_id)
     status = orch.run()
     rs = orch.run_session
     print(f"\n■ run {orch.session_id} finished: {status.value}")

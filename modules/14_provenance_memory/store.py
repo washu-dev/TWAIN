@@ -11,15 +11,18 @@ JSON blob plus a few promoted, indexed columns (``researcher_id``, ``state``,
 ``status``, ``updated_at``) so ``list_sessions``/``resume_session`` can query
 without deserializing every row.
 
-Default database: ``~/.twain/sessions.db`` (Story 7.1). Pass ``db_path`` to
-override (tests use a temporary file; ``":memory:"`` is also accepted).
+Default database: ``<repo>/logs/sessions.db`` (see ``twain_paths``). Pass
+``db_path`` to override (tests use a temporary file; ``":memory:"`` is also
+accepted).
 """
 import json
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional
 
-DEFAULT_DB_PATH = Path.home() / ".twain" / "sessions.db"
+import twain_paths
+
+DEFAULT_DB_PATH = twain_paths.DB_PATH
 
 # Statuses from which a run can still be continued (i.e. it is not COMPLETED).
 RESUMABLE_STATUSES = ("running", "paused", "error")

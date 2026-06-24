@@ -1,7 +1,10 @@
 import json
+import uuid
 from enum import Enum, auto
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+
+import twain_paths
 
 from pygments.lexer import default
 
@@ -39,23 +42,31 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
 
 
 class StateMachine:
-    def __init__(self, data_path: str = "", *, agent=None, request=None,
-                 ask=None, artifacts_dir=None, confidence_threshold: float = 0.8,
-                 max_clarify_rounds: int = 3):
+    def __init__(self, data_path: str = None, *, agent=None, request=None,
+                 ask=None, artifacts_dir=None, run_id: str = None,
+                 confidence_threshold: float = 0.8, max_clarify_rounds: int = 3):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.callAgent). It is NOT constructed
         # eagerly here: AgentInterface() performs a network OAuth call, which
         # would break every construction (tests, resume, demo). Pass
         # agent=AgentInterface() at the call site to enable live NLU.
+        # All runtime output goes under the repo-anchored logs/ tree (see
+        # twain_paths). Defaults resolve here so the machine writes to the same
+        # place no matter the working directory; callers may still override.
+        twain_paths.ensure_dirs()
+        if data_path is None:
+            data_path = str(twain_paths.SESSIONS_DIR / "statemachine.sm.json")
+        # Ties artifacts back to the driving run: the orchestrator passes its
+        # session id here, so files are named ``<name>_<session_id>.json``.
+        # Standalone callers get a fresh uuid so artifacts stay unique per run.
+        self.run_id = run_id or uuid.uuid4().hex
         self.agent = AgentInterface()
         self.ask = ask
         self._request = request
         self.confidence_threshold = confidence_threshold
         self.max_clarify_rounds = max_clarify_rounds
-        self.iterations = 0
         self.approvedPlan = False
-        self.MAX_ITERATIONS = 10
         self.context = Context()
         self.current_state = State.INTAKE
         self.storage = DataStorage(data_path)
@@ -68,8 +79,7 @@ class StateMachine:
             self.current_state, self.context = self.recoveryData
         # Where intake/clarify write artifacts (intent_spec.json); defaults next
         # to the recovery file so a run started anywhere persists predictably.
-        self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else (
-            Path(data_path).parent if data_path else Path.cwd())
+        self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else twain_paths.ARTIFACTS_DIR
 
     def run(self):
         handler = getattr(self, self.current_state.name.lower())
@@ -93,14 +103,16 @@ class StateMachine:
     def newState(self, next_state: State):
         self.current_state = next_state
         self.storage.commit(self.current_state,self.context)
-        self.iterations = 0
 
     # ---- intake / clarify collaborators ----------------------------------
 
 
     def _write_artifact(self, name: str, data: dict) -> str:
+        # Artifacts are namespaced by ``run_id`` (the driving session id), so
+        # each run's files are uniquely named and traceable back to its session.
+        # The returned path is what callers store in ``context.artifacts``.
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        path = self.artifacts_dir / f"{name}.json"
+        path = self.artifacts_dir / f"{name}_{self.run_id}.json"
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=str)
         return str(path)
@@ -122,7 +134,15 @@ class StateMachine:
         so an unmet threshold (or a missing spec) correctly leaves the
         CLARIFY->DECOMPOSE guard blocking rather than waving the run through.
         """
-        ref = self.context.artifacts.get("intent_spec")
+        path = self.context.artifacts.get("intent_spec")
+        with(open(path, "r")) as f:
+            text = f.read();
+            questions_from_agent = self.agent.callAgent(self.promptGenerator.clarificationPrompt(text))
+            print("\n \n \n")
+            user_response = input(f'Answer the following questions about your prompt \n {questions_from_agent["content"][0]["text"]}')
+            clarified_json = self.agent.callAgent(self.promptGenerator.modifyJsonSchema(text, user_response))
+            self.context.artifacts["intent_spec"] = self._write_artifact(
+                "intent_spec", json.loads(clarified_json["content"][0]["text"]))
         # if ref and Path(ref).is_file():
         #     #from intake.clarification import ClarificationDialogue
         #     with open(ref, encoding="utf-8") as f:

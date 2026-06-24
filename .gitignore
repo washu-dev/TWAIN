@@ -25,6 +25,13 @@ gcp-db-*.conf
 *.swp
 *.swo
 
+# ── TWAIN runtime output (see twain_paths.py) ──────────────────────────────────
+logs/
+# legacy locations, now superseded by logs/
+tempLogs/
+session_logs/
+event_bus.log
+
 # ── Python ─────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
