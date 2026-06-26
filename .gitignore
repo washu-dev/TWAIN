@@ -25,6 +25,13 @@ gcp-db-*.conf
 *.swp
 *.swo
 
+# ── TWAIN runtime output (see twain_paths.py) ──────────────────────────────────
+logs/
+# legacy locations, now superseded by logs/
+tempLogs/
+session_logs/
+event_bus.log
+
 # ── Python ─────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
@@ -50,6 +57,12 @@ build/
 *.db
 *.sqlite
 
+# ── Runtime orchestrator artifacts (session checkpoints, provenance, event bus) ──
+modules/07_runtime_orchestrator/session_logs/*.json
+modules/07_runtime_orchestrator/session_logs/*.jsonl
+*.events.jsonl
+event_bus.log
+
 # ── Pixi ───────────────────────────────────────────────────────────────────────
 .pixi/*
 !.pixi/config.toml
@@ -58,3 +71,6 @@ _deploy.yaml
 app.yaml.bak
 # API Key
 .env
+
+# StateMachine.intake() scratch output
+ExampleFileTest.txt
