@@ -207,17 +207,16 @@ class StateMachine:
             return State.DECOMPOSE
 
         text = json.dumps(intent)
-        for _ in range(self.max_clarify_rounds):
-            questions = self._agent_text(self.promptGenerator.clarificationPrompt(text))
-            answer = self._ask_user(
-                f"Answer the following questions about your request:\n{questions}\n> "
-            )
-            text = self._agent_text(self.promptGenerator.modifyJsonSchema(text, answer))
-            intent = json.loads(text)
-            self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
-            if self._is_confident(intent):
-                self.context.clarified = True
-                return State.DECOMPOSE
+        questions = self._agent_text(self.promptGenerator.clarificationPrompt(text))
+        answer = self._ask_user(
+            f"Answer the following questions about your request:\n{questions}\n> "
+        )
+        text = self._agent_text(self.promptGenerator.modifyJsonSchema(text, answer))
+        intent = json.loads(text)
+        self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
+        if self._is_confident(intent):
+            self.context.clarified = True
+            return State.DECOMPOSE
 
         self.context.clarified = False
         return State.CLARIFY
