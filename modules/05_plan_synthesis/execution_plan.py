@@ -112,10 +112,12 @@ class ExecutionPlan:
         elif type(self.metadata) is not ExecutionPlanMetadata:
             raise ValueError("metadata must be of type dict or ExecutionPlanMetadata")
 
+        _AM_FIELDS = {f.name for f in AcceptanceMetric.__dataclass_fields__.values()}
         validated_acceptance_metrics = []
         for metric in self.acceptance_metrics:
             if type(metric) is dict:
-                validated_acceptance_metrics.append(AcceptanceMetric(**metric))
+                validated_acceptance_metrics.append(
+                    AcceptanceMetric(**{k: v for k, v in metric.items() if k in _AM_FIELDS}))
             elif type(metric) is AcceptanceMetric:
                 validated_acceptance_metrics.append(metric)
             else:

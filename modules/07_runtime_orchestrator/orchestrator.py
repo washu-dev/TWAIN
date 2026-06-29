@@ -50,6 +50,14 @@ from agent_runner import run_agent, timeout_for
 from session import Session, RunSession, RunStatus
 from store import Store
 from provenance_memory import event_log
+from budget_tracker import (
+    Budget_Tracker, ProjectBudget, RunBudget,
+    OverBudget, OverMaxIterations, OverMaxWallTime,
+)
+from retry_policy import (
+    ResilientCaller, CircuitBreaker, AlreadyOpenError, classify_error, ErrorType,
+)
+
 
 # Pipeline state -> provenance event_type (only the six the schema allows).
 # DECOMPOSE/DISCOVER/PLAN are all planning-phase work, so they log as "plan".
@@ -103,6 +111,13 @@ class Orchestrator:
         max_replans: int = 3,
         max_corrections: int = 3,
         max_transitions: int = 100,
+        budget_tracker: Optional[Budget_Tracker] = None,
+        run_max_cost: float = 1.0,
+        run_max_iterations: int = 50,
+        run_wall_time_minutes: int = 30,
+        circuit_breaker_max_errors: int = 5,
+        circuit_breaker_window: int = 60,
+        circuit_breaker_cooldown: int = 300,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -114,6 +129,25 @@ class Orchestrator:
         self.max_corrections = max_corrections
         self.max_transitions = max_transitions
         self.last_error: Optional[error_handler.ClassifiedError] = None
+
+        # ---- retry / circuit breaker ----------------------------------------
+        self.resilient_caller = ResilientCaller(
+            max_retries=step_retries,
+            max_errors=circuit_breaker_max_errors,
+            error_window=circuit_breaker_window,
+            cooldown=circuit_breaker_cooldown,
+        )
+
+        # ---- budget tracking ------------------------------------------------
+        self.budget_tracker = budget_tracker or Budget_Tracker()
+        self.run_budget = RunBudget(
+            max_cost=run_max_cost,
+            max_iterations=run_max_iterations,
+            wall_time_minutes=run_wall_time_minutes,
+        )
+        project_budget = ProjectBudget(self.budget_tracker)
+        project_budget.add_run(self.run_budget)
+        self.budget_tracker.add_project(project_budget)
 
         # ---- load-or-create the session (resume from file, else store) -------
         existed = Session.exists(self.session_id, checkpoint_dir)
@@ -213,23 +247,57 @@ class Orchestrator:
         except Exception:
             pass  # provenance is best-effort; never fail the run for the audit log
 
+    def _sync_agent_cost(self) -> None:
+        """Pull accumulated cost and API quota from the live agent."""
+        agent = getattr(self.sm, "_agent", None)
+        if agent is None:
+            return
+        if hasattr(agent, "total_cost"):
+            new_cost = agent.total_cost - self.run_budget.cost
+            if new_cost > 0:
+                self.run_budget.add_cost(new_cost)
+        if hasattr(agent, "api_quota_remaining"):
+            self.budget_tracker.update_quota(
+                agent.api_quota_prior,
+                agent.api_quota_remaining,
+            )
+
+    def _check_budget(self) -> None:
+        """Raise if the run has exceeded its cost, iteration, or wall-time limit."""
+        self.run_budget.check()
+
+    def _write_budget_artifact(self) -> None:
+        """Persist the current budget snapshot as an artifact."""
+        data = {
+            "run": self.run_budget.to_dict(),
+            "global": self.budget_tracker.to_dict(),
+        }
+        path = self.sm._write_artifact("budget", data)
+        self.sm.context.artifacts["budget"] = path
+
     # --------------------------------------------------------------------- step
     def _advance(self, state: State) -> None:
         """Run exactly one StateMachine transition under the stage timeout.
 
         ``StateMachine.run()`` invokes the handler for the current state (its
         work + chosen next state), checks the guard, and commits the transition.
-        We wrap it in :func:`run_agent` so the stage gets its timeout + retry
-        policy; the lambda adapts the no-arg ``run`` to the runner's signature.
+        We wrap it in :func:`run_agent` so the stage gets its timeout, then the
+        whole call goes through the :class:`ResilientCaller` (retry policy +
+        circuit breaker) so transient failures get exponential-backoff retries
+        and repeated failures trip the breaker before we burn the budget.
         """
         timeout = timeout_for(state.name) if self.step_timeouts else None
-        run_agent(
-            lambda _spec: self.sm.run(),
-            {},
-            state_name=state.name,
-            timeout=timeout,
-            max_retries=self.step_retries,
-        )
+
+        def _step():
+            run_agent(
+                lambda _spec: self.sm.run(),
+                {},
+                state_name=state.name,
+                timeout=timeout,
+                max_retries=0,
+            )
+
+        self.resilient_caller.execute(_step)
 
     def _apply_loop_bounds(self, entered: State) -> None:
         """Bound replan/correct cycles, observed from the machine's transitions."""
@@ -298,13 +366,33 @@ class Orchestrator:
 
             self._publish("stage.started", {"state": state.name})
 
-            # 1) step the state machine (it runs the handler + transitions)
+            # 0) pre-step budget gate
+            try:
+                self._check_budget()
+            except (OverBudget, OverMaxIterations, OverMaxWallTime) as exc:
+                return self._handle_error(exc, state)
+
+            # 1) step the state machine (retries transient errors, circuit-breaks
+            #    on repeated failures)
             try:
                 self._advance(state)
+            except AlreadyOpenError as exc:
+                return self._handle_error(
+                    PolicyError(
+                        str(exc),
+                        hint="Too many consecutive stage failures tripped the circuit "
+                             "breaker. Investigate the root cause, then resume.",
+                    ),
+                    state,
+                )
             except Exception as exc:  # noqa: BLE001 -- classified & surfaced below
                 return self._handle_error(exc, state)
 
             entered = self.sm.current_state
+
+            # 1b) post-step: sync agent cost and count the iteration
+            self._sync_agent_cost()
+            self.run_budget.add_iteration()
 
             # 2) mirror the machine's new state/context into the session
             self.run_session.set_state(entered)
@@ -318,9 +406,13 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001
                 return self._handle_error(exc, state)
 
-            # 4) checkpoint the new good state, then announce the transition
+            # 4) checkpoint the new good state + budget, then announce the transition
+            self._write_budget_artifact()
             self._checkpoint()
-            self._publish("stage.completed", {"from": state.name, "to": entered.name})
+            self._publish("stage.completed", {
+                "from": state.name, "to": entered.name,
+                "budget": self.run_budget.to_dict(),
+            })
 
             # 5) hard safety net against runaway transition counts
             if self.run_session.transition_count > self.max_transitions:
@@ -380,6 +472,9 @@ def _main(argv=None) -> int:
     print(f"\n■ run {orch.session_id} finished: {status.value}")
     print(f"  final state : {rs.state}")
     print(f"  transitions : {rs.transition_count}")
+    b = orch.run_budget.to_dict()
+    print(f"  budget      : ${b['cost']:.4f} / ${b['max_cost']:.4f} "
+          f"({b['iterations']} iterations, {b['elapsed_seconds']:.0f}s elapsed)")
     if orch.event_bus is not None:
         print(f"  events      : {len(orch.event_bus.history)} published")
     if orch.event_log is not None:
