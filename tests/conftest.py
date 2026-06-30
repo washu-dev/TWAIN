@@ -31,6 +31,7 @@ _PACKAGE_ALIASES = {
     "goal_decomposer": MODULES / "03_goal_decomposer",
     "method_discovery": MODULES / "04_method_discovery",
     "plan_synthesizer": MODULES / "05_plan_synthesis",
+    "execution_adapter": MODULES / "08_execution_adapter",
     "result_interpreter": MODULES / "10_result_interpreter",
     "cross_validation": MODULES / "11_cross_validation",
     "provenance_memory": MODULES / "14_provenance_memory",
