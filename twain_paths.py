@@ -30,7 +30,11 @@ LOGS_ROOT = REPO_ROOT / "logs"
 SESSIONS_DIR = LOGS_ROOT / "sessions"
 
 # Stage artifacts produced by the pipeline handlers (intent_spec.json, ...).
-ARTIFACTS_DIR = LOGS_ROOT / "artifacts"
+# Nested under the sessions dir because that is where the orchestrator scopes a
+# run's artifacts (``<checkpoint_dir>/artifacts``); keeping the default here in
+# the same place means a single ``logs/sessions/artifacts`` folder is used
+# instead of also leaving an empty top-level ``logs/artifacts`` behind.
+ARTIFACTS_DIR = SESSIONS_DIR / "artifacts"
 
 # SQLite session store (Story 2.5 / 7.1).
 DB_PATH = LOGS_ROOT / "sessions.db"

@@ -43,31 +43,40 @@ class Store:
         self._shared = sqlite3.connect(self.db_path) if self.db_path == ":memory:" else None
         self._init_schema()
 
+    _SCHEMA_SQL = """
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id    TEXT NOT NULL PRIMARY KEY,
+            researcher_id TEXT,
+            state         TEXT,
+            status        TEXT,
+            updated_at    TEXT,
+            data          TEXT NOT NULL
+        )
+        """
+
     # ------------------------------------------------------------------ connection
     def _connect(self) -> sqlite3.Connection:
         conn = self._shared or sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # Wait (don't error) if another writer holds the file briefly.
+        conn.execute("PRAGMA busy_timeout = 5000")
+        # Guarantee the schema on every connection. The checkpoint DB can be
+        # truncated or recreated between calls -- an interrupted run leaving a
+        # 0-byte file, an external tool, or a stale handle -- which otherwise
+        # surfaces mid-run as "no such table: sessions". Re-running an
+        # idempotent CREATE TABLE IF NOT EXISTS here (a no-op once it exists) is
+        # cheap and makes every read/write self-healing.
+        self._ensure_schema(conn)
         return conn
 
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(self._SCHEMA_SQL)
+        conn.commit()
+
     def _init_schema(self) -> None:
-        conn = self._connect()
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id    TEXT NOT NULL PRIMARY KEY,
-                    researcher_id TEXT,
-                    state         TEXT,
-                    status        TEXT,
-                    updated_at    TEXT,
-                    data          TEXT NOT NULL
-                )
-                """
-            )
-            conn.commit()
-        finally:
-            if self._shared is None:
-                conn.close()
+        conn = self._connect()  # _connect() already ensures the schema exists
+        if self._shared is None:
+            conn.close()
 
     # ---------------------------------------------------------------------- write
     def save_session(self, record: Dict) -> None:

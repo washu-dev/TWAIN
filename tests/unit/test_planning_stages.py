@@ -75,6 +75,7 @@ def test_machine_constructs_offline(machine):
 # ── decompose ────────────────────────────────────────────────────────────────
 
 def test_decompose_writes_valid_goal_graph(machine, tmp_path):
+    """With no agent the decomposer falls back to the deterministic canonical DAG."""
     _seed_intent(machine, tmp_path)
     assert machine.decompose() == State.DISCOVER
 
@@ -86,6 +87,108 @@ def test_decompose_writes_valid_goal_graph(machine, tmp_path):
     ]
     # acceptance metrics from the intent flow into the validation goal
     assert any("logS_MAE" in c for c in graph["goals"][2]["acceptance_criteria"])
+
+
+# A bespoke DAG an agent might return: deliberately different from the canonical
+# template so a passing assertion proves the graph came from the agent, not a stub.
+AGENT_GRAPH = {
+    "goals": [
+        {"id": "discover", "category": "discovery",
+         "purpose": "Find a solubility predictor", "owner_agent": "method_discovery"},
+        {"id": "prepare", "category": "data_preparation",
+         "purpose": "Normalize the SMILES input", "owner_agent": "code_builder"},
+        {"id": "run", "category": "execution",
+         "purpose": "Run the predictor", "owner_agent": "execution_adapter"},
+        {"id": "check", "category": "validation",
+         "purpose": "Compare against the acceptance metrics", "owner_agent": "cross_validation",
+         "acceptance_criteria": ["logS_MAE within 0.1 of 0.5"]},
+    ],
+    "edges": [
+        {"source": "discover", "target": "prepare", "category": "seq"},
+        {"source": "prepare", "target": "run", "category": "seq"},
+        {"source": "run", "target": "check", "category": "seq"},
+    ],
+    "metadata": {"created_at": "2026-06-30T00:00:00Z", "source_intent_id": "testrun"},
+}
+
+
+def _machine_with_agent(tmp_path, agent):
+    with patch.object(DataStorage, "load", return_value=None):
+        m = SM.StateMachine(
+            data_path=str(tmp_path / "state.json"), run_id="testrun", agent=agent
+        )
+    m.artifacts_dir = tmp_path
+    return m
+
+
+def test_decompose_uses_agent_to_build_dag(tmp_path):
+    """When an agent is configured, decompose() builds the DAG it returns."""
+    calls = []
+
+    def agent(prompt):
+        calls.append(prompt)
+        return json.dumps(AGENT_GRAPH)
+
+    machine = _machine_with_agent(tmp_path, agent)
+    _seed_intent(machine, tmp_path)
+    assert machine.decompose() == State.DISCOVER
+
+    graph = machine._load_artifact("goal_graph")
+    _validator("goal_graph.schema.json").validate(graph)
+    # the persisted graph is the agent's bespoke DAG, not the canonical template
+    assert [g["id"] for g in graph["goals"]] == ["discover", "prepare", "run", "check"]
+    assert calls, "the agent should have been consulted for the decomposition"
+    # the schema is anchored into the prompt the agent received
+    assert "GoalGraphSchema" in calls[0]
+
+
+def test_decompose_parses_fenced_json(tmp_path):
+    """The agent's JSON is extracted even when wrapped in prose / ```json fences."""
+    wrapped = (
+        "Sure! Here is the decomposition you asked for:\n\n```json\n"
+        + json.dumps(AGENT_GRAPH)
+        + "\n```\nLet me know if you'd like changes."
+    )
+    machine = _machine_with_agent(tmp_path, lambda prompt: wrapped)
+    _seed_intent(machine, tmp_path)
+    assert machine.decompose() == State.DISCOVER
+
+    graph = machine._load_artifact("goal_graph")
+    _validator("goal_graph.schema.json").validate(graph)
+    assert [g["id"] for g in graph["goals"]] == ["discover", "prepare", "run", "check"]
+
+
+def test_decompose_falls_back_when_agent_output_invalid(tmp_path):
+    """A malformed/cyclic agent decomposition degrades to the canonical DAG.
+
+    The fallback must be observable: the raw response is dumped to a
+    goal_graph_error artifact and the canonical graph records why it was used.
+    """
+    cyclic = {
+        "goals": [
+            {"id": "a", "category": "execution", "purpose": "x", "owner_agent": "o"},
+            {"id": "b", "category": "validation", "purpose": "y", "owner_agent": "o"},
+        ],
+        "edges": [
+            {"source": "a", "target": "b", "category": "seq"},
+            {"source": "b", "target": "a", "category": "seq"},  # cycle => invalid DAG
+        ],
+        "metadata": {"created_at": "2026-06-30T00:00:00Z", "source_intent_id": "testrun"},
+    }
+    machine = _machine_with_agent(tmp_path, lambda prompt: json.dumps(cyclic))
+    _seed_intent(machine, tmp_path)
+    assert machine.decompose() == State.DISCOVER
+
+    graph = machine._load_artifact("goal_graph")
+    _validator("goal_graph.schema.json").validate(graph)
+    assert [g["id"] for g in graph["goals"]] == [
+        "discover_method", "run_execution", "validate_results"
+    ]
+    # the fallback is traceable: rationale explains it + raw output is captured
+    assert "agent decomposition failed" in graph["metadata"]["rationale"]
+    error = machine._load_artifact("goal_graph_error")
+    assert error is not None
+    assert error["raw_response"] == json.dumps(cyclic)
 
 
 # ── discover ─────────────────────────────────────────────────────────────────
