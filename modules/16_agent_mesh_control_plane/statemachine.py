@@ -246,13 +246,25 @@ class StateMachine:
             resp = agent.callAgent(prompt, **call_kwargs)
         else:
             resp = agent(prompt)
-        if hasattr(agent, "callAgent"):
-            resp = agent.callAgent(prompt, max_tokens=max_tokens) if max_tokens else agent.callAgent(prompt)
-        else:
-            resp = agent(prompt)
         if isinstance(resp, str):
             return resp
         return resp["content"][0]["text"]
+
+    @staticmethod
+    def _extract_json_object(text: str) -> str:
+        """Return the JSON object embedded in an LLM response.
+
+        Models often wrap JSON in prose or ```json fences despite instructions.
+        Strip fences, then take the substring from the first ``{`` to the last
+        ``}`` so ``json.loads`` sees a clean object.
+        """
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if fenced:
+            return fenced.group(1)
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1]
+        return text
 
     @staticmethod
     def _extract_json_object(text: str) -> str:
