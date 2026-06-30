@@ -26,6 +26,7 @@ class AgentInterface:
                 "scope":         "api://bbeee386-60d6-4ba4-b9a7-631763f66065/.default",
             }
         )
+
         resp.raise_for_status()
         token = resp.json()["access_token"]
         self.headers = {"Authorization": f"Bearer {token}",

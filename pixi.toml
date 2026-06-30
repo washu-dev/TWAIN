@@ -14,6 +14,7 @@ jsonschema = "*"
 pytest = "*"
 python-dotenv = ">=1.2.2,<2"
 requests = ">=2.34.2,<3"
+pymatgen = ">=2026.5.4,<2027"
 
 # Per-workstream features: branches add their own dependencies here as needed,
 # e.g. [feature.sim.dependencies] ase/pymatgen for Benchmark,

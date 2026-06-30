@@ -26,6 +26,7 @@ from provenance_memory.event_log import EventLog
 from PromptCompiler import PromptGenerator
 from SemanticParsing import Prompter
 from budget_tracker import Budget_Tracker
+from code_gen.code_gen import CodeGen
 
 GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.INTAKE, State.CLARIFY): lambda c: True,
@@ -394,6 +395,13 @@ class StateMachine:
         return State.BUILD
 
     def build(self) -> State:
+        gen = CodeGen(
+            self.run_id,
+            artifacts_dir=self.artifacts_dir,
+            artifact_paths=self.context.artifacts,
+            agent=self._agent,
+        )
+        self.context.artifacts["script"] = gen.generate()
         return State.EXECUTE
     def execute(self) -> State:
         return State.INTERPRET
