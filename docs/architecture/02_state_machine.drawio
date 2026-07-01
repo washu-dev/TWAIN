@@ -84,7 +84,7 @@
         <!-- VALIDATE -->
         <mxCell id="validate" value="VALIDATE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;strokeWidth=2;fontSize=11;fontStyle=1" vertex="1" parent="1">
           <mxGeometry x="1100" y="610" width="130" height="50" as="geometry" />
-        </Cell>
+        </mxCell>
 
         <!-- Validation Decision -->
         <mxCell id="val_decision" value="Metrics OK?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;fontSize=10;fontStyle=1" vertex="1" parent="1">
