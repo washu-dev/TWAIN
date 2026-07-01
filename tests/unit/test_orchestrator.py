@@ -484,3 +484,48 @@ class TestErrorClassifier:
         assert "do next" in msg
         assert "fallback" in msg
         assert "EXECUTE" in msg
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Local execution wiring (Story 5.2): the orchestrator forwards the flag to the
+# StateMachine it builds, and demo() enables it by default.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestLocalExecutionWiring:
+    def test_orchestrator_forwards_execute_locally(self, env):
+        o = build(env, "exec-on", execute_locally=True, execute_install_deps=True)
+        assert o.sm.execute_locally is True
+        assert o.sm.execute_install_deps is True
+
+    def test_default_is_off(self, env):
+        o = build(env, "exec-off")
+        assert o.sm.execute_locally is False
+
+    def test_demo_enables_local_execution(self, monkeypatch):
+        # demo() opts into local execution by default (the user's entry point).
+        # Patch __init__ + the eagerly-built Store/EventBus so no real DB/log is
+        # touched; just assert the kwarg demo forwards.
+        import event_bus as eb_mod
+        import orchestrator as orch_mod
+
+        captured = {}
+        monkeypatch.setattr(orch_mod.Orchestrator, "__init__",
+                            lambda self, *a, **k: captured.update(k) or None)
+        monkeypatch.setattr(orch_mod, "Store", lambda *a, **k: None)
+        monkeypatch.setattr(eb_mod, "EventBus", lambda *a, **k: None)
+
+        orch_mod.Orchestrator.demo(session_id="demo-exec")
+        assert captured.get("execute_locally") is True
+
+    def test_demo_allows_override(self, monkeypatch):
+        import event_bus as eb_mod
+        import orchestrator as orch_mod
+
+        captured = {}
+        monkeypatch.setattr(orch_mod.Orchestrator, "__init__",
+                            lambda self, *a, **k: captured.update(k) or None)
+        monkeypatch.setattr(orch_mod, "Store", lambda *a, **k: None)
+        monkeypatch.setattr(eb_mod, "EventBus", lambda *a, **k: None)
+
+        orch_mod.Orchestrator.demo(session_id="d", execute_locally=False)
+        assert captured.get("execute_locally") is False

@@ -26,7 +26,7 @@ from provenance_memory.event_log import EventLog
 from PromptCompiler import PromptGenerator
 from SemanticParsing import Prompter
 from budget_tracker import Budget_Tracker
-from code_gen.code_gen import CodeGen
+from code_gen.codegen_engine import CodegenEngine
 
 GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.INTAKE, State.CLARIFY): lambda c: True,
@@ -51,7 +51,10 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
 class StateMachine:
     def __init__(self, data_path: str = None, *, agent=None, request=None,
                  ask=None, artifacts_dir=None, run_id: str = None,
-                 confidence_threshold: float = 0.8, max_clarify_rounds: int = 3):
+                 confidence_threshold: float = 0.8, max_clarify_rounds: int = 3,
+                 execute_locally: bool = False, execute_install_deps: bool = False,
+                 execute_keep_artifacts: bool = True, execute_timeout=None,
+                 execution_adapter=None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.callAgent). It is NOT constructed
@@ -77,6 +80,14 @@ class StateMachine:
         self._request = request
         self.confidence_threshold = confidence_threshold
         self.max_clarify_rounds = max_clarify_rounds
+        # Local execution (Story 5.2). Off by default so offline/seeded pipeline
+        # runs keep EXECUTE a no-op; the orchestrator (demo/_main) turns it on so
+        # real runs actually execute the RunBundle built in BUILD.
+        self.execute_locally = execute_locally
+        self.execute_install_deps = execute_install_deps
+        self.execute_keep_artifacts = execute_keep_artifacts
+        self.execute_timeout = execute_timeout
+        self._execution_adapter = execution_adapter
         self.approvedPlan = False
         self.context = Context()
         self.current_state = State.INTAKE
@@ -395,15 +406,67 @@ class StateMachine:
         return State.BUILD
 
     def build(self) -> State:
-        gen = CodeGen(
-            self.run_id,
-            artifacts_dir=self.artifacts_dir,
-            artifact_paths=self.context.artifacts,
-            agent=self._agent,
-        )
-        self.context.artifacts["script"] = gen.generate()
+        """Generate a runnable RunBundle from the ExecutionPlan (Story 5.1).
+
+        Deterministic, template-based codegen (no LLM): the CodegenEngine picks
+        a template from the plan's selected tool, substitutes its paths,
+        parameters, and acceptance criteria, and writes a self-contained bundle
+        -- main.py, config.yaml, requirements.txt, inline_tests.py -- that the
+        execution adapter can run without manual edits. The bundle directory and
+        the main.py entrypoint are recorded as artifacts for EXECUTE.
+        """
+        plan = self._load_artifact("execution_plan")
+        if plan is None:
+            # No plan to build from; no-op to EXECUTE rather than raise, so this
+            # handler stays callable in isolation / on a resume that skipped PLAN.
+            return State.EXECUTE
+        intent = self._load_artifact("intent_spec")
+        bundle = CodegenEngine().generate(plan, intent=intent)
+        bundle_dir = Path(self.artifacts_dir) / f"run_bundle_{self.run_id}"
+        bundle.write(bundle_dir)
+        self.context.artifacts["run_bundle"] = str(bundle_dir)
+        self.context.artifacts["script"] = str(bundle_dir / bundle.entrypoint)
         return State.EXECUTE
     def execute(self) -> State:
+        """Run the generated RunBundle on the local machine (Story 5.2).
+
+        Off by default (``execute_locally=False``) so offline/seeded pipeline
+        runs keep EXECUTE a no-op and trust the seeded ``execution_status``. When
+        enabled, the LocalExecutionAdapter runs the bundle built in BUILD --
+        installing deps into a venv if requested, running the smoke tests first,
+        then ``python main.py`` under a resource monitor + timeout. The captured
+        logs and metrics are written as the ``execution_result`` artifact, and
+        ``execution_status`` is set from the run so the EXECUTE->INTERPRET guard
+        reflects what actually happened.
+        """
+        if not self.execute_locally:
+            return State.INTERPRET
+
+        bundle_dir = self.context.artifacts.get("run_bundle")
+        if not bundle_dir or not Path(bundle_dir).is_dir():
+            # Nothing to execute (e.g. build() no-opped without a plan); leave the
+            # guard to whatever seeded the context.
+            return State.INTERPRET
+
+        adapter = self._execution_adapter
+        if adapter is None:
+            from execution_adapter.local_adapter import LocalExecutionAdapter
+            # Keep the working dir (with its outputs) under the session artifacts
+            # dir so results are discoverable and scoped to this run.
+            adapter = LocalExecutionAdapter(workspace_root=str(self.artifacts_dir))
+
+        result = adapter.execute(
+            bundle_dir,
+            install_deps=self.execute_install_deps,
+            keep_artifacts=self.execute_keep_artifacts,
+            run_smoke=True,
+            timeout=self.execute_timeout,
+            run_id=self.run_id,  # names the workdir exec_<session_id> for traceability
+        )
+        self.context.artifacts["execution_result"] = self._write_artifact(
+            "execution_result", result.to_dict()
+        )
+        self.context.execution_status = bool(result.succeeded)
         return State.INTERPRET
     def interpret(self) -> State:
         return State.VALIDATE

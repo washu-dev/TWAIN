@@ -216,6 +216,150 @@ class TestHappyPath:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 3b. BUILD stage produces a runnable RunBundle (Story 5.1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBuildProducesRunBundle:
+    """build() must turn the execution_plan into a materialized, self-contained
+    RunBundle the execution adapter can run without manual edits."""
+
+    PLAN = {
+        "selected_method": {"tool_name": "Pymatgen", "tool_version": 2024.1},
+        "compute_estimate": {"cpu_hours": 1.0},
+        "slurm_request": {"cpu_count": 8, "gpu_count": 1, "max_time": 24.0, "ram": 16},
+        "cost_estimate": {"min_tokens": 100, "min_cost": 1.0},
+        "metadata": {"timestamp": "2026-06-15T12:00:00Z", "goal_id": "g1", "candidate_rank": 1},
+        "acceptance_metrics": [{"metric_name": "density", "target_value": 7.8, "tolerance": 0.5}],
+        "safety_notes": ["Verify SLURM partition limits"],
+    }
+
+    def test_build_writes_bundle_and_records_artifacts(self, tmp_path):
+        m = _offline_machine(tmp_path)
+        m.context.artifacts["execution_plan"] = m._write_artifact("execution_plan", self.PLAN)
+
+        next_state = m.build()
+
+        assert next_state == State.EXECUTE
+        bundle_dir = Path(m.context.artifacts["run_bundle"])
+        assert bundle_dir.is_dir()
+        for filename in ("main.py", "config.yaml", "requirements.txt", "inline_tests.py"):
+            assert (bundle_dir / filename).is_file(), f"bundle missing {filename}"
+        assert m.context.artifacts["script"].endswith("main.py")
+        # the generated entrypoint must be syntactically valid Python
+        compile((bundle_dir / "main.py").read_text(encoding="utf-8"), "main.py", "exec")
+
+    def test_build_without_plan_is_a_noop_to_execute(self, tmp_path):
+        # No execution_plan artifact -> build() must not raise; it advances anyway.
+        m = _offline_machine(tmp_path)
+        assert m.build() == State.EXECUTE
+        assert "run_bundle" not in m.context.artifacts
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3c. EXECUTE stage runs the RunBundle via the adapter (Story 5.2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _FakeAdapter:
+    """Records execute() calls and returns a canned result."""
+
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+
+    def execute(self, bundle, **kwargs):
+        self.calls.append((bundle, kwargs))
+        return self._result
+
+
+class TestExecuteRunsBundle:
+    PLAN = {
+        "selected_method": {"tool_name": "Pymatgen", "tool_version": 2024.1},
+        "compute_estimate": {"cpu_hours": 1.0},
+        "slurm_request": {"cpu_count": 8, "gpu_count": 1, "max_time": 24.0, "ram": 16},
+        "cost_estimate": {"min_tokens": 100, "min_cost": 1.0},
+        "metadata": {"timestamp": "2026-06-15T12:00:00Z", "goal_id": "g1", "candidate_rank": 1},
+        "acceptance_metrics": [{"metric_name": "density", "target_value": 7.8, "tolerance": 0.5}],
+        "safety_notes": ["Verify SLURM partition limits"],
+    }
+
+    def _machine_with_bundle(self, tmp_path):
+        m = _offline_machine(tmp_path)
+        bundle_dir = Path(m.artifacts_dir) / f"run_bundle_{m.run_id}"
+        bundle_dir.mkdir(parents=True)
+        (bundle_dir / "main.py").write_text("print('{}')\n", encoding="utf-8")
+        m.context.artifacts["run_bundle"] = str(bundle_dir)
+        return m, bundle_dir
+
+    def test_disabled_is_a_noop(self, tmp_path):
+        m, _ = self._machine_with_bundle(tmp_path)
+        fake = _FakeAdapter(None)  # would explode if used
+        m._execution_adapter = fake
+        m.execute_locally = False
+        assert m.execute() == State.INTERPRET
+        assert fake.calls == []                         # adapter never invoked
+        assert "execution_result" not in m.context.artifacts
+
+    def test_runs_bundle_and_records_result(self, tmp_path):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+
+        m, bundle_dir = self._machine_with_bundle(tmp_path)
+        result = ExecutionResult(
+            status=ExecutionStatus.SUCCESS, exit_code=0, stdout="{}", peak_memory_mb=12.5
+        )
+        fake = _FakeAdapter(result)
+        m._execution_adapter = fake
+        m.execute_locally = True
+
+        next_state = m.execute()
+
+        assert next_state == State.INTERPRET
+        assert m.context.execution_status is True
+        # the adapter was handed the bundle dir + our run options, incl. the
+        # session id so the workdir is named exec_<run_id>
+        assert fake.calls[0][0] == str(bundle_dir)
+        assert fake.calls[0][1]["run_smoke"] is True
+        assert fake.calls[0][1]["run_id"] == m.run_id
+        # an execution_result artifact was written and is JSON-loadable
+        result_path = m.context.artifacts["execution_result"]
+        data = json.loads(Path(result_path).read_text(encoding="utf-8"))
+        assert data["status"] == "success" and data["peak_memory_mb"] == 12.5
+
+    def test_failed_run_sets_execution_status_false(self, tmp_path):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+
+        m, _ = self._machine_with_bundle(tmp_path)
+        m._execution_adapter = _FakeAdapter(
+            ExecutionResult(status=ExecutionStatus.DEPENDENCY_ERROR, exit_code=1)
+        )
+        m.execute_locally = True
+        assert m.execute() == State.INTERPRET
+        assert m.context.execution_status is False
+
+    def test_no_bundle_is_a_noop(self, tmp_path):
+        m = _offline_machine(tmp_path)
+        m.execute_locally = True
+        m._execution_adapter = _FakeAdapter(None)
+        assert m.execute() == State.INTERPRET  # no run_bundle artifact -> no-op
+        assert "execution_result" not in m.context.artifacts
+
+    def test_real_pymatgen_bundle_executes_end_to_end(self, tmp_path):
+        pytest.importorskip("pymatgen")
+        m = _offline_machine(tmp_path)
+        m.context.artifacts["execution_plan"] = m._write_artifact("execution_plan", self.PLAN)
+        m.build()  # writes a real RunBundle for Pymatgen
+        m.execute_locally = True
+
+        assert m.execute() == State.INTERPRET
+        assert m.context.execution_status is True
+        data = json.loads(Path(m.context.artifacts["execution_result"]).read_text(encoding="utf-8"))
+        assert data["status"] == "success"
+        assert data["peak_memory_mb"] is not None  # metrics captured
+        # the working dir is named from the session id (not a random string)
+        assert data["artifacts_dir"].endswith(f"exec_{m.run_id}")
+        assert (Path(data["artifacts_dir"]) / "results.csv").is_file()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 4. Guard rejection (invalid context)
 # ═══════════════════════════════════════════════════════════════════════════════
 

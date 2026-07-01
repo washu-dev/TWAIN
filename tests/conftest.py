@@ -35,6 +35,7 @@ _PACKAGE_ALIASES = {
     "cross_validation": MODULES / "11_cross_validation",
     "provenance_memory": MODULES / "14_provenance_memory",
     "code_gen": MODULES / "06_code_configuration_builder",
+    "execution_adapter": MODULES / "08_execution_adapter",
 }
 
 # Dirs whose modules import siblings by bare name (e.g. `from states import State`). Feel free to add more directories here.

@@ -1,4 +1,11 @@
+"""Legacy LLM-based script generator (pre-Story 5.1).
 
+Prompts an agent to write a one-off Python script from the intent + plan. This
+is retained for reference and ad-hoc use, but the pipeline's BUILD stage now
+uses the deterministic, template-based :class:`codegen_engine.CodegenEngine`,
+which emits a full, self-testing :class:`~codegen_engine.RunBundle` (main.py,
+config.yaml, requirements.txt, inline_tests.py) with no LLM dependency.
+"""
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +44,7 @@ class CodeGen:
             self._intent_spec = self._load_artifact("intent_spec")
             if self._intent_spec is None:
                 raise FileNotFoundError(
-                    f"intent_spec artifact not found: {self._artifact_path('intent_spec')}"
+                    f"intent_spec artifact not found: {self._resolve_artifact_path('intent_spec')}"
                 )
         return self._intent_spec
 
@@ -47,7 +54,7 @@ class CodeGen:
             self._execution_plan = self._load_artifact("execution_plan")
             if self._execution_plan is None:
                 raise FileNotFoundError(
-                    f"execution_plan artifact not found: {self._artifact_path('execution_plan')}"
+                    f"execution_plan artifact not found: {self._resolve_artifact_path('execution_plan')}"
                 )
         return self._execution_plan
 
@@ -122,5 +129,5 @@ if __name__ == "__main__":
         sys.exit(1)
     session_id = sys.argv[1]
     gen = CodeGen(session_id)
-    result = gen.generate()
-    print(f"Script written to: {result.script_path}")
+    gen.generate()
+    print(f"Script written to: {gen.artifacts_dir / f'script_{session_id}.py'}")
