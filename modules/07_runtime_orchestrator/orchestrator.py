@@ -407,11 +407,13 @@ class Orchestrator:
             self.run_session.transition_count += 1
             self._provenance(state)
 
-            # 3) bound replan/correct cycles
+            # 3) bound replan/correct cycles. Attribute a trip to the state we
+            #    just entered (the REPLAN/CORRECT we're now parked in), not the
+            #    pre-step state, so the notification names the right stage.
             try:
                 self._apply_loop_bounds(entered)
             except Exception as exc:  # noqa: BLE001
-                return self._handle_error(exc, state)
+                return self._handle_error(exc, entered)
 
             # 4) checkpoint the new good state + budget, then announce the transition
             self._write_budget_artifact()

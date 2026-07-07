@@ -20,8 +20,8 @@ interchangeable.
 """
 import _bootstrap  # noqa: F401
 
+import threading
 import time as _time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from random import Random
 from typing import Any, Callable, Dict, Optional, Union
 
@@ -94,21 +94,42 @@ def _validate_output(output: Any, validator: Optional[Validator], state_name: st
 
 def _run_with_timeout(fn: Callable[[Dict], Any], input_spec: Dict,
                       timeout: Optional[float], state_name: str) -> Any:
-    """Invoke ``fn(input_spec)`` under a wall-clock ``timeout`` (None = no limit)."""
+    """Invoke ``fn(input_spec)`` under a wall-clock ``timeout`` (None = no limit).
+
+    The work runs in a *daemon* worker thread that we ``join`` for at most
+    ``timeout`` seconds. Python cannot forcibly kill a thread, so a genuinely hung
+    stage keeps running in the background -- but as a daemon it never blocks
+    interpreter exit, and :class:`AgentTimeout` is surfaced *promptly* once the
+    join elapses. (A ``ThreadPoolExecutor`` context manager would instead block on
+    ``shutdown(wait=True)`` at ``__exit__`` until the worker finished, so the
+    timeout only fired after the work completed -- defeating the point.)
+    Heavyweight stages (EXECUTE) still delegate real process termination to the
+    execution adapter's subprocess timeout.
+    """
     if timeout is None:
         return fn(input_spec)
-    # One-shot worker thread; we surface a timeout rather than blocking forever.
-    # A timed-out worker keeps running in the background -- heavyweight stages
-    # (EXECUTE) delegate real process termination to the execution adapter.
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(fn, input_spec)
+
+    box: Dict[str, Any] = {}
+
+    def _worker() -> None:
         try:
-            return future.result(timeout=timeout)
-        except FuturesTimeout as exc:
-            raise AgentTimeout(
-                f"stage {state_name} exceeded its {timeout:.0f}s timeout",
-                hint="Increase the stage timeout or reduce the workload, then resume.",
-            ) from exc
+            box["result"] = fn(input_spec)
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller thread
+            box["error"] = exc
+
+    worker = threading.Thread(
+        target=_worker, name=f"agent-{state_name or 'stage'}", daemon=True
+    )
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise AgentTimeout(
+            f"stage {state_name} exceeded its {timeout:.0f}s timeout",
+            hint="Increase the stage timeout or reduce the workload, then resume.",
+        )
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
 
 
 def run_agent(

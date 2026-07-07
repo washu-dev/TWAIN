@@ -88,7 +88,8 @@ class StateMachine:
         self.execute_keep_artifacts = execute_keep_artifacts
         self.execute_timeout = execute_timeout
         self._execution_adapter = execution_adapter
-        self.approvedPlan = False
+        # Rounds of clarification Q&A run so far; bounds the CLARIFY self-loop.
+        self._clarify_rounds = 0
         self.context = Context()
         self.current_state = State.INTAKE
         self.storage = DataStorage(data_path)
@@ -205,10 +206,11 @@ class StateMachine:
 
         Fast path: a spec that already clears the bar needs no questions, so
         clarify is a no-op that just sets ``clarified`` and advances. Otherwise it
-        runs up to ``max_clarify_rounds`` of agent-generated questions + researcher
-        answers, re-checking confidence each round. If it still can't converge it
-        leaves ``clarified`` False and self-loops, so the CLARIFY->DECOMPOSE guard
-        keeps blocking rather than waving an ambiguous run through.
+        runs one agent-generated Q&A round per call, re-checking confidence; the
+        orchestrator loops it while it keeps returning CLARIFY. The loop is bounded
+        to ``max_clarify_rounds`` rounds -- once exhausted, clarify force-continues
+        on the best-effort spec (sets ``clarified``, advances to DECOMPOSE) instead
+        of self-looping forever on an intent it can never make confident.
         """
         intent = self._load_artifact("intent_spec")
         if intent is None:
@@ -226,7 +228,19 @@ class StateMachine:
         text = self._agent_text(self.promptGenerator.modifyJsonSchema(text, answer))
         intent = json.loads(text)
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
+        self._clarify_rounds += 1
         if self._is_confident(intent):
+            self.context.clarified = True
+            return State.DECOMPOSE
+
+        # Bounded loop: after ``max_clarify_rounds`` rounds we force-continue on
+        # the best-effort spec rather than self-looping forever on an intent the
+        # agent can't make confident (Story 3.2: "up to N rounds; force-continue").
+        if self._clarify_rounds >= self.max_clarify_rounds:
+            print(
+                f"[clarify] confidence still below {self.confidence_threshold} after "
+                f"{self._clarify_rounds} round(s); proceeding with the best-effort IntentSpec."
+            )
             self.context.clarified = True
             return State.DECOMPOSE
 
@@ -471,6 +485,20 @@ class StateMachine:
     def interpret(self) -> State:
         return State.VALIDATE
     def validate(self) -> State:
+        """Route on the cross-validation verdict recorded in the context.
+
+        ``accepted`` -> ACCEPT, ``rejected`` -> REPLAN, ``needs_review`` -> CORRECT
+        -- the three targets the guard table already allows out of VALIDATE. The
+        verdict itself is produced upstream (interpret()/cross-validation); this
+        handler only routes on it. Defaults to ACCEPT when the verdict is unset so
+        a seeded happy-path run still terminates (the VALIDATE->ACCEPT guard then
+        confirms the verdict is truly ``accepted`` before committing).
+        """
+        verdict = self.context.validation_result
+        if verdict == "rejected":
+            return State.REPLAN
+        if verdict == "needs_review":
+            return State.CORRECT
         return State.ACCEPT
     def accept(self) -> State:
         return State.TERMINATE

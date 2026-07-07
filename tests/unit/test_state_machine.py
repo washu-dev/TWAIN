@@ -11,7 +11,7 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -21,18 +21,14 @@ sys.path.insert(0, str(MODULE_DIR))
 from states import State, Context, InvalidTransition, GuardsBroken
 from crash_recovery import DataStorage
 
-_STUB_MODULES = {
-    name: MagicMock()
-    for name in (
-        "intake", "intake.intent_spec",
-        "result_interpreter", "result_interpreter.result_package",
-        "pygments", "pygments.lexer",
-    )
-}
-
-with patch.dict(sys.modules, _STUB_MODULES):
-    import importlib
-    SM = importlib.import_module("statemachine")
+# statemachine imports cleanly via the conftest package aliases + the MODULE_DIR
+# path insert above (this is exactly how tests/unit/test_orchestrator.py imports
+# it). Do NOT wrap this import in ``patch.dict(sys.modules, ...)``: on exit
+# patch.dict purges every module imported *inside* the block -- including stdlib
+# modules like ``urllib.error`` first imported transitively here -- which corrupts
+# global import state for later test files (e.g. duplicate exception classes make
+# ``except HTTPError`` miss in test_codegen). See the audit for the mechanism.
+import statemachine as SM
 
 GUARDS = SM.GUARDS
 StateMachine = SM.StateMachine
@@ -374,6 +370,19 @@ class TestGuardRejection:
         assert next_state == State.CLARIFY
         assert m.context.clarified is False
 
+    def test_clarify_force_continues_after_max_rounds(self, tmp_path):
+        # Persistently low-confidence intent: clarify() must not self-loop forever.
+        # It is bounded to max_clarify_rounds rounds, then force-continues to
+        # DECOMPOSE on the best-effort spec (max_clarify_rounds is now honoured).
+        m = _offline_machine(tmp_path, agent=FakeAgent(low_confidence=True))
+        m.max_clarify_rounds = 2
+        with patch("builtins.input", return_value="answer"):
+            m.intake()
+            assert m.clarify() == State.CLARIFY      # round 1: still below threshold
+            assert m.context.clarified is False
+            assert m.clarify() == State.DECOMPOSE    # round 2 hits the bound
+        assert m.context.clarified is True
+
     def test_plan_to_build_blocked_without_plan_approved(self, tmp_path):
         m = _make_machine(tmp_path, clarified=True, plan_approved=False,
                           execution_status=True, validation_result="accepted")
@@ -399,11 +408,15 @@ class TestGuardRejection:
                 m.run()
 
     def test_validate_to_accept_blocked_when_rejected(self, tmp_path):
+        # The guard must block VALIDATE->ACCEPT when the verdict is "rejected".
+        # validate() now correctly routes rejected->REPLAN, so force the (invalid)
+        # ACCEPT target to exercise the guard-rejection path directly.
         m = _make_machine(tmp_path, clarified=True, plan_approved=True,
                           execution_status=True, validation_result="rejected")
         m.current_state = State.VALIDATE
-        with patch.object(m.storage, "commit"):
-            with pytest.raises((GuardsBroken, InvalidTransition, RecursionError)):
+        with patch.object(m, "validate", return_value=State.ACCEPT), \
+                patch.object(m.storage, "commit"):
+            with pytest.raises(GuardsBroken):
                 m.run()
 
 
@@ -526,35 +539,24 @@ class TestCrashRecovery:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestValidateBranching:
+    """validate() routes on context.validation_result to the three targets the
+    guard table allows out of VALIDATE (accepted->ACCEPT, rejected->REPLAN,
+    needs_review->CORRECT)."""
+
+    def test_validate_to_accept_on_accepted(self, tmp_path):
+        m = _make_machine(tmp_path, clarified=True, plan_approved=True,
+                          execution_status=True, validation_result="accepted")
+        m.current_state = State.VALIDATE
+        assert m.validate() == State.ACCEPT
+
     def test_validate_to_replan_on_rejected(self, tmp_path):
         m = _make_machine(tmp_path, clarified=True, plan_approved=True,
                           execution_status=True, validation_result="rejected")
         m.current_state = State.VALIDATE
-        handler = getattr(m, "validate")
-        next_state = handler()
-        assert next_state == State.ACCEPT, \
-            "validate() always returns ACCEPT — it ignores validation_result"
+        assert m.validate() == State.REPLAN
 
-    @pytest.mark.xfail(
-        reason="BUG: validate() is hardcoded to return ACCEPT; "
-               "it does not branch on context.validation_result",
-        strict=True,
-    )
-    def test_validate_should_branch_on_context(self, tmp_path):
-        m = _make_machine(tmp_path, clarified=True, plan_approved=True,
-                          execution_status=True, validation_result="rejected")
-        m.current_state = State.VALIDATE
-        next_state = m.validate()
-        assert next_state == State.REPLAN
-
-    @pytest.mark.xfail(
-        reason="BUG: validate() is hardcoded to return ACCEPT; "
-               "needs_review path never reached",
-        strict=True,
-    )
     def test_validate_needs_review_goes_to_correct(self, tmp_path):
         m = _make_machine(tmp_path, clarified=True, plan_approved=True,
                           execution_status=True, validation_result="needs_review")
         m.current_state = State.VALIDATE
-        next_state = m.validate()
-        assert next_state == State.CORRECT
+        assert m.validate() == State.CORRECT
