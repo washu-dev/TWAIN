@@ -25,7 +25,7 @@ class Context:
     validation_result: str | None = None
 
     artifacts: dict[str, str] = field(default_factory=dict)
-    # {"intent_spec" : "/Users/danielschwammlein/git/TWAIN/schemas/examples/intent_spec_example.json"}
+    # {"intent_spec": "<repo>/logs/artifacts/intent_spec_<run_id>.json"}
 
 
 

@@ -11,6 +11,10 @@ class AgentInterface:
         self.apiKey = os.getenv("API_KEY")
         self.clientId = os.getenv("CLIENT_ID")
         self.apiSecret = os.getenv("CLIENT_SECRET")
+        self.total_cost = 0.0
+        self.call_count = 0
+        self.api_quota_prior = None
+        self.api_quota_remaining = None
 
         # Access request to api/creation of headers
         resp = requests.post(
@@ -28,8 +32,9 @@ class AgentInterface:
                    "X-Api-Key": self.apiKey,
                    "Content-Type": "application/json"}
 
+
     # Prompt agent and get response
-    def callAgent(self, prompt, model="claude-sonnet-4-6",max_tokens=1024,system=""):
+    def callAgent(self, prompt, model="claude-opus-4-8",max_tokens=1024,system=""):
         _json = {
             "model": model,
             "max_tokens": max_tokens,
@@ -37,9 +42,7 @@ class AgentInterface:
         }
         if (system != ""):
             _json["system"] = system
-        url = "https://aiapi.wustl.edu/models/v2/messages"
-        print(_json)
-        # Call to agent
+
         resp = requests.post(
             "https://aiapi.wustl.edu/models/v2/messages",
             headers=self.headers,
@@ -47,4 +50,17 @@ class AgentInterface:
         )
 
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        print(resp.json())
+        call_cost = data.get("apiCostThisCall", 0)
+        self.total_cost += call_cost
+        self.call_count += 1
+        self.api_quota_prior = data.get("apiQuotaPriorToThisCall")
+        self.api_quota_remaining = data.get("apiQuotaRemaining")
+        print(f"{call_cost * 100:.2f} cents used on API call "
+              f"(cumulative: ${self.total_cost:.4f}, "
+              f"API quota remaining: ${self.api_quota_remaining})")
+        return data
+
+if __name__ == "__main__":
+    agent = AgentInterface();

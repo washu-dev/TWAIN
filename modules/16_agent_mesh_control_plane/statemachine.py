@@ -1,18 +1,43 @@
+import json
+import logging
+import re
+import uuid
+from datetime import datetime, timezone
 from enum import Enum, auto
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Optional
 
-from pygments.lexer import default
+import twain_paths
+
+logger = logging.getLogger(__name__)
 
 from intake.intent_spec import IntentSpec
 from result_interpreter.result_package import ResultPackage
 from states import State, Context, GuardsBroken, InvalidTransition
 from crash_recovery import DataStorage
+from AgentInterface import AgentInterface
+from intake.intent_spec import IntentSpec
+from goal_decomposer.graph_builder import GoalGraph, GraphBuilder
+from plan_synthesizer.execution_plan import ExecutionPlan
+from plan_synthesizer.plan_synthesizer import PlanSynthesizer
+from method_discovery.registry_loader import RegistryLoader
+from method_discovery.scorers import DiscoveryQuery, rank_candidates
+from method_discovery.ranking_rationale import explain_ranking
+from result_interpreter.result_package import ResultPackage
+from cross_validation.validation_report import ValidationReport
+from provenance_memory.event_log import EventLog
+from PromptCompiler import PromptGenerator
+from SemanticParsing import Prompter
+from budget_tracker import Budget_Tracker
 
 GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.INTAKE, State.CLARIFY): lambda c: True,
     (State.CLARIFY, State.DECOMPOSE): lambda c: c.clarified,
+    (State.CLARIFY, State.CLARIFY) : lambda c: True,
     (State.DECOMPOSE, State.DISCOVER): lambda c: True,
     (State.DISCOVER, State.PLAN): lambda c: True,
+    (State.DECOMPOSE,State.INTAKE): lambda c: True,
     (State.PLAN, State.BUILD): lambda c: c.plan_approved,
     (State.BUILD, State.EXECUTE): lambda c: c.plan_approved,
     (State.EXECUTE, State.INTERPRET): lambda c: c.execution_status,
@@ -27,57 +52,448 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
 
 
 class StateMachine:
-    def __init__(self, data_path: str = ""):
-        self.iterations = 0
+    def __init__(self, data_path: str = None, *, agent=None, request=None,
+                 ask=None, artifacts_dir=None, run_id: str = None,
+                 confidence_threshold: float = 0.8, max_clarify_rounds: int = 3):
+        # Collaborators are injected and optional, so the machine is usable
+        # offline and under test. ``agent`` is either a callable prompt->text or
+        # an AgentInterface-like object (.callAgent). It is NOT constructed
+        # eagerly here: AgentInterface() performs a network OAuth call, which
+        # would break every construction (tests, resume, demo). Pass
+        # agent=AgentInterface() at the call site to enable live NLU.
+        # All runtime output goes under the repo-anchored logs/ tree (see
+        # twain_paths). Defaults resolve here so the machine writes to the same
+        # place no matter the working directory; callers may still override.
+        twain_paths.ensure_dirs()
+        if data_path is None:
+            data_path = str(twain_paths.SESSIONS_DIR / "statemachine.sm.json")
+        # Ties artifacts back to the driving run: the orchestrator passes its
+        # session id here, so files are named ``<name>_<session_id>.json``.
+        # Standalone callers get a fresh uuid so artifacts stay unique per run.
+        self.run_id = run_id or uuid.uuid4().hex
+        # Injected or lazily built on first use. AgentInterface() performs a
+        # network OAuth handshake, so building it eagerly here would break every
+        # offline construction (tests, resume, and the decompose/discover/plan
+        # handlers, which need no agent). See the ``agent`` property below.
+        self._agent = agent
+        self.ask = ask
+        self._request = request
+        self.confidence_threshold = confidence_threshold
+        self.max_clarify_rounds = max_clarify_rounds
         self.approvedPlan = False
-        self.MAX_ITERATIONS = 10
         self.context = Context()
         self.current_state = State.INTAKE
         self.storage = DataStorage(data_path)
         self.recoveryData = self.storage.load()
+        self.promptGenerator = PromptGenerator()
+
         if not self.recoveryData:
             self.context = Context()
             self.current_state = State.INTAKE
         else:
             self.current_state, self.context = self.recoveryData
+        # Where intake/clarify write artifacts (intent_spec.json); defaults next
+        # to the recovery file so a run started anywhere persists predictably.
+        self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else twain_paths.ARTIFACTS_DIR
+
+    @property
+    def agent(self):
+        """The live NLU agent, constructed on first use.
+
+        Building AgentInterface() performs a network OAuth call, so it is
+        deferred until a handler that needs it (intake/clarify) first touches
+        ``self.agent``. This keeps the machine importable and constructible
+        offline. Pass ``agent=...`` to ``__init__`` to inject a stub/live agent.
+        """
+        if self._agent is None:
+            self._agent = AgentInterface()
+        return self._agent
 
     def run(self):
-        while True:
-            handler = getattr(self, self.current_state.name.lower())
-            next_state = handler()
+        handler = getattr(self, self.current_state.name.lower())
+        next_state = handler()
 
-            key = (self.current_state, next_state)
-            if(key not in GUARDS):
-                raise InvalidTransition("Invalid transition, inter node travel must be explicitly defined in GUARDS")
-            func = GUARDS[key]
-            permission = func(self.context)
+        key = (self.current_state, next_state)
+        if(key not in GUARDS):
+            raise InvalidTransition("Invalid transition, inter node travel must be explicitly defined in GUARDS")
+        func = GUARDS[key]
+        permission = func(self.context)
 
-            if(not permission):
-                raise GuardsBroken("Transition not allowed, incomplete context")
-            else:
-                self.newState(next_state)
-                
+        if(not permission):
+            raise GuardsBroken("Transition not allowed, incomplete context")
+        else:
+            self.newState(next_state)
 
-            if(next_state == State.TERMINATE):
-                break
 
-        return 0
+
+
 
     def newState(self, next_state: State):
         self.current_state = next_state
         self.storage.commit(self.current_state,self.context)
-        self.iterations = 0
+
+    # ---- intake / clarify collaborators ----------------------------------
+
+
+    def _write_artifact(self, name: str, data: dict) -> str:
+        # Artifacts are namespaced by ``run_id`` (the driving session id), so
+        # each run's files are uniquely named and traceable back to its session.
+        # The returned path is what callers store in ``context.artifacts``.
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        path = self.artifacts_dir / f"{name}_{self.run_id}.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, default=str)
+        return str(path)
+
+    _WELCOME = (
+        "Welcome to TWAIN — your autonomous computational-chemistry research "
+        "assistant.\nDescribe the problem you'd like to investigate (e.g. "
+        "'predict the aqueous solubility of aspirin'): "
+    )
+
+    def _ask_user(self, message: str) -> str:
+        """Get input from the researcher: ``self.ask`` if injected, else stdin.
+
+        Injecting ``ask`` (a ``message -> answer`` callable) lets the orchestrator
+        and tests drive intake/clarify non-interactively; the stdin fallback keeps
+        the standalone CLI experience.
+        """
+        if callable(self.ask):
+            return self.ask(message)
+        return input(message)
+
+    def _agent_text(self, prompt: str, **call_kwargs) -> str:
+        """Call the agent and return its text, accepting either agent shape.
+
+        ``agent`` may be a plain ``prompt -> str`` callable (what the orchestrator
+        and tests inject) or an ``AgentInterface``-style object whose
+        ``callAgent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
+        ``call_kwargs`` (e.g. ``max_tokens``) are forwarded only to the
+        ``callAgent`` form; a plain callable is invoked with just the prompt.
+        """
+        agent = self.agent
+        if hasattr(agent, "callAgent"):
+            resp = agent.callAgent(prompt, **call_kwargs)
+        else:
+            resp = agent(prompt)
+        if isinstance(resp, str):
+            return resp
+        return resp["content"][0]["text"]
+
+    @staticmethod
+    def _extract_json_object(text: str) -> str:
+        """Return the JSON object embedded in an LLM response.
+
+        Models often wrap JSON in prose or ```json fences despite instructions.
+        Strip fences, then take the substring from the first ``{`` to the last
+        ``}`` so ``json.loads`` sees a clean object.
+        """
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if fenced:
+            return fenced.group(1)
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1]
+        return text
+
+    def _is_confident(self, intent: dict) -> bool:
+        """True when every confidence score meets the threshold (and any exist)."""
+        scores = (intent.get("metadata") or {}).get("confidence_scores") or {}
+        if not scores:
+            return False
+        return all(value >= self.confidence_threshold for value in scores.values())
 
     def intake(self) -> State:
+        schema = str(twain_paths.SCHEMAS_DIR / "intent_spec.schema.json")
+        # A pre-supplied request (orchestrator/UI/test) skips the interactive
+        # prompt; otherwise fall back to asking on stdin.
+        query = self._request if self._request else self._ask_user(self._WELCOME)
+        prompt = self.promptGenerator.jsonSchemaPrompt(schema, query)
+        intent = json.loads(self._agent_text(prompt))
+        self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
         return State.CLARIFY
+
     def clarify(self) -> State:
-        return State.DECOMPOSE
+        """Raise IntentSpec confidence to the threshold, then mark clarified.
+
+        Fast path: a spec that already clears the bar needs no questions, so
+        clarify is a no-op that just sets ``clarified`` and advances. Otherwise it
+        runs up to ``max_clarify_rounds`` of agent-generated questions + researcher
+        answers, re-checking confidence each round. If it still can't converge it
+        leaves ``clarified`` False and self-loops, so the CLARIFY->DECOMPOSE guard
+        keeps blocking rather than waving an ambiguous run through.
+        """
+        intent = self._load_artifact("intent_spec")
+        if intent is None:
+            return State.CLARIFY  # nothing to clarify yet; hold at CLARIFY
+
+        if self._is_confident(intent):
+            self.context.clarified = True
+            return State.DECOMPOSE
+
+        text = json.dumps(intent)
+        for _ in range(self.max_clarify_rounds):
+            questions = self._agent_text(self.promptGenerator.clarificationPrompt(text))
+            answer = self._ask_user(
+                f"Answer the following questions about your request:\n{questions}\n> "
+            )
+            text = self._agent_text(self.promptGenerator.modifyJsonSchema(text, answer))
+            intent = json.loads(text)
+            self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
+            if self._is_confident(intent):
+                self.context.clarified = True
+                return State.DECOMPOSE
+
+        self.context.clarified = False
+        return State.CLARIFY
+    # ---- decompose / discover / plan-synthesis collaborators -------------
+
+    def _load_artifact(self, name: str) -> Optional[dict]:
+        """Return a previously written stage artifact's JSON, or None if absent.
+
+        Returning None when the upstream artifact is missing lets these handlers
+        be exercised in isolation (e.g. a direct unit call, or a resume that
+        skipped intake) by no-opping to the next state instead of raising.
+        """
+        path = self.context.artifacts.get(name)
+        if not path or not Path(path).is_file():
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _build_goal_graph(self, intent: dict) -> dict:
+        """Decompose the IntentSpec into a GoalGraph DAG.
+
+        Prefers an LLM-driven decomposition (mirroring intake/clarify) so the DAG
+        is tailored to the actual request rather than a fixed template. When no
+        agent is configured -- or the agent's output is missing, malformed, or not
+        an acyclic graph -- it falls back to the deterministic canonical
+        decomposition so the stage always yields a valid GoalGraph (and stays
+        runnable fully offline). The returned dict is structurally re-validated by
+        the caller before it is persisted.
+        """
+        if self._agent is None:
+            return self._canonical_goal_graph(intent)
+        try:
+            graph = self._decompose_with_agent(intent)
+            GraphBuilder.validate(GoalGraph(**graph))  # schema + acyclicity gate
+            return graph
+        except Exception as exc:
+            # Do NOT silently degrade: an agent is present, so a fallback means
+            # the LLM decomposition was unusable. Record why (and the raw
+            # response) so the run is debuggable, then fall back deterministically.
+            reason = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "agent goal-graph decomposition failed; using canonical fallback (%s)",
+                reason,
+            )
+            self._dump_failed_decomposition(reason)
+            return self._canonical_goal_graph(
+                intent, fallback_reason=f"agent decomposition failed -> {reason}"
+            )
+
+    def _decompose_with_agent(self, intent: dict) -> dict:
+        """Ask the agent to decompose ``intent`` into a GoalGraph dict.
+
+        Builds a schema-anchored prompt from goal_graph.schema.json and parses the
+        agent's JSON response, backfilling the required metadata fields the schema
+        demands so a model that omits them still yields a valid graph. A generous
+        ``max_tokens`` is requested because a full goal DAG is far larger than the
+        default budget -- too small a budget truncates the JSON mid-object.
+        """
+        schema = str(twain_paths.SCHEMAS_DIR / "goal_graph.schema.json")
+        prompt = self.promptGenerator.goalGraphPrompt(
+            schema, json.dumps(intent), self.run_id
+        )
+        self._last_decomposition_raw = self._agent_text(prompt, max_tokens=4096)
+        graph = json.loads(self._extract_json_object(self._last_decomposition_raw))
+        metadata = graph.setdefault("metadata", {})
+        metadata.setdefault("source_intent_id", self.run_id)
+        metadata.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        return graph
+
+    def _dump_failed_decomposition(self, reason: str) -> None:
+        """Persist the raw agent response that failed to parse/validate.
+
+        Written next to the run's other artifacts so a canonical fallback can be
+        traced to the exact LLM output that caused it.
+        """
+        try:
+            self.context.artifacts["goal_graph_error"] = self._write_artifact(
+                "goal_graph_error",
+                {
+                    "reason": reason,
+                    "raw_response": getattr(self, "_last_decomposition_raw", None),
+                },
+            )
+        except Exception:
+            pass  # diagnostics are best-effort; never fail the run for them
+
+    def _canonical_goal_graph(self, intent: dict, fallback_reason: str = "") -> dict:
+        """Deterministic discover -> execute -> validate DAG from the intent.
+
+        The offline fallback for :meth:`_build_goal_graph`: a decomposition that
+        every property/simulation task shares -- pick a method, run it, validate
+        the output against the acceptance metrics. Used when no agent is available
+        or the agent's decomposition cannot be validated. ``fallback_reason``, when
+        supplied, is recorded in the graph's rationale so a canonical graph emitted
+        despite a live agent is traceable to the failure that caused it.
+        """
+        objective = intent.get("objective") or "the requested computation"
+        acceptance = [
+            f"{m.get('metric_name')} within {m.get('tolerance')} of {m.get('target_value')}"
+            for m in intent.get("acceptance_metrics", [])
+            if isinstance(m, dict) and m.get("metric_name") is not None
+        ]
+        goals = [
+            {
+                "id": "discover_method",
+                "category": "discovery",
+                "purpose": f"Select a computational method capable of: {objective}",
+                "owner_agent": "method_discovery",
+            },
+            {
+                "id": "run_execution",
+                "category": "execution",
+                "purpose": f"Execute the selected method to address: {objective}",
+                "owner_agent": "runtime_orchestrator",
+            },
+            {
+                "id": "validate_results",
+                "category": "validation",
+                "purpose": "Validate outputs against the acceptance criteria",
+                "owner_agent": "cross_validation",
+                "acceptance_criteria": acceptance,
+            },
+        ]
+        edges = [
+            {"source": "discover_method", "target": "run_execution", "category": "seq"},
+            {"source": "run_execution", "target": "validate_results", "category": "seq"},
+        ]
+        rationale = "Canonical discover -> execute -> validate decomposition."
+        if fallback_reason:
+            rationale += f" ({fallback_reason})"
+        metadata = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source_intent_id": self.run_id,
+            "rationale": rationale,
+        }
+        return {"goals": goals, "edges": edges, "metadata": metadata}
+
+    def _discovery_query(self, intent: dict) -> DiscoveryQuery:
+        """Derive a discovery query (capability tags + input format) from the intent."""
+        objective = (intent.get("objective") or "").lower()
+        domain = (intent.get("domain") or "").lower()
+
+        keyword_map = {
+            "property_prediction": ("predict", "property", "solub", "toxic", "affinity"),
+            "structure_optimization": ("optimi", "geometry", "relax", "structure"),
+            "molecular_dynamics": ("dynamics", " md", "trajectory", "simulat"),
+            "quantum_chemistry": ("quantum", "electronic", "dft", "ab initio", "orbital"),
+        }
+        tags = [tag for tag, needles in keyword_map.items()
+                if any(n in objective for n in needles)]
+        if domain == "materials":
+            tags.append("materials")
+        if not tags:
+            tags.append("property_prediction")
+        tags = list(dict.fromkeys(tags))  # de-dupe, keep order
+
+        input_format = None
+        molecule = (intent.get("system_descriptors") or {}).get("molecule") or {}
+        if molecule.get("SMILES"):
+            input_format = "SMILES"
+        return DiscoveryQuery(capability_tags=tags, input_format=input_format)
+
+    def _primary_goal_id(self) -> str:
+        """Resolve the goal id the plan targets (the execution goal), with fallback."""
+        graph = self._load_artifact("goal_graph")
+        if graph and graph.get("goals"):
+            for goal in graph["goals"]:
+                if goal.get("category") == "execution":
+                    return goal["id"]
+            return graph["goals"][0]["id"]
+        return f"goal-{self.run_id}"
+
     def decompose(self) -> State:
+        """Turn the clarified IntentSpec into a validated GoalGraph artifact.
+
+        Decomposes the intent into a goal DAG (agent-driven when an agent is
+        configured, deterministic otherwise), structurally validates it
+        (GoalGraph) and confirms it is acyclic with referenced edges
+        (GraphBuilder), then persists it as the ``goal_graph`` artifact for the
+        discovery stage.
+        """
+        intent = self._load_artifact("intent_spec")
+        if intent is None:
+            return State.INTAKE
+
+        graph_dict = self._build_goal_graph(intent)
+        GraphBuilder.validate(GoalGraph(**graph_dict))  # raises on a bad/cyclic graph
+        self.context.artifacts["goal_graph"] = self._write_artifact("goal_graph", graph_dict)
         return State.DISCOVER
+
     def discover(self) -> State:
+        """Rank registry tools for the intent and persist the candidate slate.
+
+        Scores every catalogued method against the derived discovery query and
+        writes the top-ranked candidates (with a human-readable rationale) as the
+        ``discovery`` artifact for plan synthesis.
+        """
+        intent = self._load_artifact("intent_spec")
+        if intent is None:
+            return State.PLAN
+
+        query = self._discovery_query(intent)
+        ranked = rank_candidates(RegistryLoader().entries(), query, top_k=3)
+        artifact = {
+            "query": {
+                "capability_tags": query.capability_tags,
+                "input_format": query.input_format,
+            },
+            "candidates": [
+                {
+                    "rank": c.rank,
+                    "id": c.entry.id,
+                    "name": c.entry.name,
+                    "version": c.entry.version,
+                    "composite": round(c.composite, 4),
+                    "components": c.components.as_dict(),
+                }
+                for c in ranked
+            ],
+            "rationale": explain_ranking(ranked),
+        }
+        self.context.artifacts["discovery"] = self._write_artifact("discovery", artifact)
         return State.PLAN
+
     def plan(self) -> State:
+        """Synthesize a complete ExecutionPlan from the top-ranked candidate.
+
+        Deterministically re-ranks, takes #1, and composes a plan with cost,
+        compute, and risk/safety metadata, written as the ``execution_plan``
+        artifact. Researcher approval (the PLAN->BUILD guard's ``plan_approved``)
+        remains a separate gate that this handler does not set.
+        """
+        intent = self._load_artifact("intent_spec")
+        if intent is None:
+            return State.BUILD
+
+        query = self._discovery_query(intent)
+        ranked = rank_candidates(RegistryLoader().entries(), query, top_k=1)
+        if not ranked:
+            return State.BUILD
+
+        execution_plan = PlanSynthesizer().synthesize(
+            candidate=ranked[0],
+            goal_id=self._primary_goal_id(),
+            acceptance_metrics=intent.get("acceptance_metrics", []),
+            requested_capability=query.capability_tags[0],
+        )
+        self.context.artifacts["execution_plan"] = self._write_artifact(
+            "execution_plan", asdict(execution_plan))
         return State.BUILD
+
     def build(self) -> State:
         return State.EXECUTE
     def execute(self) -> State:
