@@ -1,0 +1,24 @@
+{
+  "version": "2026.07.08",
+  "property_units": {
+    "logS": "log10(mol/L)"
+  },
+  "default_source": "Delaney, J. S. ESOL: Estimating Aqueous Solubility Directly from Molecular Structure. J. Chem. Inf. Comput. Sci. 2004.",
+  "default_doi": "10.1021/ci034243x",
+  "baselines": [
+    {"molecule": "aspirin", "property": "logS", "literature_value": -1.72},
+    {"molecule": "caffeine", "property": "logS", "literature_value": -0.87},
+    {"molecule": "paracetamol", "property": "logS", "literature_value": -1.03},
+    {"molecule": "ibuprofen", "property": "logS", "literature_value": -3.62},
+    {"molecule": "benzene", "property": "logS", "literature_value": -1.64},
+    {"molecule": "toluene", "property": "logS", "literature_value": -2.21},
+    {"molecule": "phenol", "property": "logS", "literature_value": 0.00},
+    {"molecule": "aniline", "property": "logS", "literature_value": -0.41},
+    {"molecule": "naphthalene", "property": "logS", "literature_value": -3.61},
+    {"molecule": "anthracene", "property": "logS", "literature_value": -6.35},
+    {"molecule": "nitrobenzene", "property": "logS", "literature_value": -1.80},
+    {"molecule": "chlorobenzene", "property": "logS", "literature_value": -2.38},
+    {"molecule": "salicylic acid", "property": "logS", "literature_value": -1.90},
+    {"molecule": "ethylbenzene", "property": "logS", "literature_value": -2.77}
+  ]
+}
