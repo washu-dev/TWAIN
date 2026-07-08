@@ -12,6 +12,8 @@ test = "pytest tests/"
 python = "3.12.*"
 jsonschema = "*"
 pytest = "*"
+python-dotenv = ">=1.2.2,<2"
+requests = ">=2.34.2,<3"
 
 # Per-workstream features: branches add their own dependencies here as needed,
 # e.g. [feature.sim.dependencies] ase/pymatgen for Benchmark,
