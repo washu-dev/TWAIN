@@ -115,6 +115,50 @@ TOOL_REGISTRY: Dict[str, ToolDependencies] = {
     "pyscf": ToolDependencies(Dependency("pyscf", "2.6.2", "pyscf")),
     "psi4": ToolDependencies(Dependency("psi4", "1.9.1", "psi4")),
     "xtb": ToolDependencies(Dependency("xtb-python", "22.1", "xtb")),
+    # DFT calculators attached to a driver library (usually ASE). GPAW pulls in
+    # ASE, which the generated ASE+GPAW scripts also import directly.
+    "gpaw": ToolDependencies(
+        Dependency("gpaw", "24.6.0", "gpaw"),
+        extras=[Dependency("ase", "3.23.0", "ase")],
+    ),
+    # DFTB+ (density-functional tight binding); driven via ASE. Conda-only in
+    # practice (needs the dftb+ binary + Slater-Koster params). The package has
+    # no python module, so the *import* probe targets ASE's wrapper while the
+    # requirement line still installs the `dftbplus` package.
+    "dftbplus": ToolDependencies(
+        Dependency("dftbplus", "24.1", "ase.calculators.dftb"),
+        extras=[Dependency("ase", "3.23.0", "ase")],
+    ),
+    # Binary DFT/QC codes driven via ASE wrappers (no importable python module of
+    # their own -> the import probe targets the ASE wrapper).
+    "qe": ToolDependencies(
+        Dependency("qe", "7.5", "ase.calculators.espresso"),
+        extras=[Dependency("ase", "3.23.0", "ase")],
+    ),
+    "abinit": ToolDependencies(
+        Dependency("abinit", "10.0.3", "ase.calculators.abinit"),
+        extras=[Dependency("ase", "3.23.0", "ase")],
+    ),
+    "cp2k": ToolDependencies(
+        Dependency("cp2k", "2026.1", "ase.calculators.cp2k"),
+        extras=[Dependency("ase", "3.23.0", "ase")],
+    ),
+    "nwchem": ToolDependencies(
+        Dependency("nwchem", "7.3.1", "ase.calculators.nwchem"),
+        extras=[Dependency("ase", "3.23.0", "ase")],
+    ),
+    # Real python packages (import the module directly).
+    "tblite": ToolDependencies(
+        Dependency("tblite", "0.6.0", "tblite"),
+        extras=[Dependency("ase", "3.23.0", "ase")],
+    ),
+    "matgl": ToolDependencies(
+        Dependency("matgl", "4.0.3", "matgl"),
+        extras=[Dependency("pymatgen", "2024.6.10", "pymatgen")],
+    ),
+    "chgnet": ToolDependencies(Dependency("chgnet", "0.4.2", "chgnet")),
+    "mdanalysis": ToolDependencies(Dependency("MDAnalysis", "2.10.0", "MDAnalysis")),
+    "mdtraj": ToolDependencies(Dependency("mdtraj", "1.11.1", "mdtraj")),
 }
 
 # Alternative spellings -> canonical registry key.
@@ -127,6 +171,14 @@ _ALIASES: Dict[str, str] = {
     "mordred-legacy": "mordred",
     "rdkit-pypi": "rdkit",
     "xtb-python": "xtb",
+    "dftb+": "dftbplus",
+    "dftb": "dftbplus",
+    "quantum espresso": "qe",
+    "quantum-espresso": "qe",
+    "espresso": "qe",
+    "mdanalysis": "mdanalysis",
+    "open babel": "openbabel",
+    "openbabel": "openbabel",
 }
 
 

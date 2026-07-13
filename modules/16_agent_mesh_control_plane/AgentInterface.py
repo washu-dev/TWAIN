@@ -65,3 +65,4 @@ class AgentInterface:
 
 if __name__ == "__main__":
     agent = AgentInterface();
+    agent.callAgent("This is a test")

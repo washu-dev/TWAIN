@@ -1,2 +1,2 @@
-tool,tool_import,tool_version,model,n_criteria,input_present
-numpy,numpy,2.5.0,generic_run,1,False
+formula,material,band_gap,total_energy_eV,smoke,num_atoms
+Si2,silicon,,,True,2

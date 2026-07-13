@@ -120,6 +120,8 @@ class Orchestrator:
         circuit_breaker_cooldown: int = 300,
         execute_locally: bool = False,
         execute_install_deps: bool = False,
+        verify_codegen: bool = False,
+        auto_approve: bool = False,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -184,6 +186,14 @@ class Orchestrator:
             # injected/seeded test machines keep EXECUTE a no-op.
             execute_locally=execute_locally,
             execute_install_deps=execute_install_deps,
+            # Verify LLM-synthesized calculator scripts (run --smoke in the sim env
+            # and repair real failures) before handing them off. Best-effort:
+            # degrades to a compile-only check when the env/network can't verify.
+            verify_codegen=verify_codegen,
+            # Unattended mode: skip the heavy-calculation confirmation prompt so a
+            # run reaches completion without human input (see the runner's
+            # TWAIN_AUTO_RUN). The plan-approval gate is enforced by the driver.
+            auto_approve=auto_approve,
         )
 
         if resuming:
@@ -448,6 +458,8 @@ class Orchestrator:
         """
         from event_bus import EventBus
         kwargs.setdefault("execute_locally", True)
+        # Real runs verify+repair generated calculator scripts before handoff.
+        kwargs.setdefault("verify_codegen", True)
         return cls(
             session_id=session_id,
             researcher_id="demo@twain.local",

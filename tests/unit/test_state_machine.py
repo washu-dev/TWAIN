@@ -112,7 +112,7 @@ HAPPY_CONTEXT = dict(
 
 
 EXPECTED_STATES = {
-    "INTAKE", "CLARIFY", "DECOMPOSE", "DISCOVER", "PLAN", "BUILD",
+    "INTAKE", "CLARIFY", "DECOMPOSE", "DISCOVER", "PLAN", "BUILD", "REPAIR",
     "EXECUTE", "INTERPRET", "VALIDATE", "ACCEPT", "CORRECT", "REPLAN",
     "TERMINATE",
 }
@@ -145,7 +145,8 @@ class TestGuardTable:
         (State.DECOMPOSE, State.DISCOVER),
         (State.DISCOVER, State.PLAN),
         (State.PLAN, State.BUILD),
-        (State.BUILD, State.EXECUTE),
+        (State.BUILD, State.REPAIR),
+        (State.REPAIR, State.EXECUTE),
         (State.EXECUTE, State.INTERPRET),
         (State.INTERPRET, State.VALIDATE),
         (State.VALIDATE, State.ACCEPT),
@@ -193,7 +194,8 @@ class TestHappyPath:
             "decompose": State.DISCOVER,
             "discover": State.PLAN,
             "plan": State.BUILD,
-            "build": State.EXECUTE,
+            "build": State.REPAIR,
+            "repair": State.EXECUTE,
             "execute": State.INTERPRET,
             "interpret": State.VALIDATE,
             "validate": State.ACCEPT,
@@ -235,7 +237,7 @@ class TestBuildProducesRunBundle:
 
         next_state = m.build()
 
-        assert next_state == State.EXECUTE
+        assert next_state == State.REPAIR
         bundle_dir = Path(m.context.artifacts["run_bundle"])
         assert bundle_dir.is_dir()
         for filename in ("main.py", "config.yaml", "requirements.txt", "inline_tests.py"):
@@ -244,11 +246,18 @@ class TestBuildProducesRunBundle:
         # the generated entrypoint must be syntactically valid Python
         compile((bundle_dir / "main.py").read_text(encoding="utf-8"), "main.py", "exec")
 
-    def test_build_without_plan_is_a_noop_to_execute(self, tmp_path):
-        # No execution_plan artifact -> build() must not raise; it advances anyway.
+    def test_build_without_plan_is_a_noop_to_repair(self, tmp_path):
+        # No execution_plan artifact -> build() must not raise; it advances anyway
+        # (through REPAIR, which also no-ops with no bundle).
         m = _offline_machine(tmp_path)
-        assert m.build() == State.EXECUTE
+        assert m.build() == State.REPAIR
         assert "run_bundle" not in m.context.artifacts
+
+    def test_repair_without_bundle_is_a_noop_to_execute(self, tmp_path):
+        # No run_bundle artifact -> repair() passes straight through to EXECUTE.
+        m = _offline_machine(tmp_path)
+        assert m.repair() == State.EXECUTE
+        assert "repair_report" not in m.context.artifacts
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -320,7 +329,7 @@ class TestExecuteRunsBundle:
         data = json.loads(Path(result_path).read_text(encoding="utf-8"))
         assert data["status"] == "success" and data["peak_memory_mb"] == 12.5
 
-    def test_failed_run_sets_execution_status_false(self, tmp_path):
+    def test_failed_run_raises_actionable_error(self, tmp_path):
         from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
 
         m, _ = self._machine_with_bundle(tmp_path)
@@ -328,7 +337,12 @@ class TestExecuteRunsBundle:
             ExecutionResult(status=ExecutionStatus.DEPENDENCY_ERROR, exit_code=1)
         )
         m.execute_locally = True
-        assert m.execute() == State.INTERPRET
+        # A failed real execution surfaces an actionable error (with the real
+        # reason + next steps) instead of letting the EXECUTE->INTERPRET guard
+        # fail downstream as an opaque "incomplete context". execution_status is
+        # still recorded False before raising, for provenance/resume.
+        with pytest.raises(Exception):
+            m.execute()
         assert m.context.execution_status is False
 
     def test_no_bundle_is_a_noop(self, tmp_path):
@@ -391,10 +405,18 @@ class TestGuardRejection:
             with pytest.raises(GuardsBroken):
                 m.run()
 
-    def test_build_to_execute_blocked_without_plan_approved(self, tmp_path):
+    def test_build_to_repair_blocked_without_plan_approved(self, tmp_path):
         m = _make_machine(tmp_path, clarified=True, plan_approved=False,
                           execution_status=True, validation_result="accepted")
         m.current_state = State.BUILD
+        with patch.object(m.storage, "commit"):
+            with pytest.raises(GuardsBroken):
+                m.run()
+
+    def test_repair_to_execute_blocked_without_plan_approved(self, tmp_path):
+        m = _make_machine(tmp_path, clarified=True, plan_approved=False,
+                          execution_status=True, validation_result="accepted")
+        m.current_state = State.REPAIR
         with patch.object(m.storage, "commit"):
             with pytest.raises(GuardsBroken):
                 m.run()

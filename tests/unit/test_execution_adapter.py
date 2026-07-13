@@ -274,6 +274,32 @@ class TestLocalAdapterExecute:
         assert "hello world" in res.stdout
         assert (Path(res.artifacts_dir) / "produced.txt").is_file()
 
+    def test_env_local_binary_is_on_path(self, tmp_path):
+        # Regression: a bundle that shells out to an env-local binary (like an ASE
+        # calculator running `dftb+`) must find it. Running a pixi/venv interpreter
+        # by its bare path doesn't activate the env, so the adapter puts the
+        # interpreter's own dir on PATH -- a binary next to it now resolves
+        # (previously "command not found" -> exit 127).
+        import os
+        import stat
+        import sys
+        bindir = tmp_path / "envbin"
+        bindir.mkdir()
+        os.symlink(sys.executable, bindir / "python")   # env-local interpreter
+        probe = bindir / "twain_probe_bin"
+        probe.write_text("#!/bin/sh\necho ok\n")
+        probe.chmod(probe.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+        d = make_bundle_dir(
+            tmp_path,
+            "import shutil, sys\n"
+            "sys.exit(0 if shutil.which('twain_probe_bin') else 3)\n",
+        )
+        adapter = LocalExecutionAdapter(poll_interval=0.02)
+        res = adapter.execute(d, python_executable=str(bindir / "python"),
+                              run_smoke=False, keep_artifacts=False)
+        assert res.exit_code == 0, f"env-local binary not found on PATH (exit {res.exit_code})"
+
     def test_runs_in_copied_tempdir_not_source(self, tmp_path):
         # The adapter copies into a temp dir; the source bundle stays untouched.
         d = make_bundle_dir(tmp_path, "open('sideeffect.txt', 'w').write('x')\n")

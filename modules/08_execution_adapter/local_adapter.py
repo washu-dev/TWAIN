@@ -147,6 +147,17 @@ class LocalExecutionAdapter:
                 run_python = install.python_executable or run_python
 
             run_env = {**os.environ, **(env or {})}
+            # A generated bundle may shell out to an env-local binary: an ASE
+            # calculator like DFTB+/NWChem/Quantum ESPRESSO runs `dftb+`/`nwchem`/…
+            # as a subprocess. Running a pixi-env interpreter by its bare path does
+            # NOT activate the env, so its bin/ dir isn't on PATH and the binary is
+            # "command not found" (exit 127). Put the interpreter's own directory
+            # first on PATH so sibling binaries resolve -- mirroring env activation.
+            # Use the interpreter path AS GIVEN (don't resolve the symlink: a venv
+            # python links to the base interpreter, but its console scripts live in
+            # the venv's own bin/).
+            _bindir = str(Path(run_python).parent)
+            run_env["PATH"] = _bindir + os.pathsep + run_env.get("PATH", "")
 
             # 3) smoke tests before the real run (optional) ------------------
             smoke_log = None

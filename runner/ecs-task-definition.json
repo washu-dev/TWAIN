@@ -1,0 +1,38 @@
+{
+  "family": "twain-runner",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "8192",
+  "executionRoleArn": "arn:aws:iam::730335203321:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::730335203321:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "twain-runner",
+      "image": "730335203321.dkr.ecr.us-east-1.amazonaws.com/twain-runner-ecr:latest",
+      "environment": [
+        { "name": "DB_HOST",   "value": "twain-app-database.cn8saqya88cd.us-east-1.rds.amazonaws.com" },
+        { "name": "DB_PORT",   "value": "5432" },
+        { "name": "DB_NAME",   "value": "twaindb" },
+        { "name": "DB_USER",   "value": "postgres" },
+        { "name": "AWS_REGION","value": "us-east-1" },
+        { "name": "AWS_SECRET_ARN", "value": "arn:aws:secretsmanager:us-east-1:730335203321:secret:DBPASSWORD-xfmLoq" },
+        { "name": "TWAIN_EXECUTE_LOCALLY", "value": "1" }
+      ],
+      "secrets": [
+        { "name": "API_KEY",       "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN_LLM_API_KEY-REPLACE" },
+        { "name": "CLIENT_ID",     "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN_LLM_CLIENT_ID-REPLACE" },
+        { "name": "CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN_LLM_CLIENT_SECRET-REPLACE" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/twain-runner",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "essential": true
+    }
+  ]
+}

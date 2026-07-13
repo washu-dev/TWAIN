@@ -53,7 +53,7 @@ jobs:
       - name: Unit tests
         working-directory: api
         run: |
-          pytest test_api.py -v \
+          pytest -v \
             --cov=. \
             --cov-report=term-missing \
             --cov-fail-under=50 \

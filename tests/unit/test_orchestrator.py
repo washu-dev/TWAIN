@@ -49,7 +49,7 @@ HAPPY = dict(clarified=True, plan_approved=True, execution_status=True,
              validation_result="accepted")
 
 HANDLER_NAMES = ["intake", "clarify", "decompose", "discover", "plan", "build",
-                 "execute", "interpret", "validate", "accept"]
+                 "repair", "execute", "interpret", "validate", "accept"]
 
 # A valid, already-confident IntentSpec the fake LLM returns. Confidence is above
 # the StateMachine's 0.8 threshold so clarify() needs no follow-up questions.
@@ -197,8 +197,9 @@ class TestDrivesStateMachine:
     def test_reaches_terminate_with_expected_transition_count(self, env):
         o = build(env, "count")
         o.run()
-        # INTAKE->CLARIFY->...->ACCEPT->TERMINATE is 10 transitions.
-        assert o.run_session.transition_count == 10
+        # INTAKE->CLARIFY->...->BUILD->REPAIR->EXECUTE->...->ACCEPT->TERMINATE
+        # is 11 transitions.
+        assert o.run_session.transition_count == 11
         assert o.run_session.get_state() == State.TERMINATE
 
     def test_no_notification_and_events_published(self, env):
@@ -207,8 +208,8 @@ class TestDrivesStateMachine:
         assert env["notes"] == []
         types = env["bus"].types()
         assert "run.started" in types and "run.completed" in types
-        assert types.count("stage.started") == 10
-        assert types.count("stage.completed") == 10
+        assert types.count("stage.started") == 11
+        assert types.count("stage.completed") == 11
 
     def test_provenance_records_mapped_stages(self, env):
         o = build(env, "prov")

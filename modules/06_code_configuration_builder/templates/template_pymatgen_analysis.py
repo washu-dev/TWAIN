@@ -54,6 +54,7 @@ CONFIG_FILE = "{CONFIG_FILE}"    # runtime config path (YAML)
 GENERATED_AT = "{GENERATED_AT}"  # originating plan timestamp (provenance)
 _CONFIG_JSON = r"""{CONFIG_JSON}"""        # baked hyperparameters (JSON)
 _ACCEPTANCE_JSON = r"""{ACCEPTANCE_JSON}"""  # baked acceptance criteria (JSON)
+_STRUCTURE_JSON = r"""{STRUCTURE_JSON}"""  # target structure from the IntentSpec (JSON)
 
 
 # ─────────────────────────── pure helpers (tool-free) ───────────────────────
@@ -144,12 +145,18 @@ def _check_acceptance(metrics, criteria):
 
 
 def _sample_structure():
-    """Return a tiny built-in structure (BCC iron) for smoke runs.
+    """Return the target structure baked in from the IntentSpec, or a tiny
+    built-in sample (BCC iron) when none was supplied (e.g. a smoke run with no
+    material). Baking the requested material here is what makes "the density of
+    silicon" analyse silicon instead of this iron placeholder.
 
     >>> s = _sample_structure()
     >>> s["atoms"][0]["species"], len(s["atoms"])
     ('Fe', 2)
     """
+    baked = _parse_json(_STRUCTURE_JSON, {})
+    if isinstance(baked, dict) and baked.get("atoms") and baked.get("lattice"):
+        return baked
     a = 2.87
     return {
         "lattice": [[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]],

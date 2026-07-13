@@ -35,6 +35,13 @@ event_bus.log
 # ── Python ─────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.venv/
+.venv-*/
+api/.venv-api/
 *.egg-info/
 .venv/
 venv/
