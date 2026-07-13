@@ -279,6 +279,10 @@ API and select the one matching the task) rather than hardcoding a guessed strin
 Call every API with the argument types it documents.
 - Keep the heavy imports (`{library_import}`, `{calculator_import}`) INSIDE functions \
 so the module still imports where they are not installed.
+- First thing in the `if __name__ == "__main__":` block, anchor the working \
+directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
+__file__)))`) so relative outputs and calculator scratch files land next to the \
+script, never in the caller's working directory.
 {smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "calculator", "property", and "output_file". Write the same \
@@ -318,6 +322,10 @@ discover valid identifiers at runtime, and call every API with the argument type
 documents.
 - Keep the heavy import (`{library_import}`) INSIDE functions so the module still \
 imports where it is not installed.
+- First thing in the `if __name__ == "__main__":` block, anchor the working \
+directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
+__file__)))`) so relative outputs and calculator scratch files land next to the \
+script, never in the caller's working directory.
 {smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "property", and "output_file". Write the same metrics as one \

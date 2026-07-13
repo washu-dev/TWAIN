@@ -32,6 +32,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -178,4 +179,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Anchor relative paths (results, tool scratch files) to the bundle dir so
+    # a manual run from anywhere doesn't litter the caller's working directory.
+    os.chdir(Path(__file__).resolve().parent)
     raise SystemExit(main())
