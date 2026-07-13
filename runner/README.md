@@ -79,6 +79,37 @@ download a set (e.g. `pbc` for silicon) from <https://dftb.org> and point
 `DFTB_PREFIX` at its directory. The generated script says so if it's unset.
 GPAW's PAW datasets ship with the conda package (no extra step).
 
+## Run in Docker (any OS)
+Some calculators only build on Linux (GPAW has no Windows or Apple-Silicon
+build). The runner image is a full `linux-64` TWAIN — **both** pixi envs
+(default + `sim`) are baked in at build time — so Docker is the way to run the
+complete stack on a Mac or Windows machine.
+
+**One-time Docker setup**
+- **macOS**: Docker Desktop, or the lighter CLI route:
+  `brew install docker docker-buildx colima`, add
+  `"cliPluginsExtraDirs": ["/opt/homebrew/lib/docker/cli-plugins"]` to
+  `~/.docker/config.json`, then `colima start --vm-type vz --vz-rosetta`
+  (Rosetta runs the amd64 image at near-native speed; `colima start` again
+  after each reboot).
+- **Windows**: Docker Desktop with the WSL2 backend — `linux-64` containers run
+  natively, no emulation.
+
+**Build and run** (build context is the repo ROOT; on Apple Silicon the
+`--platform` flag is required, since the image is `linux-64` only):
+
+```bash
+docker build --platform linux/amd64 -f runner/Dockerfile -t twain-runner .
+
+# sanity check: the calculators are really in the image
+docker run --rm --platform linux/amd64 twain-runner \
+  .pixi/envs/sim/bin/python -c "import ase, gpaw; print(gpaw.__version__)"
+
+# unattended full run (mount logs/ so results survive the container)
+docker run --rm --platform linux/amd64 --env-file .env -e TWAIN_AUTO_RUN=1 \
+  -e DB_HOST=host.docker.internal -v "$PWD/logs:/app/logs" twain-runner
+```
+
 ## Test
 No DB or pixi env needed — the unit tests use in-memory fakes:
 
@@ -112,8 +143,5 @@ Execution mode (env in the task def):
 
 The image is identical locally and on ECS, so a run behaves the same in Docker and
 in Fargate. EXECUTE runs generated code, so keep the task sandboxed (resource
-limits, minimal IAM/network). Local build to sanity-check before pushing:
-
-```bash
-docker build -f runner/Dockerfile -t twain-runner .   # heavy: full scientific stack + GPAW
-```
+limits, minimal IAM/network). To sanity-check the build before pushing, see
+"Run in Docker (any OS)" above (add `--platform linux/amd64` on Apple Silicon).
