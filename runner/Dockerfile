@@ -15,6 +15,11 @@ WORKDIR /app
 # image still builds if the lock is momentarily behind pixi.toml.
 COPY pixi.toml pixi.lock ./
 RUN pixi install
+# The calculators (GPAW/DFTB+) live in the isolated 'sim' env, which a plain
+# `pixi install` does NOT materialize. The state machine resolves the sim
+# interpreter by path (.pixi/envs/sim/bin/python), so without this layer EXECUTE
+# silently degrades to skipped_missing_dependency and the runner is planning-only.
+RUN pixi install -e sim
 
 # Application code (see .dockerignore for what is excluded).
 COPY . .
