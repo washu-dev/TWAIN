@@ -81,3 +81,14 @@ app.yaml.bak
 
 # StateMachine.intake() scratch output
 ExampleFileTest.txt
+
+# ── DFTB+ / calculator run scratch output (from generated-bundle runs) ─────────
+Si.out
+dftb_in.hsd
+geo_end.gen
+timer.dat
+results.csv
+band.out
+detailed.out
+charges.bin
+dftb_pin.hsd
