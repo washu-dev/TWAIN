@@ -23,9 +23,13 @@ and does simple keyword/capability matching. No network, no heavy imports.
 from __future__ import annotations
 
 import json
+import os
 import platform as _platform
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -57,6 +61,88 @@ def current_platform() -> str:
     if sys.platform.startswith("win"):
         return "win-64"
     return "unknown"
+
+
+# The TWAIN runner image (runner/Dockerfile) is a full linux-64 build with both
+# pixi envs baked in, so a reachable Docker daemon makes linux-64 an execution
+# target from any host -- that's how a Mac runs a Linux-only engine like GPAW.
+DOCKER_LINUX_PLATFORM = "linux-64"
+DEFAULT_DOCKER_IMAGE = os.environ.get("TWAIN_DOCKER_IMAGE", "twain-runner")
+
+
+def _docker_exe() -> Optional[str]:
+    """Path to the docker CLI (``TWAIN_DOCKER`` overrides the name), or None."""
+    return shutil.which(os.environ.get("TWAIN_DOCKER", "docker"))
+
+
+@lru_cache(maxsize=1)
+def docker_available() -> bool:
+    """True when a Docker daemon is reachable, so linux-64 is a runnable target.
+
+    Cached per process (a daemon coming up/down mid-run is not a case we chase).
+    Independent of whether the twain image is *built* -- that is checked at
+    execution time by :func:`docker_image_available`, so discovery can plan for
+    linux-64 and EXECUTE can then guide the user to ``docker build`` if needed.
+    Set ``TWAIN_NO_DOCKER=1`` to force-disable (e.g. to plan for the host only).
+    """
+    if os.environ.get("TWAIN_NO_DOCKER", "").strip().lower() in ("1", "true", "yes", "on"):
+        return False
+    exe = _docker_exe()
+    if not exe:
+        return False
+    try:
+        return subprocess.run(
+            [exe, "info"], capture_output=True, timeout=15
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def docker_image_available(image: str = DEFAULT_DOCKER_IMAGE) -> bool:
+    """True when ``image`` is present locally (``docker image inspect`` succeeds).
+
+    Separate from :func:`docker_available`: the daemon can be up while the
+    twain-runner image hasn't been built yet -- EXECUTE uses this to degrade
+    gracefully with a ``docker build`` hint instead of failing opaquely.
+    """
+    exe = _docker_exe()
+    if not exe:
+        return False
+    try:
+        return subprocess.run(
+            [exe, "image", "inspect", image], capture_output=True, timeout=15
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def planning_platform(host: Optional[str] = None, docker: Optional[bool] = None) -> str:
+    """The richest platform TWAIN can reach for this run.
+
+    ``linux-64`` when a Docker daemon is available (the runner image is a full
+    linux-64 build), else the host platform. Discovery plans against this so a
+    higher-fidelity Linux-only engine (e.g. GPAW) is selectable on a Mac and its
+    run is later routed into the container; without Docker it falls back to the
+    host so the best *native* engine is chosen. Engines that build on both the
+    host and linux-64 (DFTB+, xtb, ...) remain candidates either way.
+
+    ``host`` defaults to :func:`current_platform` and ``docker`` to
+    :func:`docker_available`; callers pass both explicitly so the same signals
+    drive planning and native-vs-docker routing (and so tests can pin them).
+
+    >>> planning_platform("osx-arm64", docker=True)
+    'linux-64'
+    >>> planning_platform("osx-arm64", docker=False)
+    'osx-arm64'
+    >>> planning_platform("linux-64", docker=True)   # already linux; no upgrade
+    'linux-64'
+    """
+    host = host or current_platform()
+    if docker is None:
+        docker = docker_available()
+    if host != DOCKER_LINUX_PLATFORM and docker:
+        return DOCKER_LINUX_PLATFORM
+    return host
 
 
 @dataclass
@@ -99,6 +185,15 @@ class CalculatorEntry:
     # first-principles/electronic-structure calculation over these -- the user
     # wants actual calculations, not predictions (twain-prefer-real-calculations).
     ml_surrogate: bool = False
+    # Explicit override for the BUILD stage's --smoke decision (whether the smoke
+    # check runs the REAL property computation on a tiny system, catching a wrong
+    # API call before the expensive run, vs. only loading the calculator). None
+    # (the default) falls back to the `not heavy and not needs_external_data`
+    # heuristic. Set True for a tool that is heavy/external-data for a full run but
+    # can still do a cheap single-point smoke because TWAIN provisions its data --
+    # e.g. DFTB+ is semiempirical (a tiny single-point is <1s) and its Slater-Koster
+    # files are fetched into DFTB_PREFIX by runner/fetch_slako.sh.
+    smoke_can_compute: Optional[bool] = None
 
     def covers(self, property_key: str) -> bool:
         """Whether this calculator can compute ``property_key`` (case-insensitive)."""
@@ -119,6 +214,26 @@ class CalculatorEntry:
         if not self.platforms or not platform:
             return True
         return platform.lower() in {p.lower() for p in self.platforms}
+
+    def needs_docker(self, host_platform: Optional[str] = None) -> bool:
+        """Whether running this calculator on ``host_platform`` requires Docker.
+
+        True when it has no build for the host but does build for linux-64 (the
+        runner image's platform) -- e.g. GPAW on osx-arm64. Such a run is routed
+        into the linux-64 container instead of the local sim env. ``host_platform``
+        defaults to the current platform.
+
+        >>> find_calculator("GPAW").needs_docker("osx-arm64")
+        True
+        >>> find_calculator("GPAW").needs_docker("linux-64")
+        False
+        >>> find_calculator("DFTB+").needs_docker("osx-arm64")  # builds natively
+        False
+        """
+        host = host_platform or current_platform()
+        if self.available_on(host):
+            return False
+        return DOCKER_LINUX_PLATFORM in {p.lower() for p in self.platforms}
 
     def supports_library(self, library: Optional[str]) -> bool:
         """Whether this calculator can be driven by ``library`` (name or id).

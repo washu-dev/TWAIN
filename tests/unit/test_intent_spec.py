@@ -15,6 +15,7 @@ import pytest
 
 from intake.intent_spec import (
     AcceptanceCriterion,
+    Crystal,
     Domain,
     IntentSpec,
     IntentSpecMetadata,
@@ -22,24 +23,43 @@ from intake.intent_spec import (
     SystemDescriptors,
 )
 
-EXAMPLE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "schemas"
-    / "examples"
-    / "intent_spec_example.json"
-)
+EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "schemas" / "examples"
+EXAMPLE_PATH = EXAMPLES_DIR / "intent_spec_example.json"
+CRYSTAL_EXAMPLE_PATH = EXAMPLES_DIR / "intent_spec_crystal_example.json"
 
 
 @pytest.fixture
 def example_dict():
-    """A fresh copy of the canonical example spec for each test."""
+    """A fresh copy of the canonical (molecular) example spec for each test."""
     with open(EXAMPLE_PATH, "r") as f:
+        return json.load(f)
+
+
+@pytest.fixture
+def crystal_example_dict():
+    """A fresh copy of the canonical crystal example spec for each test."""
+    with open(CRYSTAL_EXAMPLE_PATH, "r") as f:
         return json.load(f)
 
 
 def with_field(base, **overrides):
     """Return a shallow copy of `base` with `overrides` applied."""
     return {**base, **overrides}
+
+
+def drop_none(value):
+    """Recursively strip keys whose value is None.
+
+    ``SystemDescriptors`` always carries both a ``molecule`` and a ``crystal``
+    slot, so ``asdict`` emits the unused one as ``None``. The examples only list
+    the populated representation, so normalise both sides by dropping ``None``
+    before comparing.
+    """
+    if isinstance(value, dict):
+        return {k: drop_none(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [drop_none(v) for v in value]
+    return value
 
 
 # --------------------------------------------------------------------------- #
@@ -65,6 +85,30 @@ class TestMolecule:
 
 
 # --------------------------------------------------------------------------- #
+# Crystal
+# --------------------------------------------------------------------------- #
+class TestCrystal:
+    def test_valid_minimal(self):
+        cr = Crystal(formula="TiO2")
+        assert cr.formula == "TiO2"
+        assert cr.phase is None
+
+    def test_valid_full(self):
+        cr = Crystal(formula="TiO2", name="titanium dioxide", phase="rutile",
+                     space_group="P4_2/mnm", space_group_number=136, mp_id="mp-2657")
+        assert cr.phase == "rutile"
+        assert cr.mp_id == "mp-2657"
+
+    def test_formula_required(self):
+        with pytest.raises(ValueError):
+            Crystal(formula="")
+
+    def test_formula_must_be_str(self):
+        with pytest.raises(ValueError):
+            Crystal(formula=None)
+
+
+# --------------------------------------------------------------------------- #
 # SystemDescriptors
 # --------------------------------------------------------------------------- #
 class TestSystemDescriptors:
@@ -80,6 +124,30 @@ class TestSystemDescriptors:
         sd = SystemDescriptors(molecule=mol, formula="some formula")
         assert sd.molecule is mol
 
+    def test_molecule_kind_inferred(self):
+        sd = SystemDescriptors(molecule={"name": "x", "SMILES": "C"}, formula="CH4")
+        assert sd.kind == "molecule"
+
+    def test_coerces_crystal_dict(self):
+        sd = SystemDescriptors(
+            crystal={"formula": "TiO2", "phase": "rutile"}, formula="TiO2"
+        )
+        assert isinstance(sd.crystal, Crystal)
+        assert sd.crystal.phase == "rutile"
+        assert sd.molecule is None
+
+    def test_crystal_kind_inferred(self):
+        sd = SystemDescriptors(crystal={"formula": "TiO2"}, formula="TiO2")
+        assert sd.kind == "crystal"
+
+    def test_explicit_kind_validated(self):
+        with pytest.raises(ValueError):
+            SystemDescriptors(crystal={"formula": "TiO2"}, formula="TiO2", kind="widget")
+
+    def test_requires_a_representation(self):
+        with pytest.raises(ValueError):
+            SystemDescriptors(formula="TiO2")
+
     def test_formula_must_be_str(self):
         with pytest.raises(ValueError):
             SystemDescriptors(
@@ -89,6 +157,10 @@ class TestSystemDescriptors:
     def test_molecule_wrong_type_rejected(self):
         with pytest.raises(ValueError):
             SystemDescriptors(molecule=["not", "a", "molecule"], formula="f")
+
+    def test_crystal_wrong_type_rejected(self):
+        with pytest.raises(ValueError):
+            SystemDescriptors(crystal=["not", "a", "crystal"], formula="f")
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +220,15 @@ class TestIntentSpec:
         assert isinstance(spec.metadata, IntentSpecMetadata)
         assert all(isinstance(c, AcceptanceCriterion) for c in spec.acceptance_criteria)
 
+    def test_builds_from_crystal_example(self, crystal_example_dict):
+        """A materials/crystal spec builds with a Crystal and no molecule/SMILES."""
+        spec = IntentSpec(**crystal_example_dict)
+        assert spec.domain is Domain.MATERIALS
+        assert isinstance(spec.system_descriptors.crystal, Crystal)
+        assert spec.system_descriptors.molecule is None
+        assert spec.system_descriptors.kind == "crystal"
+        assert spec.system_descriptors.crystal.phase == "rutile"
+
     @pytest.mark.parametrize("domain", ["materials", "quantum"])
     def test_valid_domain_strings(self, example_dict, domain):
         spec = IntentSpec(**with_field(example_dict, domain=domain))
@@ -193,7 +274,13 @@ class TestRoundTrip:
         """asdict() of a spec built from the example reproduces the example.
 
         Domain is a str-Enum, so the coerced Domain member compares equal to
-        the original "quantum" string under dict equality.
+        the original "quantum" string under dict equality. None-valued slots
+        (the unused molecule/crystal representation) are dropped on both sides.
         """
         spec = IntentSpec(**example_dict)
-        assert asdict(spec) == example_dict
+        assert drop_none(asdict(spec)) == drop_none(example_dict)
+
+    def test_asdict_roundtrips_crystal_example(self, crystal_example_dict):
+        """The crystal example round-trips through the dataclass too."""
+        spec = IntentSpec(**crystal_example_dict)
+        assert drop_none(asdict(spec)) == drop_none(crystal_example_dict)

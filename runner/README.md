@@ -37,14 +37,18 @@ pixi run python -m runner.runner          # loop forever
 
 ## Running the generated calculators (the `sim` env)
 The DFT calculators (GPAW, DFTB+) have no Python-3.12 conda build, so they live
-in a separate Python-3.11 pixi environment, **`sim`**. Discovery picks a
-calculator that actually builds for the current platform — **GPAW on linux-64,
-DFTB+ on both linux-64 and osx-arm64** (macOS) — so a generated band-gap script
-runs under `sim`:
+in a separate Python-3.11 pixi environment, **`sim`**. Discovery plans against
+the richest platform it can *reach*: **linux-64 when a Docker daemon is available**
+(the runner image), else the host. So it picks **GPAW** (linux-64-only, higher
+fidelity) whenever Docker is present — even on a Mac, where the run is offloaded
+to the container (see "Automatic Docker offload" below) — and falls back to
+**DFTB+** (builds natively on both linux-64 and osx-arm64) when Docker is absent.
+A generated band-gap script runs under `sim`:
 
 ```bash
 pixi install -e sim                                  # one time (heavy)
-pixi run -e sim python <bundle>/main.py --smoke      # build structure + check the binary
+pixi run fetch-slako                                 # one time: DFTB+ .skf params -> slako/
+pixi run -e sim python <bundle>/main.py --smoke      # build structure + real single-point smoke
 pixi run -e sim python <bundle>/main.py              # real run
 ```
 
@@ -74,10 +78,39 @@ TWAIN_AUTO_RUN=1 pixi run -e sim python -m runner.runner --once
 deployment should send unambiguous requests.) On ECS, set `TWAIN_AUTO_RUN=1` in
 the task definition for a hands-off runner.
 
-**DFTB+ needs Slater-Koster parameter files** (`.skf`) for the system's elements:
-download a set (e.g. `pbc` for silicon) from <https://dftb.org> and point
-`DFTB_PREFIX` at its directory. The generated script says so if it's unset.
+**DFTB+ needs Slater-Koster parameter files** (`.skf`) — the conda package ships
+only the binary. Run **`pixi run fetch-slako`** once: it downloads the `mio`
+(H, C, N, O, S, P) and `tiorg` (adds Ti; bulk Ti / TiO2) sets from the
+`dftbparams` GitHub org into `slako/`, and pixi's `[activation.env]` points
+`DFTB_PREFIX` there automatically — for both the `sim` env and the runner
+process, so a direct `pixi run -e sim python <bundle>/main.py` and a full
+pipeline run both resolve the files. The image bakes them in at build time
+(`runner/Dockerfile`). Other element sets (e.g. `pbc` / `siband` for silicon) can
+be dropped into the same `slako/` dir from <https://dftb.org> or `dftbparams`.
 GPAW's PAW datasets ship with the conda package (no extra step).
+
+## Automatic Docker offload (run TWAIN on your Mac, execute Linux engines in Docker)
+You don't have to run the *whole* pipeline in Docker to use a Linux-only engine.
+Run TWAIN natively (e.g. `pixi run python modules/07_runtime_orchestrator/orchestrator.py`)
+and it will **offload just the heavy calculation** to the container when the
+selected engine has no build for your host:
+
+- **Discovery** plans against `linux-64` when a Docker daemon is reachable
+  (`method_discovery.calculator_registry.planning_platform`), so GPAW is selected
+  on a Mac instead of silently downgrading to DFTB+. The plan says so explicitly.
+- **EXECUTE** routes a calculator that `needs_docker` (no host build, but a
+  linux-64 build exists) to `DockerExecutionAdapter`, which runs the bundle via
+  `docker run --platform linux/amd64 … twain-runner pixi run -e sim python …`,
+  bind-mounting the bundle so `results.csv` lands back on the host.
+- If the daemon isn't reachable, discovery falls back to the best **native**
+  engine (DFTB+) and notes that installing Docker would enable a higher-fidelity
+  run. If the daemon is up but the image isn't built, EXECUTE skips gracefully
+  with the exact `docker build` command (it never builds the image for you).
+
+Prerequisites: Docker set up (see "One-time Docker setup" below) and the image
+built once (`docker build --platform linux/amd64 -f runner/Dockerfile -t
+twain-runner .`). Set `TWAIN_NO_DOCKER=1` to force host-only planning;
+`TWAIN_DOCKER_IMAGE` / `TWAIN_DOCKER_PLATFORM` override the image tag / platform.
 
 ## Run in Docker (any OS)
 Some calculators only build on Linux (GPAW has no Windows or Apple-Silicon

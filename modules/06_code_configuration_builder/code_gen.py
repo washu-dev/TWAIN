@@ -64,12 +64,22 @@ class CodeGen:
 
         tool = plan["selected_method"]["tool_name"]
         version = plan["selected_method"]["tool_version"]
-        molecule = intent.get("system_descriptors", {}).get("molecule", {})
-        mol_name = molecule.get("name", "unknown")
-        smiles = molecule.get("SMILES", "")
+        sysd = intent.get("system_descriptors", {}) or {}
+        molecule = sysd.get("molecule", {}) or {}
+        crystal = sysd.get("crystal", {}) or {}
         objective = intent.get("objective", "")
         domain = intent.get("domain", "")
-        formula = intent.get("system_descriptors", {}).get("formula", "")
+        formula = sysd.get("formula", "")
+        # Describe the system as EITHER a crystal (periodic solid, no SMILES) or a
+        # molecule, so a solid-state request isn't mislabelled with an invented SMILES.
+        if crystal:
+            phase = crystal.get("phase")
+            cname = crystal.get("name") or crystal.get("formula") or formula
+            system_line = f"CRYSTAL: {phase + ' ' if phase else ''}{cname} (formula: {formula})"
+        else:
+            mol_name = molecule.get("name", "unknown")
+            smiles = molecule.get("SMILES", "")
+            system_line = f"MOLECULE: {mol_name} (SMILES: {smiles})"
         acceptance = json.dumps(plan.get("acceptance_metrics", []), indent=2)
         slurm = plan.get("slurm_request", {})
         safety = plan.get("safety_notes", [])
@@ -81,8 +91,8 @@ class CodeGen:
             f"OBJECTIVE: {objective}\n"
             f"DOMAIN: {domain}\n"
             f"TOOL/LIBRARY: {tool} (version {version})\n"
-            f"MOLECULE: {mol_name} (SMILES: {smiles})\n"
-            f"FORMULA/METHOD: {formula}\n\n"
+            f"{system_line}\n"
+            f"FORMULA: {formula}\n\n"
             f"ACCEPTANCE METRICS (the script must compute and print these):\n{acceptance}\n\n"
         )
 

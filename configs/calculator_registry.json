@@ -1,6 +1,6 @@
 {
   "registry_version": "1.1",
-  "description": "Python calculators (compute engines) TWAIN can attach to a driver library. Distinct from configs/discovery_registry.json, which catalogs the driver libraries (ASE, Pymatgen, ...). A calculator provides the physics (energies, electronic structure); the driver library builds the atomic system and orchestrates the run. Discovery selects among these by capability, library compatibility, and PLATFORM AVAILABILITY -- a calculator with no build for the current platform is never chosen (e.g. GPAW on Apple Silicon).",
+  "description": "Python calculators (compute engines) TWAIN can attach to a driver library. Distinct from configs/discovery_registry.json, which catalogs the driver libraries (ASE, Pymatgen, ...). A calculator provides the physics (energies, electronic structure); the driver library builds the atomic system and orchestrates the run. Discovery selects among these by capability, library compatibility, and PLATFORM REACHABILITY: it plans against the richest platform it can reach (method_discovery.calculator_registry.planning_platform) -- linux-64 when a Docker daemon is available (the runner image), else the host. So a higher-fidelity Linux-only engine (e.g. GPAW on Apple Silicon) IS chosen when Docker is present and its run is routed into the linux-64 container at EXECUTE; without Docker, discovery falls back to the best engine that builds natively on the host (e.g. DFTB+ on osx-arm64).",
   "calculators": [
     {
       "id": "gpaw",
@@ -77,7 +77,8 @@
         "osx-arm64"
       ],
       "license": "LGPL-3.0-only",
-      "needs_external_data": true
+      "needs_external_data": true,
+      "smoke_can_compute": true
     },
     {
       "id": "emt",

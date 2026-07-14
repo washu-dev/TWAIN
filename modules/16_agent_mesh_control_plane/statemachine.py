@@ -27,8 +27,9 @@ from method_discovery.registry_loader import RegistryLoader
 from method_discovery.scorers import DiscoveryQuery, rank_candidates
 from method_discovery.ranking_rationale import explain_ranking
 from method_discovery.calculator_registry import (
-    calculators_for_property, canonical_property, current_platform, find_calculator,
-    load_calculators,
+    DEFAULT_DOCKER_IMAGE, DOCKER_LINUX_PLATFORM, calculators_for_property,
+    canonical_property, current_platform, docker_available, docker_image_available,
+    find_calculator, load_calculators, planning_platform,
 )
 from method_discovery import llm_discovery
 from result_interpreter.result_package import ResultPackage
@@ -282,12 +283,43 @@ class StateMachine:
             return text[start:end + 1]
         return text
 
+    @staticmethod
+    def _system_kind(intent: dict) -> str:
+        """The target system's representation: 'crystal', 'surface', or 'molecule'.
+
+        Reads the IntentSpec's explicit ``kind`` discriminator when present, else
+        infers it from which sub-object the spec carries (periodic solids under
+        ``crystal``, discrete molecules under ``molecule``). Defaults to
+        'molecule' so a spec with neither behaves as it did before.
+        """
+        sysd = intent.get("system_descriptors") or {}
+        kind = str(sysd.get("kind") or "").lower()
+        if kind in ("molecule", "crystal", "surface"):
+            return kind
+        if isinstance(sysd.get("crystal"), dict) and sysd.get("crystal"):
+            return "crystal"
+        return "molecule"
+
     def _is_confident(self, intent: dict) -> bool:
-        """True when every confidence score meets the threshold (and any exist)."""
+        """True when every *relevant* confidence score meets the threshold.
+
+        Scores that don't apply to the chosen system representation are ignored,
+        so a crystal is never gated on a (meaningless) ``SMILES_confidence`` and a
+        molecule isn't gated on ``phase``/``structure`` confidence. Without this,
+        a solid-state request loops in CLARIFY forever asking for a SMILES it can
+        never sensibly provide.
+        """
         scores = (intent.get("metadata") or {}).get("confidence_scores") or {}
         if not scores:
             return False
-        return all(value >= self.confidence_threshold for value in scores.values())
+        if self._system_kind(intent) in ("crystal", "surface"):
+            irrelevant = {"smiles_confidence", "name_confidence"}
+        else:
+            irrelevant = {"phase_confidence", "structure_confidence"}
+        relevant = {k: v for k, v in scores.items() if k.lower() not in irrelevant}
+        if not relevant:
+            return False
+        return all(value >= self.confidence_threshold for value in relevant.values())
 
     def intake(self) -> State:
         schema = str(twain_paths.SCHEMAS_DIR / "intent_spec.schema.json")
@@ -608,9 +640,14 @@ class StateMachine:
             tags.append("property_prediction")
         tags = list(dict.fromkeys(tags))  # de-dupe, keep order
 
+        # Map the system representation onto the driver-library input format the
+        # registry scores against: periodic solids are consumed as CIF (the format
+        # ASE/Pymatgen/quacc declare), discrete molecules as SMILES.
         input_format = None
-        molecule = (intent.get("system_descriptors") or {}).get("molecule") or {}
-        if molecule.get("SMILES"):
+        sysd = intent.get("system_descriptors") or {}
+        if self._system_kind(intent) in ("crystal", "surface"):
+            input_format = "CIF"
+        elif (sysd.get("molecule") or {}).get("SMILES"):
             input_format = "SMILES"
         return DiscoveryQuery(capability_tags=tags, input_format=input_format)
 
@@ -724,7 +761,13 @@ class StateMachine:
 
         requested_property = self._requested_property(intent)
         domain = (intent.get("domain") or "").lower() or None
-        platform = current_platform()
+        # Plan against the richest platform we can actually reach: with a Docker
+        # daemon up, that's linux-64 (the runner image), so a higher-fidelity
+        # Linux-only engine (e.g. GPAW) is selectable on a Mac and its run is
+        # routed into the container at EXECUTE. Without Docker it's the host, so
+        # the best *native* engine is chosen. host_platform drives the routing note.
+        host_platform = current_platform()
+        platform = planning_platform(host_platform, docker=docker_available())
 
         recommendation = self._llm_recommend(intent, ranked, requested_property, domain, platform)
         if recommendation is not None:
@@ -793,6 +836,16 @@ class StateMachine:
             if calc_entry.needs_external_data:
                 note += " (needs external parameter data to run)"
             execution_plan.safety_notes.append(note)
+            if calc_entry.needs_docker(host_platform):
+                # Non-native engine (e.g. GPAW on a Mac): the run is offloaded to
+                # the linux-64 runner container. Say so explicitly -- the choice
+                # is never silent (the substitution problem the user hit before).
+                execution_plan.safety_notes.append(
+                    f"{calc_entry.name} has no {host_platform} build; it will run in the "
+                    f"linux-64 Docker container (image '{DEFAULT_DOCKER_IMAGE}', linux/amd64 "
+                    f"emulation -- slower than native). Build it first if needed: "
+                    f"`docker build --platform linux/amd64 -f runner/Dockerfile "
+                    f"-t {DEFAULT_DOCKER_IMAGE} .` (see runner/README.md).")
             if calc_entry.ml_surrogate:
                 # The researcher wants real calculations, not predictions: make it
                 # unmistakable when the only available engine is an ML surrogate.
@@ -809,8 +862,23 @@ class StateMachine:
             if anywhere:
                 execution_plan.safety_notes.append(
                     f"A calculator for '{requested_property}' exists ({anywhere[0].name}) but has "
-                    f"no build for this platform ({platform}); using {libraries[0]} alone -- run on a "
+                    f"no build for this platform ({host_platform}); using {libraries[0]} alone -- run on a "
                     f"supported platform (e.g. linux-64) to use it.")
+
+        # Accuracy-first: if Docker is down we planned natively, which may be a
+        # lower-fidelity engine than a Linux-only one we could reach via Docker.
+        # Surface that so the downgrade is explicit and actionable, never silent.
+        if requested_property and not docker_available():
+            best = calculators_for_property(requested_property, domain=domain,
+                                            platform=DOCKER_LINUX_PLATFORM)
+            chosen_id = calc_entry.id if calc_entry is not None else None
+            if best and best[0].id != chosen_id and best[0].needs_docker(host_platform):
+                execution_plan.safety_notes.append(
+                    f"Higher fidelity available: {best[0].name} (Linux-only) would compute "
+                    f"'{requested_property}' at higher fidelity than the native choice"
+                    + (f" ({calc_entry.name})" if calc_entry is not None else "")
+                    + f". Install & start Docker, build the '{DEFAULT_DOCKER_IMAGE}' image "
+                    f"(runner/README.md), and TWAIN will run it in the linux-64 container.")
         execution_plan.target_system = intent.get("system_descriptors") or None
         execution_plan.requested_property = requested_property
 
@@ -951,12 +1019,20 @@ class StateMachine:
         # semiempirical, no external data) can compute in smoke; a heavy or
         # external-data one (full DFT, needs pseudopotentials/SK files) cannot. A
         # library-only run (the library computes the property itself, e.g. PySCF) is
-        # self-contained, so it computes in smoke too.
+        # self-contained, so it computes in smoke too. A calculator may override the
+        # heuristic via `smoke_can_compute` when it's heavy/external-data for a full
+        # run yet can still do a cheap single-point smoke because TWAIN provisions
+        # its data -- e.g. DFTB+ (semiempirical; .skf files fetched into DFTB_PREFIX).
         method = plan.get("selected_method") or {}
         calc_name = method.get("calculator")
         if calc_name:
             ce = find_calculator(calc_name)
-            smoke_compute = bool(ce and not ce.heavy and not ce.needs_external_data)
+            if ce is None:
+                smoke_compute = False
+            elif ce.smoke_can_compute is not None:
+                smoke_compute = ce.smoke_can_compute
+            else:
+                smoke_compute = not ce.heavy and not ce.needs_external_data
         else:
             smoke_compute = True
         bundle = CodegenEngine().generate(
@@ -1109,39 +1185,64 @@ class StateMachine:
         # the default interpreter -- running it with the default `python` fails
         # with ModuleNotFoundError. Plain library runs stay on this interpreter.
         run_python = self._bundle_python()
+        calc = self._selected_calculator()
 
         adapter = self._execution_adapter
+        docker_route = False
         if adapter is None:
-            # Real local execution. Before spending time, make sure the run can
-            # actually happen here: the heavy env must be built, and the selected
-            # calculator importable in it. Otherwise deliver the script with clear
-            # guidance (a graceful outcome, like a deferral) instead of crashing.
-            if self._selected_calculator() is not None and run_python is None:
-                return self._skip_execution(
-                    bundle_dir, status="skipped_missing_dependency",
-                    note=f"Not run here: the '{SIM_ENV}' environment isn't built on this machine.",
-                    how_to=self._how_to_run(bundle_dir))
-            if not self.execute_install_deps:
-                missing = self._missing_run_imports(run_python)
-                if missing:
+            # Route non-native engines (no build for this host, e.g. GPAW on a
+            # Mac) into the linux-64 runner container; everything else runs in the
+            # local sim/default interpreter. Either way, a run that can't happen
+            # here delivers the script with guidance instead of crashing.
+            if calc is not None and calc.needs_docker(current_platform()):
+                if not docker_available():
                     return self._skip_execution(
                         bundle_dir, status="skipped_missing_dependency",
-                        note=f"Not run here: '{missing[0]}' is not installed in the run environment.",
+                        note=f"Not run here: {calc.name} has no {current_platform()} build and "
+                             f"needs the linux-64 Docker runner, but no Docker daemon is reachable.",
                         how_to=self._how_to_run(bundle_dir))
-            from execution_adapter.local_adapter import LocalExecutionAdapter
-            # Keep the working dir (with its outputs) under the session artifacts
-            # dir so results are discoverable and scoped to this run.
-            adapter = LocalExecutionAdapter(workspace_root=str(self.artifacts_dir))
+                if not docker_image_available(DEFAULT_DOCKER_IMAGE):
+                    return self._skip_execution(
+                        bundle_dir, status="skipped_missing_dependency",
+                        note=f"Not run here: {calc.name} runs in Docker, but the "
+                             f"'{DEFAULT_DOCKER_IMAGE}' image isn't built yet.",
+                        how_to=self._how_to_run(bundle_dir))
+                from execution_adapter.docker_adapter import DockerExecutionAdapter
+                adapter = DockerExecutionAdapter(workspace_root=str(self.artifacts_dir))
+                docker_route = True
+            else:
+                # Real local execution. Before spending time, make sure the run can
+                # actually happen here: the heavy env must be built, and the selected
+                # calculator importable in it. Otherwise deliver the script with clear
+                # guidance (a graceful outcome, like a deferral) instead of crashing.
+                if calc is not None and run_python is None:
+                    return self._skip_execution(
+                        bundle_dir, status="skipped_missing_dependency",
+                        note=f"Not run here: the '{SIM_ENV}' environment isn't built on this machine.",
+                        how_to=self._how_to_run(bundle_dir))
+                if not self.execute_install_deps:
+                    missing = self._missing_run_imports(run_python)
+                    if missing:
+                        return self._skip_execution(
+                            bundle_dir, status="skipped_missing_dependency",
+                            note=f"Not run here: '{missing[0]}' is not installed in the run environment.",
+                            how_to=self._how_to_run(bundle_dir))
+                from execution_adapter.local_adapter import LocalExecutionAdapter
+                # Keep the working dir (with its outputs) under the session artifacts
+                # dir so results are discoverable and scoped to this run.
+                adapter = LocalExecutionAdapter(workspace_root=str(self.artifacts_dir))
 
         result = adapter.execute(
             bundle_dir,
-            # The sim env already ships the whole stack, so never pip-install into
-            # a venv when running there; that only applies to default-interpreter runs.
-            install_deps=self.execute_install_deps and run_python is None,
+            # The sim env / Docker image already ship the whole stack, so never
+            # pip-install into a venv there; that only applies to default-interpreter runs.
+            install_deps=self.execute_install_deps and run_python is None and not docker_route,
             keep_artifacts=self.execute_keep_artifacts,
             run_smoke=True,
             timeout=self.execute_timeout,
-            python_executable=run_python,  # None => the adapter's default interpreter
+            # Docker fixes the interpreter via the image; native uses run_python
+            # (None => the adapter's default interpreter).
+            python_executable=None if docker_route else run_python,
             run_id=self.run_id,  # names the workdir exec_<session_id> for traceability
         )
         self.context.artifacts["execution_result"] = self._write_artifact(
@@ -1189,9 +1290,14 @@ class StateMachine:
                   "input is available; deferring. Inject an 'ask' callable or run "
                   "interactively to execute it.")
             return False
+        if calculator.needs_docker(current_platform()):
+            where = (f"in the linux-64 Docker container (no {current_platform()} build; "
+                     f"runs under linux/amd64 emulation, so slower than native)")
+        else:
+            where = f"and needs {calculator.name} installed"
         answer = self._ask_user(
             f"The plan builds a {calculator.name} calculation, a heavy DFT run that "
-            f"can take several minutes and needs {calculator.name} installed. The "
+            f"can take several minutes {where}. The "
             f"generated script is ready either way.\nRun it now? [y/N]: "
         )
         return str(answer).strip().lower() in {"y", "yes", "run", "now", "1", "true"}
@@ -1252,7 +1358,19 @@ class StateMachine:
     def _how_to_run(self, bundle_dir) -> str:
         """Actionable 'run it yourself' guidance appropriate to the bundle's env."""
         main = Path(bundle_dir) / "main.py"
-        if self._selected_calculator() is not None:
+        calc = self._selected_calculator()
+        if calc is not None and calc.needs_docker(current_platform()):
+            # Non-native engine: guide the linux-64 Docker path (build the image,
+            # then TWAIN reruns it in the container -- or run the bundle by hand).
+            return (
+                f"{calc.name} has no {current_platform()} build, so it runs in the linux-64 "
+                f"Docker runner. One-time: install/start Docker (see runner/README.md) and build "
+                f"the image: `docker build --platform linux/amd64 -f runner/Dockerfile "
+                f"-t {DEFAULT_DOCKER_IMAGE} .`. Then re-run TWAIN (it will execute in the container), "
+                f"or run the bundle directly: `docker run --rm --platform linux/amd64 "
+                f"-v {Path(bundle_dir)}:/work -w /app {DEFAULT_DOCKER_IMAGE} "
+                f"pixi run -e {SIM_ENV} python /work/main.py`.")
+        if calc is not None:
             return (f"The bundle runs in TWAIN's '{SIM_ENV}' environment. Run it with: "
                     f"`pixi run -e {SIM_ENV} python {main}` (build the env first with "
                     f"`pixi install` if needed).")

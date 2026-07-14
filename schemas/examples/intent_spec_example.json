@@ -2,9 +2,10 @@
   "objective": "Super cool and complex chemistry question here",
   "domain": "quantum",
   "system_descriptors": {
-    "formula": "Schrodinger's formula is probably something, right?",
+    "kind": "molecule",
+    "formula": "C2H4O2",
     "molecule": {
-      "name": "Graphite!",
+      "name": "acetic acid",
       "SMILES": "CC(=O)O"
     }
   },

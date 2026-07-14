@@ -19,6 +19,12 @@ REPO_ROOT = Path(__file__).resolve().parent
 # Static, version-controlled inputs (JSON schemas, etc.) shipped with the repo.
 SCHEMAS_DIR = REPO_ROOT / "schemas"
 
+# DFTB+ Slater-Koster parameter files (.skf). Not committed (CC-BY-SA data,
+# fetched by runner/fetch_slako.sh into this repo-anchored dir); DFTB_PREFIX is
+# pointed here via pixi's [activation.env]. Kept here so the execution adapter
+# can fall back to it when DFTB_PREFIX is unset in the environment.
+SLAKO_DIR = REPO_ROOT / "slako"
+
 # Prompt/constraint text + scratch data used by the semantic-parsing layer.
 INTELLIGENCE_DIR = REPO_ROOT / "Intelligence Layer"
 

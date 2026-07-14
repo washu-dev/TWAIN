@@ -206,4 +206,60 @@ def test_build_chooses_smoke_compute_by_calculator_cost(tmp_path):
     with patch.object(CE, "generate", spy):
         _run("MatGL", "matgl")   # cheap, self-contained -> compute
         _run("GPAW", "gpaw")     # heavy DFT -> load-only
-    assert seen == [True, False], f"unexpected smoke_compute decisions: {seen}"
+        _run("DFTB+", "ase.calculators.dftb")  # heavy+external-data but smoke_can_compute -> compute
+    assert seen == [True, False, True], f"unexpected smoke_compute decisions: {seen}"
+
+
+# ── crystal polymorph must reach codegen (the anatase-built-as-rutile bug) ─────
+
+def test_material_brief_reads_crystal_descriptor():
+    """A solid-state target is described under `crystal`, not `molecule`; its
+    polymorph + space group must be extracted, else only the formula survives and
+    the model builds the most common polymorph (rutile) instead of the requested."""
+    from codegen_engine import CodegenEngine
+    plan = {"target_system": {
+        "crystal": {"name": "anatase titanium dioxide", "phase": "anatase",
+                    "formula": "TiO2", "crystal_system": "tetragonal",
+                    "space_group": "I41/amd", "space_group_number": 141},
+        "formula": "TiO2"}}
+    brief = CodegenEngine._material_brief(plan, None)
+    assert brief["name"] == "anatase titanium dioxide"
+    assert brief["space_group"] == "I41/amd"
+    assert brief["space_group_number"] == 141
+    desc = CodegenEngine._material_desc(brief)
+    assert "anatase" in desc.lower()
+    assert "I41/amd" in desc and "141" in desc
+    # the phase is named even when the `name` itself doesn't carry it
+    d2 = CodegenEngine._material_desc(
+        {"name": "titanium dioxide", "formula": "TiO2", "phase": "anatase"})
+    assert d2.lower().startswith("anatase titanium dioxide")
+
+
+def test_material_desc_molecule_path_unchanged():
+    """Regression guard: the molecule descriptor still yields 'name (formula)'."""
+    from codegen_engine import CodegenEngine
+    plan = {"target_system": {"molecule": {"name": "benzene", "SMILES": "c1ccccc1"},
+                              "formula": "C6H6"}}
+    brief = CodegenEngine._material_brief(plan, None)
+    assert brief["name"] == "benzene" and brief["phase"] is None
+    assert CodegenEngine._material_desc(brief) == "benzene (C6H6)"
+
+
+def test_crystal_polymorph_reaches_codegen_prompt():
+    """End-to-end: an anatase plan must put 'anatase' + its space group into the
+    codegen prompt, so the model builds anatase rather than defaulting to rutile."""
+    from codegen_engine import CodegenEngine
+    seen = {}
+
+    def agent(prompt):
+        seen["prompt"] = prompt
+        return PYSCF_SCRIPT
+
+    plan = _plan(target_system={
+        "crystal": {"name": "anatase titanium dioxide", "phase": "anatase",
+                    "formula": "TiO2", "crystal_system": "tetragonal",
+                    "space_group": "I41/amd", "space_group_number": 141},
+        "formula": "TiO2"})
+    CodegenEngine().generate(plan, agent=agent)
+    assert "anatase" in seen["prompt"].lower()
+    assert "I41/amd" in seen["prompt"]

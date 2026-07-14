@@ -159,6 +159,19 @@ class LocalExecutionAdapter:
             _bindir = str(Path(run_python).parent)
             run_env["PATH"] = _bindir + os.pathsep + run_env.get("PATH", "")
 
+            # DFTB+ locates its Slater-Koster (.skf) parameter files via
+            # DFTB_PREFIX. pixi's [activation.env] sets it, but if the runner was
+            # launched outside pixi it may be unset -- fall back to the repo's
+            # fetched slako/ dir so a DFTB+ bundle resolves its parameters instead
+            # of aborting "SK file ... not found" on the first energy evaluation.
+            if not run_env.get("DFTB_PREFIX"):
+                try:
+                    from twain_paths import SLAKO_DIR
+                    if SLAKO_DIR.is_dir():
+                        run_env["DFTB_PREFIX"] = str(SLAKO_DIR) + os.sep
+                except Exception:  # noqa: BLE001 - best-effort default only
+                    pass
+
             # 3) smoke tests before the real run (optional) ------------------
             smoke_log = None
             smoke_path = workdir / "inline_tests.py"

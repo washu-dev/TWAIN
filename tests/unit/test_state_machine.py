@@ -582,3 +582,77 @@ class TestValidateBranching:
                           execution_status=True, validation_result="needs_review")
         m.current_state = State.VALIDATE
         assert m.validate() == State.CORRECT
+
+
+# A crystal (periodic-solid) IntentSpec: no molecule/SMILES, described by
+# formula + polymorph. This is the "bulk modulus of TiO2" shape.
+CRYSTAL_INTENT = {
+    "objective": "Compute the bulk modulus of rutile TiO2",
+    "domain": "materials",
+    "system_descriptors": {
+        "kind": "crystal",
+        "formula": "TiO2",
+        "crystal": {"formula": "TiO2", "name": "titanium dioxide", "phase": "rutile"},
+    },
+    "acceptance_metrics": [
+        {"metric_name": "bulk_modulus", "target_value": 210, "tolerance": 30}
+    ],
+    "metadata": {
+        "ambiguity": False,
+        "confidence_scores": {
+            "objective_confidence": 0.95,
+            "domain_confidence": 0.95,
+            "formula_confidence": 0.95,
+            "phase_confidence": 0.9,
+        },
+    },
+}
+
+
+class TestSystemRepresentation:
+    """The intent ontology distinguishes discrete molecules (SMILES) from
+    periodic solids (formula + polymorph), so a crystal request is never gated
+    on -- or asked to clarify -- a SMILES it cannot have."""
+
+    def test_kind_crystal_from_explicit_discriminator(self, tmp_path):
+        m = _make_machine(tmp_path)
+        assert m._system_kind(CRYSTAL_INTENT) == "crystal"
+
+    def test_kind_crystal_inferred_without_discriminator(self, tmp_path):
+        m = _make_machine(tmp_path)
+        intent = copy.deepcopy(CRYSTAL_INTENT)
+        del intent["system_descriptors"]["kind"]
+        assert m._system_kind(intent) == "crystal"
+
+    def test_kind_molecule_default(self, tmp_path):
+        m = _make_machine(tmp_path)
+        assert m._system_kind(VALID_INTENT) == "molecule"
+
+    def test_crystal_confident_without_smiles_score(self, tmp_path):
+        """The core fix: a crystal spec clears the confidence gate on its own
+        (formula/phase) scores -- it does not need a SMILES_confidence."""
+        m = _make_machine(tmp_path)
+        assert m._is_confident(CRYSTAL_INTENT) is True
+
+    def test_crystal_not_gated_on_stray_low_smiles_score(self, tmp_path):
+        """A stray low SMILES_confidence on a crystal is irrelevant and must not
+        block -- this is what previously forced endless SMILES clarification."""
+        m = _make_machine(tmp_path)
+        intent = copy.deepcopy(CRYSTAL_INTENT)
+        intent["metadata"]["confidence_scores"]["SMILES_confidence"] = 0.1
+        assert m._is_confident(intent) is True
+
+    def test_molecule_still_gated_on_smiles_score(self, tmp_path):
+        """Molecules must still gate on SMILES_confidence (regression guard)."""
+        m = _make_machine(tmp_path)
+        intent = copy.deepcopy(VALID_INTENT)
+        intent["metadata"]["confidence_scores"]["SMILES_confidence"] = 0.1
+        assert m._is_confident(intent) is False
+
+    def test_discovery_input_format_cif_for_crystal(self, tmp_path):
+        m = _make_machine(tmp_path)
+        assert m._discovery_query(CRYSTAL_INTENT).input_format == "CIF"
+
+    def test_discovery_input_format_smiles_for_molecule(self, tmp_path):
+        m = _make_machine(tmp_path)
+        assert m._discovery_query(VALID_INTENT).input_format == "SMILES"

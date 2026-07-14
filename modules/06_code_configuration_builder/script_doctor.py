@@ -43,6 +43,7 @@ from __future__ import annotations
 import ast
 import builtins
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -370,12 +371,29 @@ class ScriptDoctor:
         if not python:
             return SmokeOutcome("unverifiable", "no sim-env interpreter to verify with")
         output_file = self.brief.get("output_file") or "results.csv"
+        # Mirror the execution adapter's env plumbing so a *calculator* smoke can
+        # actually run here: put the interpreter's own bin/ first on PATH (else an
+        # ASE calculator that shells out to `dftb+`/`nwchem` hits command-not-found
+        # -- exit 127, which would be misread as a code bug and loop the repair),
+        # and default DFTB_PREFIX to the fetched slako/ dir so DFTB+ finds its
+        # Slater-Koster files. Running the sim interpreter by path does NOT activate
+        # its env, so neither is set otherwise.
+        env = {**os.environ}
+        env["PATH"] = str(Path(python).parent) + os.pathsep + env.get("PATH", "")
+        if not env.get("DFTB_PREFIX"):
+            try:
+                from twain_paths import SLAKO_DIR
+                if SLAKO_DIR.is_dir():
+                    env["DFTB_PREFIX"] = str(SLAKO_DIR) + os.sep
+            except Exception:  # noqa: BLE001 - best-effort default only
+                pass
         try:
             with tempfile.TemporaryDirectory(prefix="twain_repair_") as tmp:
                 (Path(tmp) / "main.py").write_text(source, encoding="utf-8")
                 proc = subprocess.run(
                     [python, "main.py", "--smoke"],
                     cwd=tmp, capture_output=True, text=True, timeout=_SMOKE_TIMEOUT_S,
+                    env=env,
                 )
                 produced = (Path(tmp) / output_file).is_file()
         except (OSError, subprocess.SubprocessError):

@@ -30,6 +30,18 @@ from crash_recovery import DataStorage  # noqa: E402
 import statemachine as SM  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_docker():
+    """These tests simulate platforms via ``current_platform``; pin Docker OFF so
+    native-vs-docker planning is deterministic regardless of whether the test host
+    has a reachable Docker daemon (CI Linux runners do). Without this, simulating
+    osx-arm64 on a Docker-equipped host would upgrade planning to linux-64 and pick
+    GPAW instead of the native DFTB+. Docker routing has its own dedicated tests
+    (test_docker_execution.py) that opt back in."""
+    with patch.object(SM, "docker_available", return_value=False):
+        yield
+
+
 SILICON_INTENT = {
     "objective": "what is the band gap of silicon",
     "domain": "materials",

@@ -267,10 +267,14 @@ calculator (import name: `{calculator_import}`).
 Hard requirements:
 - Output ONLY the Python source code -- no markdown fences, no prose, no commentary.
 - Build the atomic system in code for {material_desc}. Do NOT read any external \
-structure file. For a bulk crystal, use `ase.build.bulk`. Do NOT hardcode lattice \
-constants, cell sizes, or other physical parameters unless the researcher specified \
-them -- rely on the library's built-in reference data (e.g. `ase.build.bulk(symbol, \
-crystalstructure)` already uses the correct experimental lattice constant).
+structure file. Build the EXACT phase/polymorph named -- if a space group is given, \
+construct THAT structure (e.g. `ase.spacegroup.crystal(...)` with that space group, or \
+pymatgen), and never substitute a different or more common polymorph (e.g. do not build \
+rutile when anatase was requested). For a simple element or binary that `ase.build.bulk` \
+supports, use it (it carries the correct experimental lattice constant); otherwise supply \
+the standard reference lattice parameters and Wyckoff positions for the named polymorph -- \
+these are structural INPUTS that define the cell, not the {property} you compute. Do NOT \
+hardcode the {property} value itself or any other result you are meant to calculate.
 - Attach the {calculator} calculator (`{calculator_import}`) and compute {property}. \
 Do NOT invent model, dataset, or parameter-set identifiers -- a name you guess may \
 not exist. If the calculator loads a named pretrained model, discover the valid \
@@ -311,11 +315,13 @@ which computes this property directly.
 
 Hard requirements:
 - Output ONLY the Python source code -- no markdown fences, no prose, no commentary.
-- Build the system in code for {material_desc} from its formula/SMILES. Do NOT read \
-any external structure file. Do NOT hardcode geometries, lattice constants, or other \
-physical parameters unless the researcher specified them -- construct the geometry with \
-the library's own tools (e.g. build from SMILES / a small default basis, optimizing \
-first if the property needs a relaxed geometry).
+- Build the system in code for {material_desc}. Do NOT read any external structure \
+file. For a molecule, build from its formula/SMILES with the library's own tools. For a \
+crystal, build the EXACT phase/polymorph named -- if a space group is given, construct \
+THAT structure and never substitute a different or more common polymorph; its standard \
+reference lattice parameters are structural INPUTS, not the {property} you compute. \
+Optimize the geometry first if the property needs a relaxed structure. Do NOT hardcode \
+the {property} value or any other result you are meant to calculate.
 - Compute {property} with {library}. Do NOT invent method, basis-set, functional, or \
 parameter identifiers -- a name you guess may not exist. Use documented defaults or \
 discover valid identifiers at runtime, and call every API with the argument types it \
@@ -866,19 +872,50 @@ class CodegenEngine:
     @staticmethod
     def _material_brief(plan: dict, intent: Optional[dict]) -> Dict[str, Optional[str]]:
         sysd = plan.get("target_system") or (intent or {}).get("system_descriptors") or {}
-        molecule = sysd.get("molecule") or {} if isinstance(sysd, dict) else {}
+        if not isinstance(sysd, dict):
+            sysd = {}
+        # A molecular run describes its target under `molecule` (name + SMILES); a
+        # solid-state run under `crystal` (polymorph/phase + space group). Read BOTH
+        # so a crystal's polymorph survives into codegen -- otherwise only `formula`
+        # reaches the model and it builds the most common polymorph (e.g. rutile for
+        # a request that asked for anatase TiO2).
+        molecule = sysd.get("molecule") if isinstance(sysd.get("molecule"), dict) else {}
+        crystal = sysd.get("crystal") if isinstance(sysd.get("crystal"), dict) else {}
         return {
-            "formula": sysd.get("formula") if isinstance(sysd, dict) else None,
-            "name": molecule.get("name"),
+            "formula": sysd.get("formula") or crystal.get("formula") or molecule.get("formula"),
+            "name": crystal.get("name") or molecule.get("name") or sysd.get("name"),
             "SMILES": molecule.get("SMILES"),
+            "phase": crystal.get("phase"),
+            "crystal_system": crystal.get("crystal_system"),
+            "space_group": crystal.get("space_group"),
+            "space_group_number": crystal.get("space_group_number"),
         }
 
     @staticmethod
     def _material_desc(material: Dict[str, Optional[str]]) -> str:
         name, formula = material.get("name"), material.get("formula")
-        if name and formula:
-            return f"{name} ({formula})"
-        return name or formula or "the requested material"
+        phase = material.get("phase")
+        # Name the polymorph even when `name` doesn't already carry it (e.g. name is
+        # "titanium dioxide" while phase is "anatase") so the model builds the
+        # requested phase rather than the most common one.
+        if name and phase and str(phase).lower() not in name.lower():
+            name = f"{phase} {name}"
+        base = f"{name} ({formula})" if name and formula else (name or formula or "the requested material")
+        # Append the space group / crystal system so the exact structure is
+        # unambiguous. These are reference INPUTS that define the cell, not the
+        # property being computed.
+        quals: List[str] = []
+        sg, sgn = material.get("space_group"), material.get("space_group_number")
+        if sg and sgn:
+            quals.append(f"space group {sg} (No. {sgn})")
+        elif sg:
+            quals.append(f"space group {sg}")
+        elif sgn:
+            quals.append(f"space group No. {sgn}")
+        cs = material.get("crystal_system")
+        if cs and str(cs).lower() not in base.lower():
+            quals.append(str(cs))
+        return f"{base}, {', '.join(quals)}" if quals else base
 
     @staticmethod
     def _requirements_for_toolset(libraries: List[str], calculator: Optional[str]) -> str:

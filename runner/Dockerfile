@@ -24,4 +24,14 @@ RUN pixi install -e sim
 # Application code (see .dockerignore for what is excluded).
 COPY . .
 
+# DFTB+ ships only the binary; a real run needs Slater-Koster (.skf) parameter
+# files, found via DFTB_PREFIX (wired to /app/slako by pixi's [activation.env]).
+# Fetch them into the image so a DFTB+ calculation runs without a runtime network
+# dependency; without this a DFTB+ job aborts with "SK file ... not found". curl
+# isn't guaranteed in the base image, so install it for this layer.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && bash runner/fetch_slako.sh
+
 CMD ["pixi", "run", "python", "-m", "runner.runner"]
