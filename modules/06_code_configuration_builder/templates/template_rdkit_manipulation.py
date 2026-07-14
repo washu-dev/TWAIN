@@ -166,13 +166,9 @@ def _parse_smiles(text):
     return [line.strip() for line in stripped.splitlines() if line.strip()]
 
 
-def _sample_smiles():
-    """Return a tiny built-in molecule set for smoke runs.
-
-    >>> _sample_smiles()[2]
-    'c1ccccc1'
-    """
-    return ["CCO", "CC(=O)O", "c1ccccc1", "C1CCCCC1"]
+# No built-in sample molecules: TWAIN never fabricates a placeholder. Graph
+# operations run on the real SMILES set from --input; with none provided, run()
+# fails loudly rather than substituting stand-in molecules.
 
 
 # ───────────────────────────── defaults from plan ───────────────────────────
@@ -190,10 +186,13 @@ def run(config, input_path, output_path, *, smoke=False):
     from rdkit.Chem import rdMolDescriptors
     from rdkit.Chem.Scaffolds import MurckoScaffold
 
-    if smoke or not Path(input_path).is_file():
-        smiles = _sample_smiles()
-    else:
+    if Path(input_path).is_file():
         smiles = _parse_smiles(Path(input_path).read_text(encoding="utf-8"))
+    else:
+        raise SystemExit(
+            "no molecules to process: this bundle needs a real SMILES set via "
+            "--input <molecules.csv>. TWAIN refuses to fabricate placeholder molecules."
+        )
 
     canonical = bool(config.get("canonical", True))
     rows = []

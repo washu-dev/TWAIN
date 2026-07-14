@@ -145,28 +145,26 @@ def _check_acceptance(metrics, criteria):
     return report
 
 
-def _sample_structure():
-    """Return the target structure baked in from the IntentSpec, or a tiny
-    built-in sample (BCC iron) when none was supplied (e.g. a smoke run with no
-    material). Baking the requested material here is what makes "the density of
-    silicon" analyse silicon instead of this iron placeholder.
+def _baked_structure():
+    """Return the real structure TWAIN baked into this bundle, or fail loudly.
 
-    >>> s = _sample_structure()
-    >>> s["atoms"][0]["species"], len(s["atoms"])
-    ('Fe', 2)
+    TWAIN never fabricates a placeholder system: if no real structure was baked in
+    (and no ``--input`` was supplied) the bundle has nothing legitimate to analyse,
+    so it refuses rather than silently standing in a different material.
+
+    >>> _baked_structure()  # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+    SystemExit: no structure to analyse
     """
     baked = _parse_json(_STRUCTURE_JSON, {})
     if isinstance(baked, dict) and baked.get("atoms") and baked.get("lattice"):
         return baked
-    a = 2.87
-    return {
-        "lattice": [[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]],
-        "atoms": [
-            {"species": "Fe", "coordinates": [0.0, 0.0, 0.0]},
-            {"species": "Fe", "coordinates": [0.5, 0.5, 0.5]},
-        ],
-        "coordinateSystem": "fractional",
-    }
+    raise SystemExit(
+        "no structure to analyse: TWAIN did not bake one into this bundle and no "
+        "--input structure file was supplied. Refusing to fabricate a placeholder "
+        "material -- provide --input <structure.json> or ensure the plan carries a "
+        "real structure."
+    )
 
 
 def _structure_from_dict(data):
@@ -174,9 +172,13 @@ def _structure_from_dict(data):
 
     Pure parsing (no Pymatgen), so it is unit-testable anywhere.
 
-    >>> lat, sp, co, cart = _structure_from_dict(_sample_structure())
+    >>> _demo = {"lattice": [[3.0, 0, 0], [0, 3.0, 0], [0, 0, 3.0]],
+    ...          "atoms": [{"species": "X", "coordinates": [0.0, 0.0, 0.0]},
+    ...                    {"species": "Y", "coordinates": [0.5, 0.5, 0.5]}],
+    ...          "coordinateSystem": "fractional"}
+    >>> lat, sp, co, cart = _structure_from_dict(_demo)
     >>> sp, cart
-    (['Fe', 'Fe'], False)
+    (['X', 'Y'], False)
     >>> co[1]
     [0.5, 0.5, 0.5]
     """
@@ -200,10 +202,10 @@ def run(config, input_path, output_path, *, smoke=False):
     """
     from pymatgen.core import Lattice, Structure  # heavy import, kept lazy
 
-    if smoke or not Path(input_path).is_file():
-        data = _sample_structure()
-    else:
+    if Path(input_path).is_file():
         data = json.loads(Path(input_path).read_text(encoding="utf-8"))
+    else:
+        data = _baked_structure()
 
     lattice_matrix, species, coords, cartesian = _structure_from_dict(data)
     structure = Structure(

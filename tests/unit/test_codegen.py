@@ -57,6 +57,23 @@ def make_plan(tool_name, *, version=1.0, metrics=None, safety=None):
     }
 
 
+def _demo_structure():
+    """A minimal real crystal a caller can hand to a material-aware template.
+
+    Stands in for a structure TWAIN resolved upstream (CIF / Materials Project):
+    the caller supplies it -- TWAIN never fabricates one, so material-aware
+    templates need a real structure to run.
+    """
+    return {
+        "lattice": [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+        "atoms": [
+            {"species": "Na", "coordinates": [0.0, 0.0, 0.0]},
+            {"species": "Cl", "coordinates": [0.5, 0.5, 0.5]},
+        ],
+        "coordinateSystem": "fractional",
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Dependency inference
 # ═══════════════════════════════════════════════════════════════════════════
@@ -302,7 +319,8 @@ class TestGeneratedScriptValidity:
 class TestRunsOnSampleData:
     def test_pymatgen_main_runs_and_writes_csv(self, tmp_path):
         pytest.importorskip("pymatgen")
-        bundle = CodegenEngine().generate(make_plan("Pymatgen"))
+        bundle = CodegenEngine().generate(
+            make_plan("Pymatgen"), intent={"structure": _demo_structure()})
         dest = bundle.write(tmp_path / "pmg")
         proc = subprocess.run(
             [sys.executable, "main.py", "--smoke"],
@@ -377,7 +395,8 @@ class TestDefinitionOfDone:
         # inline_tests.py runs imports + syntax checks and then main.py --smoke;
         # exit 0 means the bundle is executable with no manual edits.
         pytest.importorskip("pymatgen")
-        bundle = CodegenEngine().generate(make_plan("Pymatgen"))
+        bundle = CodegenEngine().generate(
+            make_plan("Pymatgen"), intent={"structure": _demo_structure()})
         dest = bundle.write(tmp_path / "dod")
         proc = subprocess.run(
             [sys.executable, "inline_tests.py"],

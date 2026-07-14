@@ -28,9 +28,10 @@ class Crystal:
     """A periodic solid (bulk crystal or surface/slab).
 
     Only ``formula`` is required; the remaining fields pin the polymorph and the
-    structure source when they are known. ``phase`` names the polymorph (rutile
-    vs anatase TiO2), and exactly one of ``mp_id`` / ``cif`` / ``space_group``
-    (+ ``crystal_system``) is enough to resolve an unambiguous structure. These
+    structure source when they are known. ``phase`` names the polymorph (which
+    crystalline form, for a compound that has several), and exactly one of
+    ``mp_id`` / ``cif`` / ``space_group`` (+ ``crystal_system``) is enough to
+    resolve an unambiguous structure. These
     field names mirror what the code-configuration builder already reads.
     """
     formula: str

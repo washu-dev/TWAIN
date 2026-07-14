@@ -42,7 +42,10 @@ materials science. Choose the best tool(s) to accomplish this task ON THE GIVEN 
 PLATFORM. Reason about real fitness -- accuracy vs cost, and practical usability \
 (does a run need external data the package does not ship, e.g. pseudopotentials \
 or Slater-Koster files?). Prefer a tool that will actually run out of the box on \
-the platform; do not pick one with no build for it.
+the platform; do not pick one with no build for it. Also prefer a method that can \
+deliver the requested property by its rigorous definition -- one that supports \
+relaxing the geometry to equilibrium, converging its numerical settings, and \
+computing the exact quantity requested rather than a cheap proxy.
 
 STRONGLY PREFER A REAL FIRST-PRINCIPLES / ELECTRONIC-STRUCTURE CALCULATION -- one \
 that actually solves the physics (DFT, tight-binding, quantum chemistry) -- over an \

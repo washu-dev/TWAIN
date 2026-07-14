@@ -413,7 +413,17 @@ class TestEndToEnd:
         pytest.importorskip("pymatgen")
         from code_gen.codegen_engine import CodegenEngine
 
-        bundle = CodegenEngine().generate(make_plan("Pymatgen"))
+        bundle = CodegenEngine().generate(
+            make_plan("Pymatgen"),
+            intent={"structure": {
+                "lattice": [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+                "atoms": [
+                    {"species": "Na", "coordinates": [0.0, 0.0, 0.0]},
+                    {"species": "Cl", "coordinates": [0.5, 0.5, 0.5]},
+                ],
+                "coordinateSystem": "fractional",
+            }},
+        )
         adapter = LocalExecutionAdapter(poll_interval=0.02, workspace_root=str(tmp_path))
         res = adapter.execute(bundle, install_deps=False, run_smoke=True, keep_artifacts=True)
 
