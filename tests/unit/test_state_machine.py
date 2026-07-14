@@ -84,7 +84,7 @@ class FakeAgent:
             intent["metadata"]["confidence_scores"]["SMILES_confidence"] = 0.4
         self._intent_json = json.dumps(intent)
 
-    def callAgent(self, prompt, **kwargs):
+    def call_agent(self, prompt, **kwargs):
         if "questions" in str(prompt).lower():
             return {"content": [{"text": "1. Which solvent and temperature?"}]}
         return {"content": [{"text": self._intent_json}]}

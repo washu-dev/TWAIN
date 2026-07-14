@@ -8,18 +8,15 @@ from datetime import datetime, timezone
 from enum import Enum, auto
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import twain_paths
 
 logger = logging.getLogger(__name__)
 
-from intake.intent_spec import IntentSpec
-from result_interpreter.result_package import ResultPackage
 from states import State, Context, GuardsBroken, InvalidTransition
 from crash_recovery import DataStorage
 from AgentInterface import AgentInterface
-from intake.intent_spec import IntentSpec
 from goal_decomposer.graph_builder import GoalGraph, GraphBuilder
 from plan_synthesizer.execution_plan import ExecutionPlan
 from plan_synthesizer.plan_synthesizer import PlanSynthesizer
@@ -32,12 +29,7 @@ from method_discovery.calculator_registry import (
     find_calculator, load_calculators, planning_platform,
 )
 from method_discovery import llm_discovery
-from result_interpreter.result_package import ResultPackage
-from cross_validation.validation_report import ValidationReport
-from provenance_memory.event_log import EventLog
 from PromptCompiler import PromptGenerator
-from SemanticParsing import Prompter
-from budget_tracker import Budget_Tracker
 from code_gen.codegen_engine import SIM_ENV, CodegenEngine, canonical_tool_key, pixi_env_python
 from code_gen import dependency_inferencer as _depinf
 
@@ -60,6 +52,24 @@ def _module_importable(module: str) -> bool:
         return importlib.util.find_spec(module) is not None
     except (ImportError, AttributeError, ValueError):
         return False
+
+
+_INTENT_MAP_CACHE: Optional[dict] = None
+
+
+def _intent_map() -> dict:
+    """Load (once) the data-driven discovery intent map from ``configs/``.
+
+    Keeps the objective->capability-tag vocabulary and input-format strings out
+    of Python so the discovery domain can grow without code edits (mirrors how
+    method-discovery sources its registries from ``configs/*.json``).
+    """
+    global _INTENT_MAP_CACHE
+    if _INTENT_MAP_CACHE is None:
+        path = twain_paths.CONFIGS_DIR / "discovery_intent_map.json"
+        _INTENT_MAP_CACHE = json.loads(path.read_text(encoding="utf-8"))
+    return _INTENT_MAP_CACHE
+
 
 GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.INTAKE, State.CLARIFY): lambda c: True,
@@ -93,7 +103,7 @@ class StateMachine:
                  auto_approve=False):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
-        # an AgentInterface-like object (.callAgent). It is NOT constructed
+        # an AgentInterface-like object (.call_agent). It is NOT constructed
         # eagerly here: AgentInterface() performs a network OAuth call, which
         # would break every construction (tests, resume, demo). Pass
         # agent=AgentInterface() at the call site to enable live NLU.
@@ -155,14 +165,14 @@ class StateMachine:
         self.context = Context()
         self.current_state = State.INTAKE
         self.storage = DataStorage(data_path)
-        self.recoveryData = self.storage.load()
-        self.promptGenerator = PromptGenerator()
+        self.recovery_data = self.storage.load()
+        self.prompt_generator = PromptGenerator()
 
-        if not self.recoveryData:
+        if not self.recovery_data:
             self.context = Context()
             self.current_state = State.INTAKE
         else:
-            self.current_state, self.context = self.recoveryData
+            self.current_state, self.context = self.recovery_data
         # Where intake/clarify write artifacts (intent_spec.json); defaults next
         # to the recovery file so a run started anywhere persists predictably.
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else twain_paths.ARTIFACTS_DIR
@@ -193,13 +203,13 @@ class StateMachine:
         if(not permission):
             raise GuardsBroken("Transition not allowed, incomplete context")
         else:
-            self.newState(next_state)
+            self.new_state(next_state)
 
 
 
 
 
-    def newState(self, next_state: State):
+    def new_state(self, next_state: State):
         self.current_state = next_state
         self.storage.commit(self.current_state,self.context)
 
@@ -238,34 +248,18 @@ class StateMachine:
 
         ``agent`` may be a plain ``prompt -> str`` callable (what the orchestrator
         and tests inject) or an ``AgentInterface``-style object whose
-        ``callAgent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
+        ``call_agent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
         ``call_kwargs`` (e.g. ``max_tokens``) are forwarded only to the
-        ``callAgent`` form; a plain callable is invoked with just the prompt.
+        ``call_agent`` form; a plain callable is invoked with just the prompt.
         """
         agent = self.agent
-        if hasattr(agent, "callAgent"):
-            resp = agent.callAgent(prompt, **call_kwargs)
+        if hasattr(agent, "call_agent"):
+            resp = agent.call_agent(prompt, **call_kwargs)
         else:
             resp = agent(prompt)
         if isinstance(resp, str):
             return resp
         return resp["content"][0]["text"]
-
-    @staticmethod
-    def _extract_json_object(text: str) -> str:
-        """Return the JSON object embedded in an LLM response.
-
-        Models often wrap JSON in prose or ```json fences despite instructions.
-        Strip fences, then take the substring from the first ``{`` to the last
-        ``}`` so ``json.loads`` sees a clean object.
-        """
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if fenced:
-            return fenced.group(1)
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return text[start:end + 1]
-        return text
 
     @staticmethod
     def _extract_json_object(text: str) -> str:
@@ -326,7 +320,7 @@ class StateMachine:
         # A pre-supplied request (orchestrator/UI/test) skips the interactive
         # prompt; otherwise fall back to asking on stdin.
         query = self._request if self._request else self._ask_user(self._WELCOME)
-        prompt = self.promptGenerator.jsonSchemaPrompt(schema, query)
+        prompt = self.prompt_generator.json_schema_prompt(schema, query)
         intent = json.loads(self._agent_text(prompt))
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
         return State.CLARIFY
@@ -351,11 +345,11 @@ class StateMachine:
             return State.DECOMPOSE
 
         text = json.dumps(intent)
-        questions = self._agent_text(self.promptGenerator.clarificationPrompt(text))
+        questions = self._agent_text(self.prompt_generator.clarification_prompt(text))
         answer = self._ask_user(
             f"Answer the following questions about your request:\n{questions}\n> "
         )
-        text = self._agent_text(self.promptGenerator.modifyJsonSchema(text, answer))
+        text = self._agent_text(self.prompt_generator.modify_json_schema(text, answer))
         intent = json.loads(text)
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
         self._clarify_rounds += 1
@@ -367,9 +361,10 @@ class StateMachine:
         # the best-effort spec rather than self-looping forever on an intent the
         # agent can't make confident (Story 3.2: "up to N rounds; force-continue").
         if self._clarify_rounds >= self.max_clarify_rounds:
-            print(
-                f"[clarify] confidence still below {self.confidence_threshold} after "
-                f"{self._clarify_rounds} round(s); proceeding with the best-effort IntentSpec."
+            logger.info(
+                "[clarify] confidence still below %s after %s round(s); "
+                "proceeding with the best-effort IntentSpec.",
+                self.confidence_threshold, self._clarify_rounds,
             )
             self.context.clarified = True
             return State.DECOMPOSE
@@ -432,7 +427,7 @@ class StateMachine:
         default budget -- too small a budget truncates the JSON mid-object.
         """
         schema = str(twain_paths.SCHEMAS_DIR / "goal_graph.schema.json")
-        prompt = self.promptGenerator.goalGraphPrompt(
+        prompt = self.prompt_generator.goal_graph_prompt(
             schema, json.dumps(intent), self.run_id
         )
         self._last_decomposition_raw = self._agent_text(prompt, max_tokens=4096)
@@ -618,37 +613,30 @@ class StateMachine:
         objective = (intent.get("objective") or "").lower()
         domain = (intent.get("domain") or "").lower()
 
-        keyword_map = {
-            # Electronic-structure asks (band gap, band structure, DOS, ...) need a
-            # DFT calculator driven by an atomistic library -- listed first so it
-            # leads the tag order for these queries.
-            "electronic_structure": (
-                "band gap", "bandgap", "band-gap", "band_gap", "band structure",
-                "electronic", "dft", "ab initio", "density of states", " dos",
-                "fermi", "conduct", "dielectric", "work function",
-            ),
-            "property_prediction": ("predict", "property", "solub", "toxic", "affinity"),
-            "structure_optimization": ("optimi", "geometry", "relax", "structure"),
-            "molecular_dynamics": ("dynamics", " md", "trajectory", "simulat"),
-            "quantum_chemistry": ("quantum", "electronic", "dft", "ab initio", "orbital"),
-        }
-        tags = [tag for tag, needles in keyword_map.items()
+        # Capability-tag vocabulary + input formats are data-driven (see
+        # configs/discovery_intent_map.json). Electronic-structure asks (band gap,
+        # DOS, ...) are listed first there so they lead the tag order.
+        cfg = _intent_map()
+        tags = [tag for tag, needles in cfg["capability_keywords"].items()
                 if any(n in objective for n in needles)]
-        if domain == "materials":
-            tags.append("materials")
+        domain_tag = cfg.get("domain_tags", {}).get(domain)
+        if domain_tag:
+            tags.append(domain_tag)
         if not tags:
-            tags.append("property_prediction")
+            tags.append(cfg["fallback_tag"])
         tags = list(dict.fromkeys(tags))  # de-dupe, keep order
 
         # Map the system representation onto the driver-library input format the
         # registry scores against: periodic solids are consumed as CIF (the format
         # ASE/Pymatgen/quacc declare), discrete molecules as SMILES.
         input_format = None
+        fmt_by_kind = cfg.get("input_formats_by_kind", {})
         sysd = intent.get("system_descriptors") or {}
-        if self._system_kind(intent) in ("crystal", "surface"):
-            input_format = "CIF"
+        kind = self._system_kind(intent)
+        if kind in ("crystal", "surface"):
+            input_format = fmt_by_kind.get(kind)
         elif (sysd.get("molecule") or {}).get("SMILES"):
-            input_format = "SMILES"
+            input_format = fmt_by_kind.get("molecule")
         return DiscoveryQuery(capability_tags=tags, input_format=input_format)
 
     def _requested_property(self, intent: dict) -> Optional[str]:
@@ -1136,20 +1124,20 @@ class StateMachine:
         }
 
     def _log_repair(self, report) -> None:
-        """Print a one-line summary of the repair outcome for the researcher."""
+        """Log a one-line summary of the repair outcome for the researcher."""
         if report.status == "healthy":
-            print("[repair] generated script passed all checks; no changes needed.")
+            logger.info("[repair] generated script passed all checks; no changes needed.")
         elif report.status == "repaired":
-            print(f"[repair] healed the script in {report.rounds} round(s): "
-                  + "; ".join(report.fixes))
+            logger.info("[repair] healed the script in %s round(s): %s",
+                        report.rounds, "; ".join(report.fixes))
         elif report.status == "unverifiable":
-            print("[repair] static checks passed; could not smoke-run here "
-                  f"(no '{SIM_ENV}' env) -- delivering as-is.")
+            logger.info("[repair] static checks passed; could not smoke-run here "
+                        "(no '%s' env) -- delivering as-is.", SIM_ENV)
         else:  # unrepairable
             remaining = "; ".join(d.render() for d in report.remaining[:3])
-            print(f"[repair] could not fully repair the script "
-                  f"({report.rounds} round(s)); EXECUTE will surface any failure. "
-                  f"Remaining: {remaining}")
+            logger.info("[repair] could not fully repair the script "
+                        "(%s round(s)); EXECUTE will surface any failure. "
+                        "Remaining: %s", report.rounds, remaining)
 
     def execute(self) -> State:
         """Run the generated RunBundle on the local machine (Story 5.2).
@@ -1278,17 +1266,17 @@ class StateMachine:
         # Unattended mode: the researcher opted into automatic runs, so proceed
         # without asking (approving the plan already authorized this execution).
         if self.auto_approve:
-            print("[execute] Unattended mode: proceeding with the heavy "
-                  f"{calculator.name} calculation without prompting.")
+            logger.info("[execute] Unattended mode: proceeding with the heavy "
+                        "%s calculation without prompting.", calculator.name)
             return True
         # If we can't actually prompt (headless run with no injected ``ask`` and
         # no interactive stdin), default to deferring rather than hanging on
         # ``input()`` or crashing on EOF. Safe by construction: the script is
         # already built; not running it is the conservative choice.
         if not self._can_prompt():
-            print("[execute] Heavy calculation requires confirmation, but no interactive "
-                  "input is available; deferring. Inject an 'ask' callable or run "
-                  "interactively to execute it.")
+            logger.info("[execute] Heavy calculation requires confirmation, but no interactive "
+                        "input is available; deferring. Inject an 'ask' callable or run "
+                        "interactively to execute it.")
             return False
         if calculator.needs_docker(current_platform()):
             where = (f"in the linux-64 Docker container (no {current_platform()} build; "
@@ -1338,7 +1326,7 @@ class StateMachine:
         else:
             message += (f"\n[execute] The runnable bundle is at {bundle_dir} -- "
                         f"run it later with:  python {Path(bundle_dir) / 'main.py'}")
-        print(message)
+        logger.info(message)
         # A built-but-not-executed run is a complete, valid outcome; advance.
         self.context.execution_status = True
         return State.INTERPRET

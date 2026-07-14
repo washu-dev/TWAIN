@@ -51,7 +51,7 @@ from session import Session, RunSession, RunStatus
 from store import Store
 from provenance_memory import event_log
 from budget_tracker import (
-    Budget_Tracker, ProjectBudget, RunBudget,
+    BudgetTracker, ProjectBudget, RunBudget,
     OverBudget, OverMaxIterations, OverMaxWallTime,
 )
 from retry_policy import (
@@ -111,7 +111,7 @@ class Orchestrator:
         max_replans: int = 3,
         max_corrections: int = 3,
         max_transitions: int = 100,
-        budget_tracker: Optional[Budget_Tracker] = None,
+        budget_tracker: Optional[BudgetTracker] = None,
         run_max_cost: float = 1.0,
         run_max_iterations: int = 50,
         run_wall_time_minutes: int = 30,
@@ -143,7 +143,7 @@ class Orchestrator:
         )
 
         # ---- budget tracking ------------------------------------------------
-        self.budget_tracker = budget_tracker or Budget_Tracker()
+        self.budget_tracker = budget_tracker or BudgetTracker()
         self.run_budget = RunBudget(
             max_cost=run_max_cost,
             max_iterations=run_max_iterations,
@@ -472,6 +472,12 @@ class Orchestrator:
 
 def _main(argv=None) -> int:
     import argparse
+    import logging
+
+    # CLI entrypoint: surface the pipeline's INFO-level progress (the stage
+    # ``[clarify]``/``[repair]``/``[execute]`` lines) as plain messages. Kept out
+    # of import-time so library/embedded use doesn't touch the root logger config.
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     parser = argparse.ArgumentParser(
         description="Drive the TWAIN StateMachine end to end (Story 5.3). "

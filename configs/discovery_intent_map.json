@@ -1,0 +1,23 @@
+{
+  "$comment": "Maps a research request's free-text objective onto discovery capability tags and the driver-library input format. Data-driven so the discovery vocabulary can grow (or move to another domain) without code changes. Consumed by StateMachine._discovery_query.",
+  "capability_keywords": {
+    "electronic_structure": [
+      "band gap", "bandgap", "band-gap", "band_gap", "band structure",
+      "electronic", "dft", "ab initio", "density of states", " dos",
+      "fermi", "conduct", "dielectric", "work function"
+    ],
+    "property_prediction": ["predict", "property", "solub", "toxic", "affinity"],
+    "structure_optimization": ["optimi", "geometry", "relax", "structure"],
+    "molecular_dynamics": ["dynamics", " md", "trajectory", "simulat"],
+    "quantum_chemistry": ["quantum", "electronic", "dft", "ab initio", "orbital"]
+  },
+  "domain_tags": {
+    "materials": "materials"
+  },
+  "fallback_tag": "property_prediction",
+  "input_formats_by_kind": {
+    "crystal": "CIF",
+    "surface": "CIF",
+    "molecule": "SMILES"
+  }
+}

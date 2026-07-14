@@ -116,7 +116,7 @@ class CodeGen:
             self._agent = AgentInterface()
 
         prompt = self.create_prompt()
-        response = self._agent.callAgent(prompt)
+        response = self._agent.call_agent(prompt)
         print(response)
         text = response["content"][0]["text"]
 
