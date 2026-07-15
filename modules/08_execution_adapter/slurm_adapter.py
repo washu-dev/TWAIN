@@ -31,6 +31,7 @@ import math
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Sequence, Union
@@ -346,6 +347,62 @@ class SlurmAdapter:
         if first:
             return parse_slurm_state(first[0])
         return JobState.UNKNOWN
+
+    def wait(
+        self,
+        job_id: str,
+        *,
+        poll_interval: float = 30.0,
+        max_wait: Optional[float] = None,
+        on_state: Optional[Callable[[JobState], None]] = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> JobState:
+        """Poll ``job_id`` until it reaches a terminal state (bounded).
+
+        ``max_wait`` (seconds) bounds the loop; on expiry the job is left running
+        and a :class:`SlurmError` is raised so the caller can checkpoint a
+        "running on cluster" state and poll again on resume rather than blocking
+        forever. ``on_state`` is called on every observed state (progress
+        events); ``sleep`` is injectable so tests run instantly.
+        """
+        waited = 0.0
+        while True:
+            state = self.poll(job_id)
+            if on_state is not None:
+                on_state(state)
+            if state.is_terminal:
+                return state
+            if max_wait is not None and waited >= max_wait:
+                raise SlurmError(
+                    f"job {job_id} still {state.value} after {int(waited)}s; "
+                    f"checkpoint and poll again later (the job keeps running)"
+                )
+            sleep(poll_interval)
+            waited += poll_interval
+
+    def accounting(self, job_id: str) -> Dict[str, str]:
+        """Final accounting for ``job_id`` from ``sacct`` (State/ExitCode/Elapsed/MaxRSS).
+
+        Returns the first (parent) record's fields keyed by name; values are the
+        raw sacct strings (e.g. ``ExitCode`` is ``"0:0"``). Empty dict when sacct
+        has no record (job too recent or accounting disabled).
+        """
+        fields = ["State", "ExitCode", "Elapsed", "MaxRSS", "Partition"]
+        result = self._run(
+            ["sacct", "-j", job_id, "--noheader", "--parsable2",
+             f"--format={','.join(fields)}"]
+        )
+        lines = result.stdout.strip().splitlines()
+        if not lines:
+            return {}
+        values = lines[0].split("|")
+        return dict(zip(fields, values))
+
+    def exit_code(self, job_id: str) -> Optional[int]:
+        """The job's exit code from accounting (``"1:0"`` -> 1), or None."""
+        raw = self.accounting(job_id).get("ExitCode", "")
+        match = re.match(r"(\d+):", raw)
+        return int(match.group(1)) if match else None
 
     def cancel(self, job_id: str) -> None:
         """Cancel ``job_id`` via ``scancel``."""

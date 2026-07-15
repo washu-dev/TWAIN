@@ -64,7 +64,13 @@ class _RealEngine:
         # confirmation gates (the heavy-calc prompt here; the plan-approval gate in
         # runner._drive_run). TWAIN_EXECUTE_LOCALLY=1 executes but still asks.
         auto = _env_flag("TWAIN_AUTO_RUN")
-        execute = auto or _env_flag("TWAIN_EXECUTE_LOCALLY")
+        # TWAIN_EXECUTE_SLURM=1 submits the built bundle to the Slurm cluster
+        # (TWAIN_SLURM_CLUSTER names the configs/clusters/ profile; default
+        # compute2) instead of running it locally/in Docker. Requires reachable
+        # login nodes (VPN + SSH key) or running on a login node itself
+        # (TWAIN_SLURM_HOST="").
+        slurm = _env_flag("TWAIN_EXECUTE_SLURM")
+        execute = auto or slurm or _env_flag("TWAIN_EXECUTE_LOCALLY")
         return self._Orchestrator(
             session_id=session_id,
             researcher_id=researcher_id,
@@ -75,7 +81,9 @@ class _RealEngine:
             store=store,
             context=dict(SEED_CONTEXT),
             provenance=False,  # run_events is the durable trail; skip local JSONL
-            execute_locally=execute,
+            execute_locally=execute and not slurm,
+            execute_slurm=slurm,
+            slurm_cluster=os.environ.get("TWAIN_SLURM_CLUSTER"),
             # Verify + repair generated code (compile/smoke/review) before the real
             # run so API errors are caught; default on whenever we execute.
             verify_codegen=_env_flag("TWAIN_VERIFY_CODEGEN", default=execute),
