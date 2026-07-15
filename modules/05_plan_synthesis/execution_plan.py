@@ -1,16 +1,33 @@
 from dataclasses import dataclass, field
-from typing import List, Union
+from typing import List, Optional, Union
 
 
 @dataclass
 class SelectedMethod:
     tool_name: str
     tool_version: float
+    # A method is a *toolset*, not a single tool. ``tool_name`` is the primary
+    # library (discovery's #1, kept for the original two-field contract);
+    # ``libraries`` is the full ordered set the run uses together -- e.g.
+    # ["Pymatgen", "ASE"] when Pymatgen is primary but the DFT calculator plugs
+    # into ASE. A python ``calculator`` (e.g. "GPAW") may provide the physics;
+    # ``calculator_library`` names the library in the toolset it is driven
+    # through. All optional so plain single-library runs are unchanged.
+    calculator: Optional[str] = None
+    calculator_import: Optional[str] = None
+    calculator_library: Optional[str] = None
+    libraries: List[str] = field(default_factory=list)
     def __post_init__(self):
         if self.tool_name is None or type(self.tool_name) is not str:
             raise ValueError("SelectedMethod tool_name must be of type str")
         if self.tool_version is None or type(self.tool_version) not in (int, float):
             raise ValueError("SelectedMethod tool_version must be of type number")
+        for attr in ("calculator", "calculator_import", "calculator_library"):
+            val = getattr(self, attr)
+            if val is not None and type(val) is not str:
+                raise ValueError(f"SelectedMethod {attr} must be a str when provided")
+        if type(self.libraries) is not list or any(type(x) is not str for x in self.libraries):
+            raise ValueError("SelectedMethod libraries must be a list of str")
 
 
 @dataclass
@@ -86,6 +103,13 @@ class ExecutionPlan:
     metadata: Union[ExecutionPlanMetadata, dict]
     acceptance_metrics: List[Union[AcceptanceMetric, dict]] = field(default_factory=list)
     safety_notes: List[str] = field(default_factory=list)
+    # The concrete system the plan acts on (formula/name/SMILES, from the
+    # IntentSpec's system_descriptors) and the canonical property being computed
+    # (e.g. "band_gap"). Optional so existing plans/tests are unaffected; the code
+    # builder uses them to generate a script for *this* material instead of a
+    # hard-coded sample.
+    target_system: Optional[dict] = None
+    requested_property: Optional[str] = None
     def __post_init__(self):
         if type(self.selected_method) is dict:
             self.selected_method = SelectedMethod(**self.selected_method)

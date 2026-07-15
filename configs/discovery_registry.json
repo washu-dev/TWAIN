@@ -1,17 +1,32 @@
 {
-  "registry_version": "1.0",
+  "registry_version": "1.1",
   "entries": [
     {
       "id": "rdkit",
       "name": "RDKit",
-      "version": "2024.03.5",
+      "version": "2025.9.5",
       "description": "Open-source cheminformatics toolkit for molecular representations, descriptors, and fingerprints.",
       "author": "RDKit Project",
       "repo_url": "https://github.com/rdkit/rdkit",
       "paper_doi": "10.5281/zenodo.591637",
-      "capability_tags": ["molecular_representation", "descriptors", "fingerprints", "property_prediction"],
-      "input_formats": ["SMILES", "SDF", "MOL", "InChI"],
-      "output_properties": ["TPSA", "logP", "molecular_weight", "num_rings"],
+      "capability_tags": [
+        "molecular_representation",
+        "descriptors",
+        "fingerprints",
+        "property_prediction"
+      ],
+      "input_formats": [
+        "SMILES",
+        "SDF",
+        "MOL",
+        "InChI"
+      ],
+      "output_properties": [
+        "TPSA",
+        "logP",
+        "molecular_weight",
+        "num_rings"
+      ],
       "uncertainty_method": "none",
       "license": "BSD-3-Clause",
       "license_class": "permissive",
@@ -23,37 +38,33 @@
       "has_examples": true
     },
     {
-      "id": "deepchem",
-      "name": "DeepChem",
-      "version": "2.8.0",
-      "description": "Deep learning library for drug discovery, materials science, and quantum chemistry property prediction.",
-      "author": "DeepChem Developers",
-      "repo_url": "https://github.com/deepchem/deepchem",
-      "paper_doi": "10.1039/C7SC02664A",
-      "capability_tags": ["property_prediction", "machine_learning", "molecular_featurization"],
-      "input_formats": ["SMILES", "SDF", "CSV"],
-      "output_properties": ["solubility", "toxicity", "binding_affinity"],
-      "uncertainty_method": "ensemble",
-      "license": "MIT",
-      "license_class": "permissive",
-      "maturity": "stable",
-      "trust_tier": 2,
-      "stars": 5300,
-      "citations": 900,
-      "has_tests": true,
-      "has_examples": true
-    },
-    {
       "id": "ase",
       "name": "ASE",
-      "version": "3.23.0",
-      "description": "Atomic Simulation Environment for setting up, running, and analyzing molecular dynamics and structure optimizations.",
+      "version": "3.29.0",
+      "description": "Atomic Simulation Environment for setting up, running, and analyzing molecular dynamics and structure optimizations. Also the standard driver library for attaching external DFT calculators (e.g. GPAW, Quantum ESPRESSO) that compute electronic-structure properties such as band gaps.",
       "author": "ASE Developers",
       "repo_url": "https://gitlab.com/ase/ase",
       "paper_doi": "10.1088/1361-648X/aa680e",
-      "capability_tags": ["molecular_dynamics", "structure_optimization", "simulation"],
-      "input_formats": ["CIF", "XYZ", "POSCAR", "molecular_graph"],
-      "output_properties": ["energy", "forces", "trajectory"],
+      "capability_tags": [
+        "molecular_dynamics",
+        "structure_optimization",
+        "simulation",
+        "electronic_structure",
+        "materials"
+      ],
+      "input_formats": [
+        "CIF",
+        "XYZ",
+        "POSCAR",
+        "molecular_graph"
+      ],
+      "output_properties": [
+        "energy",
+        "forces",
+        "trajectory",
+        "band_gap",
+        "band_structure"
+      ],
       "uncertainty_method": "none",
       "license": "LGPL-2.1-or-later",
       "license_class": "copyleft",
@@ -67,14 +78,31 @@
     {
       "id": "pyscf",
       "name": "PySCF",
-      "version": "2.6.2",
-      "description": "Python-based simulations of chemistry framework for ab initio quantum chemistry calculations.",
+      "version": "2.13.1",
+      "description": "Python-based Simulations of Chemistry Framework for ab-initio quantum chemistry. Includes periodic (pyscf.pbc) DFT/HF for crystalline solids with built-in GTH pseudopotentials and Gaussian basis sets -- computes total energies, band structures and band gaps fully self-contained (no external pseudopotential/parameter files). Real first-principles calculations that run natively on osx-arm64 (Apple Silicon), where plane-wave DFT codes (GPAW, Quantum ESPRESSO) have no build.",
       "author": "PySCF Developers",
       "repo_url": "https://github.com/pyscf/pyscf",
       "paper_doi": "10.1002/wcms.1340",
-      "capability_tags": ["quantum_chemistry", "electronic_structure", "simulation"],
-      "input_formats": ["XYZ", "molecular_graph"],
-      "output_properties": ["energy", "molecular_orbitals", "dipole_moment"],
+      "capability_tags": [
+        "quantum_chemistry",
+        "electronic_structure",
+        "dft",
+        "band_structure",
+        "simulation"
+      ],
+      "input_formats": [
+        "XYZ",
+        "CIF",
+        "POSCAR",
+        "molecular_graph"
+      ],
+      "output_properties": [
+        "energy",
+        "band_gap",
+        "band_structure",
+        "molecular_orbitals",
+        "dipole_moment"
+      ],
       "uncertainty_method": "none",
       "license": "Apache-2.0",
       "license_class": "permissive",
@@ -88,14 +116,25 @@
     {
       "id": "openff-toolkit",
       "name": "OpenFF Toolkit",
-      "version": "0.16.2",
+      "version": "0.18.1",
       "description": "Open Force Field toolkit for parameterizing small molecules with modern force fields.",
       "author": "Open Force Field Initiative",
       "repo_url": "https://github.com/openforcefield/openff-toolkit",
       "paper_doi": "10.1021/acs.jctc.1c00571",
-      "capability_tags": ["force_fields", "parameterization", "molecular_dynamics"],
-      "input_formats": ["SMILES", "SDF", "MOL2"],
-      "output_properties": ["force_field_parameters", "partial_charges"],
+      "capability_tags": [
+        "force_fields",
+        "parameterization",
+        "molecular_dynamics"
+      ],
+      "input_formats": [
+        "SMILES",
+        "SDF",
+        "MOL2"
+      ],
+      "output_properties": [
+        "force_field_parameters",
+        "partial_charges"
+      ],
       "uncertainty_method": "none",
       "license": "MIT",
       "license_class": "permissive",
@@ -109,14 +148,26 @@
     {
       "id": "openmm",
       "name": "OpenMM",
-      "version": "8.1.2",
+      "version": "8.5.2",
       "description": "High-performance toolkit for molecular simulation with GPU acceleration.",
       "author": "OpenMM Developers",
       "repo_url": "https://github.com/openmm/openmm",
       "paper_doi": "10.1371/journal.pcbi.1005659",
-      "capability_tags": ["molecular_dynamics", "simulation", "free_energy"],
-      "input_formats": ["PDB", "AMBER", "molecular_graph"],
-      "output_properties": ["energy", "trajectory", "free_energy"],
+      "capability_tags": [
+        "molecular_dynamics",
+        "simulation",
+        "free_energy"
+      ],
+      "input_formats": [
+        "PDB",
+        "AMBER",
+        "molecular_graph"
+      ],
+      "output_properties": [
+        "energy",
+        "trajectory",
+        "free_energy"
+      ],
       "uncertainty_method": "none",
       "license": "MIT",
       "license_class": "permissive",
@@ -130,14 +181,26 @@
     {
       "id": "pymatgen",
       "name": "Pymatgen",
-      "version": "2024.6.10",
+      "version": "2026.5.4",
       "description": "Python Materials Genomics library for materials analysis and structure manipulation.",
       "author": "Materials Project",
       "repo_url": "https://github.com/materialsproject/pymatgen",
       "paper_doi": "10.1016/j.commatsci.2012.10.028",
-      "capability_tags": ["materials", "structure_analysis", "property_prediction"],
-      "input_formats": ["CIF", "POSCAR", "molecular_graph"],
-      "output_properties": ["band_structure", "formation_energy", "phase_diagram"],
+      "capability_tags": [
+        "materials",
+        "structure_analysis",
+        "property_prediction"
+      ],
+      "input_formats": [
+        "CIF",
+        "POSCAR",
+        "molecular_graph"
+      ],
+      "output_properties": [
+        "band_structure",
+        "formation_energy",
+        "phase_diagram"
+      ],
       "uncertainty_method": "none",
       "license": "MIT",
       "license_class": "permissive",
@@ -156,9 +219,20 @@
       "author": "Grimme Group",
       "repo_url": "https://github.com/grimme-lab/xtb",
       "paper_doi": "10.1002/wcms.1493",
-      "capability_tags": ["quantum_chemistry", "structure_optimization", "property_prediction"],
-      "input_formats": ["XYZ", "molecular_graph"],
-      "output_properties": ["energy", "geometry", "dipole_moment"],
+      "capability_tags": [
+        "quantum_chemistry",
+        "structure_optimization",
+        "property_prediction"
+      ],
+      "input_formats": [
+        "XYZ",
+        "molecular_graph"
+      ],
+      "output_properties": [
+        "energy",
+        "geometry",
+        "dipole_moment"
+      ],
       "uncertainty_method": "none",
       "license": "LGPL-3.0-only",
       "license_class": "copyleft",
@@ -170,37 +244,26 @@
       "has_examples": true
     },
     {
-      "id": "chemprop",
-      "name": "Chemprop",
-      "version": "2.0.4",
-      "description": "Message passing neural networks for molecular property prediction.",
-      "author": "MIT CSAIL / Coley Group",
-      "repo_url": "https://github.com/chemprop/chemprop",
-      "paper_doi": "10.1021/acs.jcim.9b00237",
-      "capability_tags": ["property_prediction", "machine_learning", "deep_learning"],
-      "input_formats": ["SMILES", "CSV"],
-      "output_properties": ["solubility", "toxicity", "custom_regression"],
-      "uncertainty_method": "ensemble",
-      "license": "MIT",
-      "license_class": "permissive",
-      "maturity": "stable",
-      "trust_tier": 2,
-      "stars": 1800,
-      "citations": 1100,
-      "has_tests": true,
-      "has_examples": true
-    },
-    {
       "id": "scikit-learn",
       "name": "scikit-learn",
-      "version": "1.5.0",
+      "version": "1.9.0",
       "description": "General-purpose machine learning library used for regression/classification on molecular features.",
       "author": "scikit-learn Developers",
       "repo_url": "https://github.com/scikit-learn/scikit-learn",
       "paper_doi": "10.5555/1953048.2078195",
-      "capability_tags": ["machine_learning", "property_prediction", "regression"],
-      "input_formats": ["CSV", "feature_matrix"],
-      "output_properties": ["custom_regression", "custom_classification"],
+      "capability_tags": [
+        "machine_learning",
+        "property_prediction",
+        "regression"
+      ],
+      "input_formats": [
+        "CSV",
+        "feature_matrix"
+      ],
+      "output_properties": [
+        "custom_regression",
+        "custom_classification"
+      ],
       "uncertainty_method": "none",
       "license": "BSD-3-Clause",
       "license_class": "permissive",
@@ -214,14 +277,25 @@
     {
       "id": "psi4",
       "name": "Psi4",
-      "version": "1.9.1",
+      "version": "1.11",
       "description": "Open-source quantum chemistry package for high-accuracy electronic structure calculations.",
       "author": "Psi4 Developers",
       "repo_url": "https://github.com/psi4/psi4",
       "paper_doi": "10.1063/5.0006002",
-      "capability_tags": ["quantum_chemistry", "electronic_structure", "simulation"],
-      "input_formats": ["XYZ", "molecular_graph"],
-      "output_properties": ["energy", "gradients", "frequencies"],
+      "capability_tags": [
+        "quantum_chemistry",
+        "electronic_structure",
+        "simulation"
+      ],
+      "input_formats": [
+        "XYZ",
+        "molecular_graph"
+      ],
+      "output_properties": [
+        "energy",
+        "gradients",
+        "frequencies"
+      ],
       "uncertainty_method": "none",
       "license": "LGPL-3.0-only",
       "license_class": "copyleft",
@@ -233,24 +307,282 @@
       "has_examples": true
     },
     {
-      "id": "mordred-legacy",
-      "name": "Mordred",
-      "version": "1.2.0",
-      "description": "Molecular descriptor calculator (legacy, unmaintained) producing 1800+ 2D/3D descriptors.",
-      "author": "Moriwaki et al.",
-      "repo_url": "https://github.com/mordred-descriptor/mordred",
-      "paper_doi": "10.1186/s13321-018-0258-y",
-      "capability_tags": ["descriptors", "molecular_featurization"],
-      "input_formats": ["SMILES", "SDF"],
-      "output_properties": ["molecular_descriptors"],
+      "id": "mdanalysis",
+      "name": "MDAnalysis",
+      "version": "2.10.0",
+      "description": "Library for analysing molecular-dynamics trajectories: reads dozens of MD formats and computes structural/dynamic observables (RMSD, RDF, contacts, H-bonds).",
+      "author": "MDAnalysis Developers",
+      "repo_url": "https://github.com/MDAnalysis/mdanalysis",
+      "paper_doi": "10.1002/jcc.21787",
+      "capability_tags": [
+        "molecular_dynamics",
+        "trajectory_analysis",
+        "analysis"
+      ],
+      "input_formats": [
+        "PDB",
+        "GRO",
+        "XTC",
+        "TRR",
+        "DCD",
+        "PSF"
+      ],
+      "output_properties": [
+        "rmsd",
+        "rdf",
+        "contacts",
+        "hydrogen_bonds"
+      ],
+      "uncertainty_method": "none",
+      "license": "GPL-2.0-or-later",
+      "license_class": "copyleft",
+      "maturity": "stable",
+      "trust_tier": 1,
+      "stars": 1300,
+      "citations": 2000,
+      "has_tests": true,
+      "has_examples": true
+    },
+    {
+      "id": "mdtraj",
+      "name": "MDTraj",
+      "version": "1.11.1",
+      "description": "Fast, memory-efficient analysis of molecular-dynamics trajectories with a NumPy-friendly API (RMSD, distances, dihedrals, SASA).",
+      "author": "MDTraj Developers",
+      "repo_url": "https://github.com/mdtraj/mdtraj",
+      "paper_doi": "10.1016/j.bpj.2015.08.015",
+      "capability_tags": [
+        "molecular_dynamics",
+        "trajectory_analysis",
+        "analysis"
+      ],
+      "input_formats": [
+        "PDB",
+        "XTC",
+        "DCD",
+        "HDF5",
+        "NetCDF"
+      ],
+      "output_properties": [
+        "rmsd",
+        "distances",
+        "dihedrals",
+        "sasa"
+      ],
+      "uncertainty_method": "none",
+      "license": "LGPL-2.1-or-later",
+      "license_class": "copyleft",
+      "maturity": "stable",
+      "trust_tier": 1,
+      "stars": 900,
+      "citations": 1200,
+      "has_tests": true,
+      "has_examples": true
+    },
+    {
+      "id": "openbabel",
+      "name": "Open Babel",
+      "version": "3.1.1",
+      "description": "Chemical toolbox for interconverting molecular file formats and computing basic descriptors/fingerprints across 100+ formats.",
+      "author": "Open Babel Developers",
+      "repo_url": "https://github.com/openbabel/openbabel",
+      "paper_doi": "10.1186/1758-2946-3-33",
+      "capability_tags": [
+        "cheminformatics",
+        "format_conversion",
+        "molecular_representation"
+      ],
+      "input_formats": [
+        "SMILES",
+        "SDF",
+        "MOL",
+        "MOL2",
+        "PDB",
+        "XYZ",
+        "InChI"
+      ],
+      "output_properties": [
+        "converted_structure",
+        "descriptors",
+        "fingerprints"
+      ],
+      "uncertainty_method": "none",
+      "license": "GPL-2.0-only",
+      "license_class": "copyleft",
+      "maturity": "stable",
+      "trust_tier": 1,
+      "stars": 1200,
+      "citations": 5000,
+      "has_tests": true,
+      "has_examples": true
+    },
+    {
+      "id": "matminer",
+      "name": "matminer",
+      "version": "0.10.1",
+      "description": "Data-mining and feature-engineering toolkit for materials informatics: hundreds of composition/structure featurizers feeding ML property models.",
+      "author": "Hacking Materials / LBNL",
+      "repo_url": "https://github.com/hackingmaterials/matminer",
+      "paper_doi": "10.1016/j.commatsci.2018.05.018",
+      "capability_tags": [
+        "materials",
+        "machine_learning",
+        "featurization",
+        "property_prediction"
+      ],
+      "input_formats": [
+        "CIF",
+        "POSCAR",
+        "molecular_graph",
+        "composition"
+      ],
+      "output_properties": [
+        "descriptors",
+        "features"
+      ],
       "uncertainty_method": "none",
       "license": "BSD-3-Clause",
       "license_class": "permissive",
-      "maturity": "deprecated",
-      "trust_tier": 3,
-      "stars": 350,
+      "maturity": "stable",
+      "trust_tier": 2,
+      "stars": 500,
+      "citations": 700,
+      "has_tests": true,
+      "has_examples": true
+    },
+    {
+      "id": "dscribe",
+      "name": "DScribe",
+      "version": "2.1.2",
+      "description": "Descriptor library for machine learning on atomistic systems: SOAP, MBTR, ACSF, Coulomb matrix and more.",
+      "author": "SINGROUP (Aalto)",
+      "repo_url": "https://github.com/SINGROUP/dscribe",
+      "paper_doi": "10.1016/j.cpc.2019.106949",
+      "capability_tags": [
+        "descriptors",
+        "machine_learning",
+        "materials",
+        "featurization"
+      ],
+      "input_formats": [
+        "XYZ",
+        "CIF",
+        "molecular_graph"
+      ],
+      "output_properties": [
+        "SOAP",
+        "MBTR",
+        "ACSF",
+        "coulomb_matrix"
+      ],
+      "uncertainty_method": "none",
+      "license": "Apache-2.0",
+      "license_class": "permissive",
+      "maturity": "stable",
+      "trust_tier": 2,
+      "stars": 450,
       "citations": 600,
-      "has_tests": false,
+      "has_tests": true,
+      "has_examples": true
+    },
+    {
+      "id": "phonopy",
+      "name": "Phonopy",
+      "version": "4.3.1",
+      "description": "Phonon calculations from finite displacements: force constants, phonon band structures, DOS, and thermal properties (paired with a DFT/force-field calculator).",
+      "author": "Atsushi Togo",
+      "repo_url": "https://github.com/phonopy/phonopy",
+      "paper_doi": "10.1080/27660400.2023.2265109",
+      "capability_tags": [
+        "materials",
+        "phonons",
+        "thermal_properties",
+        "vibrational_analysis"
+      ],
+      "input_formats": [
+        "POSCAR",
+        "CIF",
+        "force_sets"
+      ],
+      "output_properties": [
+        "phonon_bands",
+        "phonon_dos",
+        "thermal_properties",
+        "free_energy"
+      ],
+      "uncertainty_method": "none",
+      "license": "BSD-3-Clause",
+      "license_class": "permissive",
+      "maturity": "stable",
+      "trust_tier": 1,
+      "stars": 400,
+      "citations": 2500,
+      "has_tests": true,
+      "has_examples": true
+    },
+    {
+      "id": "spglib",
+      "name": "spglib",
+      "version": "2.7.0",
+      "description": "Library for finding and handling crystal symmetries: space groups, symmetry operations, primitive/standardized cells, k-point meshes.",
+      "author": "Atsushi Togo",
+      "repo_url": "https://github.com/spglib/spglib",
+      "paper_doi": "10.48550/arXiv.1808.01590",
+      "capability_tags": [
+        "materials",
+        "symmetry",
+        "crystallography"
+      ],
+      "input_formats": [
+        "POSCAR",
+        "CIF",
+        "cell"
+      ],
+      "output_properties": [
+        "space_group",
+        "symmetry_operations",
+        "primitive_cell"
+      ],
+      "uncertainty_method": "none",
+      "license": "BSD-3-Clause",
+      "license_class": "permissive",
+      "maturity": "stable",
+      "trust_tier": 1,
+      "stars": 400,
+      "citations": 1500,
+      "has_tests": true,
+      "has_examples": true
+    },
+    {
+      "id": "quacc",
+      "name": "quacc",
+      "version": "1.3.2",
+      "description": "Workflow-automation framework that wires computational-chemistry/materials codes (ASE calculators, VASP, GPAW, ORCA, ...) into reproducible, restartable recipes.",
+      "author": "Quantum Accelerators",
+      "repo_url": "https://github.com/Quantum-Accelerators/quacc",
+      "paper_doi": "10.1039/D4DD00300D",
+      "capability_tags": [
+        "workflow",
+        "materials",
+        "quantum_chemistry",
+        "automation"
+      ],
+      "input_formats": [
+        "CIF",
+        "POSCAR",
+        "molecular_graph"
+      ],
+      "output_properties": [
+        "workflow_results"
+      ],
+      "uncertainty_method": "none",
+      "license": "BSD-3-Clause",
+      "license_class": "permissive",
+      "maturity": "stable",
+      "trust_tier": 2,
+      "stars": 200,
+      "citations": 50,
+      "has_tests": true,
       "has_examples": true
     }
   ]

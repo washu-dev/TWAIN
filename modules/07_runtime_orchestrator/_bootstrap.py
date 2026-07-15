@@ -58,6 +58,8 @@ _PACKAGE_ALIASES = {
     "result_interpreter": _MODULES_DIR / "10_result_interpreter",
     "cross_validation": _MODULES_DIR / "11_cross_validation",
     "provenance_memory": _MODULES_DIR / "14_provenance_memory",
+    "code_gen": _MODULES_DIR / "06_code_configuration_builder",
+    "execution_adapter": _MODULES_DIR / "08_execution_adapter",
 }
 
 

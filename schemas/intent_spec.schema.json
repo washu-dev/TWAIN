@@ -13,9 +13,16 @@
     },
     "system_descriptors": {
       "type": "object",
-      "required": ["formula","molecule"],
+      "description": "Identifies the physical system. Pick the representation that matches the system TYPE, then fill in that ONE sub-object: a discrete, finite molecule uses `molecule` (a SMILES string); a periodic solid -- a crystal, bulk metal / semiconductor / oxide, or a surface / slab of one -- uses `crystal`. SMILES cannot represent a periodic solid, so NEVER invent a SMILES for a crystal; describe it by formula + polymorph/phase (and a structure source when known) instead.",
+      "required": ["kind","formula"],
       "properties": {
+        "kind": {
+          "description": "Which representation this spec uses. 'molecule' for a discrete molecule; 'crystal' for a periodic bulk solid; 'surface' for a slab / surface of a solid (also described under `crystal`).",
+          "type": "string",
+          "enum": ["molecule", "crystal", "surface"]
+        },
         "molecule": {
+          "description": "ONLY when kind='molecule': a discrete, finite molecule identified by its SMILES. Omit entirely for periodic solids.",
           "type": "object",
           "required": ["SMILES"],
           "properties": {
@@ -27,11 +34,63 @@
             }
           }
         },
+        "crystal": {
+          "description": "ONLY when kind='crystal' or kind='surface': a periodic solid. Identify the polymorph/phase whenever the composition has more than one (e.g. rutile vs anatase vs brookite TiO2) -- different polymorphs have different properties. Pin the structure when you can: a Materials Project id (mp_id), an inline/path CIF, or a space group (+ crystal system). No SMILES.",
+          "type": "object",
+          "required": ["formula"],
+          "properties": {
+            "formula": {
+              "description": "Chemical formula of the solid, e.g. 'TiO2'.",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "phase": {
+              "description": "Polymorph / phase name, e.g. 'rutile', 'anatase', 'fcc'.",
+              "type": "string"
+            },
+            "crystal_system": {
+              "type": "string"
+            },
+            "space_group": {
+              "description": "Hermann-Mauguin space-group symbol, e.g. 'P4_2/mnm'.",
+              "type": "string"
+            },
+            "space_group_number": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 230
+            },
+            "mp_id": {
+              "description": "Materials Project id, e.g. 'mp-2657' (rutile TiO2).",
+              "type": "string"
+            },
+            "cif": {
+              "description": "CIF structure as inline text or a file path.",
+              "type": "string"
+            }
+          }
+        },
         "formula": {
-          "description": "the NAME of the formula being applied",
+          "description": "Chemical formula of the system, e.g. 'TiO2' or 'C2H4O2'.",
           "type": "string"
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": { "kind": { "const": "molecule" } },
+          "required": ["molecule"]
+        },
+        {
+          "properties": { "kind": { "const": "crystal" } },
+          "required": ["crystal"]
+        },
+        {
+          "properties": { "kind": { "const": "surface" } },
+          "required": ["crystal"]
+        }
+      ]
     },
     "acceptance_metrics": {
       "type":"array",
@@ -52,7 +111,7 @@
       }
     },
     "metadata": {
-      "description": "[0,1] confidence levels",
+      "description": "[0,1] confidence levels. Emit ONLY the confidence scores relevant to the chosen representation -- for a molecule that is SMILES_confidence / name_confidence; for a crystal/surface it is formula_confidence / phase_confidence / structure_confidence. Always include objective_confidence and domain_confidence. Do NOT emit a low SMILES_confidence for a solid: a solid has no SMILES, so the field does not apply.",
       "type": "object",
       "properties": {
         "ambiguity": {
@@ -82,6 +141,18 @@
               "maximum": 1
             },
             "formula_confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "phase_confidence": {
+              "description": "Confidence that the polymorph/phase of a crystal is correctly identified.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "structure_confidence": {
+              "description": "Confidence in the crystal structure source (mp_id / CIF / space group).",
               "type": "number",
               "minimum": 0,
               "maximum": 1

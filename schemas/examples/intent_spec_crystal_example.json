@@ -1,0 +1,34 @@
+{
+  "objective": "Compute the bulk modulus of rutile titanium dioxide (TiO2) from first principles.",
+  "domain": "materials",
+  "system_descriptors": {
+    "kind": "crystal",
+    "formula": "TiO2",
+    "crystal": {
+      "formula": "TiO2",
+      "name": "titanium dioxide",
+      "phase": "rutile",
+      "crystal_system": "tetragonal",
+      "space_group": "P4_2/mnm",
+      "space_group_number": 136,
+      "mp_id": "mp-2657"
+    }
+  },
+  "acceptance_criteria": [
+    {
+      "metric_name": "bulk_modulus",
+      "target_value": 210,
+      "tolerance": 30
+    }
+  ],
+  "metadata": {
+    "confidence_scores": {
+      "objective_confidence": 0.97,
+      "domain_confidence": 0.99,
+      "formula_confidence": 0.98,
+      "phase_confidence": 0.9,
+      "structure_confidence": 0.85
+    },
+    "ambiguity": false
+  }
+}

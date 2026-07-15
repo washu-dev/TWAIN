@@ -58,6 +58,15 @@ class PromptGenerator:
         prompt += "The json file must align exactly with the following json file"
         with open(f"{schema}", "r") as f:
             prompt += f.read()
+        prompt += (
+            " Choose the system representation that matches the system TYPE: a discrete, "
+            "finite molecule uses `molecule` with a SMILES and kind='molecule'; a periodic "
+            "solid -- a crystal, bulk metal, semiconductor, oxide, or a surface/slab of one -- "
+            "uses `crystal` with kind='crystal' (or 'surface'), identifying the polymorph/phase "
+            "when the composition has several (e.g. rutile vs anatase TiO2). SMILES cannot "
+            "represent a periodic solid, so never invent a SMILES for a crystal. Emit only the "
+            "confidence scores relevant to the chosen representation."
+        )
         prompt += "Your response MUST begin with '{', the first character of a json file, and end with '}', the last character of the json file"
 
         return prompt
@@ -71,7 +80,17 @@ class PromptGenerator:
         return prompt
 
     def clarificationPrompt(self, intent_spec):
-        prompt = "You are to generate a list of questions for the following schema file to resolve the ambiguities. Based on the following json file, return an ordered list of specific questions whose answers will remove any uncertainty"
+        prompt = (
+            "You are to generate a list of questions for the following schema file to resolve "
+            "the ambiguities. Based on the following json file, return an ordered list of "
+            "specific questions whose answers will remove any uncertainty. Ask ONLY about "
+            "fields relevant to the chosen system representation: for a periodic solid "
+            "(kind='crystal' or 'surface') ask about the polymorph/phase or the structure "
+            "source (e.g. which TiO2 polymorph -- rutile, anatase, or brookite -- or a "
+            "Materials Project id / CIF), and NEVER ask for the SMILES of a solid. For a "
+            "discrete molecule (kind='molecule') ask about its identity / SMILES. Do not ask "
+            "about the confidence scores themselves."
+        )
         prompt += intent_spec
         return prompt
 

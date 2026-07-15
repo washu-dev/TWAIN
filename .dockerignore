@@ -1,0 +1,20 @@
+# Build context hygiene for the runner image (repo-root context).
+.git
+.github
+.venv
+.pixi
+logs
+# Slater-Koster files are fetched fresh (pinned) in the image build layer, not
+# copied from a possibly-stale local checkout.
+slako
+**/__pycache__
+**/*.pyc
+.pytest_cache
+**/.pytest_cache
+.coverage
+app/node_modules
+app/dist
+app/.expo
+.idea
+.vscode
+.DS_Store
