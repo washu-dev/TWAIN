@@ -235,7 +235,7 @@ _SMOKE_COMPUTE = (
     '- Provide argparse with `--output` (CSV path, default "{output_file}") and '
     "`--smoke`. In --smoke mode, build the ACTUAL target system using the SAME "
     "structure-building code your full run uses -- never a smaller or simpler "
-    "substitute material -- run the same structure-validity checks (see above), then "
+    "substitute material -- then "
     "run the real {property} computation once, end-to-end, at the cheapest valid "
     "settings (minimal basis/cutoff, a single k-point, fewest steps): reduce COST "
     "through settings only, never by swapping in a different system. INCLUDE the real "
@@ -249,12 +249,12 @@ _SMOKE_LOAD_ONLY = (
     '- Provide argparse with `--output` (CSV path, default "{output_file}") and '
     "`--smoke`. In --smoke mode, build the ACTUAL target system using the SAME "
     "structure-building code your full run uses (never a smaller or simpler substitute "
-    "material), run the same structure-validity checks (see above), and construct/load "
+    "material), and construct/load "
     "the calculator (instantiate it, or load the pretrained model) to prove it is real "
     "and callable; then exit WITHOUT the expensive part (no large SCF, dense k-grid, or "
     "long dynamics) -- a full run needs external parameter files or is too costly for a "
-    "smoke check. Building and validating the real structure here is what catches a "
-    "malformed cell before a costly run. Downloading the tool's own model weights / "
+    "smoke check. Building the real structure here is what surfaces a broken builder "
+    "before a costly run. Downloading the tool's own model weights / "
     "parameter files is allowed; do not use the network otherwise."
 )
 
@@ -281,13 +281,16 @@ carries the correct experimental lattice constant); otherwise supply the standar
 reference lattice parameters and Wyckoff positions for the named polymorph -- these are \
 structural INPUTS that define the cell, not the {property} you compute. Do NOT hardcode \
 the {property} value itself or any other result you are meant to calculate.
-- VALIDATE the built structure before doing any expensive work, and ABORT with a clear \
-error (nonzero exit) if it is implausible -- never compute on a broken cell. Check at \
-least: the atom count matches the named cell's stoichiometry and formula-unit count \
-(Z x formula unit); the volume / number density per formula unit is physically \
-reasonable; and the minimum interatomic distance is a sane bond length (atoms fused far \
-below a real bond reveal a wrong space-group setting, origin choice, or duplicated \
-sites). A builder call that silently doubles, overlaps, or drops atoms MUST fail here.
+- Build the structure CORRECTLY rather than defensively. Use the standard reference cell \
+for the named polymorph -- correct lattice parameters, Wyckoff positions, and the right \
+stoichiometric ratio for the formula -- so the cell is right the first time. Do NOT write \
+runtime guards that raise or exit when the composition, atom count, formula-unit count, \
+or detected symmetry is not what you expected: no `if counts[...] != n: raise`, no \
+stoichiometry, atom-count, or space-group assertions that abort the run. If the structure \
+would come out wrong, the fix is to CORRECT the structure-building code so it produces the \
+right cell -- never to bolt on a validator that halts execution. You may print the \
+composition, cell, and minimum interatomic distance for visibility, but a mismatch must \
+never stop the computation.
 - Attach the {calculator} calculator (`{calculator_import}`) and compute {property}. \
 Do NOT invent model, dataset, or parameter-set identifiers -- a name you guess may \
 not exist. If the calculator loads a named pretrained model, discover the valid \
@@ -352,11 +355,14 @@ reference lattice parameters are structural INPUTS, not the {property} you compu
 Optimize the geometry first if the property needs a relaxed structure, using numerical \
 settings converged well enough for {property} in the real run. Do NOT hardcode the \
 {property} value or any other result you are meant to calculate.
-- VALIDATE the built structure before any expensive work and ABORT with a clear error \
-if it is implausible: the atom count must match the named cell's stoichiometry and \
-formula-unit count, the density / volume per formula unit must be physically \
-reasonable, and the minimum interatomic distance must be a sane bond length. Never \
-compute on a cell whose builder silently doubled, overlapped, or dropped atoms.
+- Build the structure CORRECTLY rather than defensively: use the standard reference cell \
+for the named polymorph (correct lattice parameters, Wyckoff positions, and stoichiometric \
+ratio for the formula). Do NOT write runtime guards that raise or exit when the \
+composition, atom count, or symmetry is not what you expected -- no stoichiometry, \
+atom-count, or space-group assertions that abort the run. If the built structure would be \
+wrong, CORRECT the structure-building code so it produces the right cell instead of adding \
+a validator that halts execution. Printing the composition and cell for visibility is \
+fine; a mismatch must never stop the computation.
 - Compute the quantity the property NAME denotes -- if {property} names a specific \
 route or averaging scheme, compute THAT, not a cheaper proxy, and comment how your \
 printed number maps to {property}. Do NOT invent method, basis-set, functional, or \

@@ -42,7 +42,7 @@ DEFAULT_TIMEOUTS: Dict[str, int] = {
     # REPAIR may run several --smoke verifications (up to 5 min each) plus a few
     # LLM repair/review calls, so it gets a generous stage budget.
     "REPAIR": 20 * 60,
-    "EXECUTE": 20 * 60,
+    "EXECUTE": 2 * 60 * 60,
     "INTERPRET": 10 * 60,
     "VALIDATE": 10 * 60,
     "CORRECT": 10 * 60,

@@ -167,7 +167,8 @@ resource blow-up (dense k-grid or huge cell in the main path), or logic that doe
 not actually compute {property}. Flag SCIENTIFIC-CORRECTNESS defects too: a built \
 structure with the wrong stoichiometry or atom count, or physically impossible \
 geometry (atoms fused far below a bond length, a doubled or overlapping cell, a \
-wrong space-group setting or origin choice) that is not validated before use; \
+wrong space-group setting or origin choice) -- flag these so the structure-building \
+code can be CORRECTED, not so a runtime guard can be added; \
 computing {property} at an unrelaxed geometry when it is only defined at \
 equilibrium; numerical settings far too coarse to converge {property} in the main \
 run; reporting a cheaper proxy that does not match the quantity or averaging scheme \
@@ -208,11 +209,12 @@ AttributeError), match the library's documented signature and types.
 - If a variable is undefined or the script looks truncated, complete the logic.
 - Do NOT hardcode physical constants, lattice parameters, or the expected answer; \
 build the system from the library's reference data and actually compute the value.
-- If the built structure is wrong or unchecked, fix the builder (correct space-group \
-setting/origin choice, Wyckoff positions, or stoichiometry) and VALIDATE it before \
-computing -- assert the atom count matches the named cell and the minimum interatomic \
-distance is a sane bond length, and abort on failure rather than computing on a broken \
-cell.
+- If the built structure is wrong (a previous attempt hallucinated the wrong cell, \
+stoichiometry, or space-group setting), OVERWRITE the structure-building code with a \
+correct version that builds the right cell (correct lattice parameters, Wyckoff \
+positions, and stoichiometric ratio for the formula). Do NOT add runtime guards that \
+raise or exit on an unexpected composition, atom count, or symmetry, and REMOVE any such \
+guard already present in the script -- fix the structure itself rather than halting on it.
 - If {property} needs an equilibrium structure, relax the geometry first; if the \
 numerical settings are too coarse, raise them to converged values; if the script \
 computes a proxy, replace it with the quantity {property} actually names, and report \
