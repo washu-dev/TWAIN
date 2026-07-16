@@ -126,6 +126,14 @@ openff-toolkit = "*"
 # Full-DFT GPAW only where it has a build (the Linux runner).
 [feature.sim.target.linux-64.dependencies]
 gpaw = "*"
+# In-process DFT-D3 dispersion (simple-dftd3 Python bindings). Exposes an ASE
+# calculator at `dftd3.ase.DFTD3` that runs IN-PROCESS -- unlike
+# `ase.calculators.dftd3.DFTD3`, which shells out to an external `dftd3` binary
+# that conda-forge doesn't ship (a missing-binary crash we hit on a GPAW run).
+# Lets a generated GPAW/DFTB+ run add a dispersion correction (useful for vdW-bound
+# molecular crystals). linux-64 only: the runner platform where GPAW executes, and
+# this avoids gating the osx-arm64 solve.
+dftd3-python = "*"
 
 [environments]
 default = []

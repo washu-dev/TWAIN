@@ -202,12 +202,17 @@ class TemplateSpec:
     input_file: str
     output_file: str
     default_params: Dict[str, object] = field(default_factory=dict)
+    # True for material-aware templates that fail loudly without a baked-in
+    # structure (pymatgen analysis, ASE MD). When BUILD has no real structure to
+    # bake, it routes these to LLM synthesis + the REPAIR self-heal loop instead
+    # of rendering the fail-loud template.
+    requires_structure: bool = False
 
 
 # Tool (canonical key) -> template. RDKit is resolved to one of two templates by
 # objective; unmapped tools fall back to the generic runner.
-_PYMATGEN = TemplateSpec("template_pymatgen_analysis.py", "structure_analysis", "structure.json", "results.csv", {"round_digits": 4})
-_ASE = TemplateSpec("template_molecular_dynamics.py", "emt_md", "system.json", "trajectory.csv", {"steps": 20, "timestep_fs": 1.0, "temperature_K": 300.0})
+_PYMATGEN = TemplateSpec("template_pymatgen_analysis.py", "structure_analysis", "structure.json", "results.csv", {"round_digits": 4}, requires_structure=True)
+_ASE = TemplateSpec("template_molecular_dynamics.py", "emt_md", "system.json", "trajectory.csv", {"steps": 20, "timestep_fs": 1.0, "temperature_K": 300.0}, requires_structure=True)
 _RDKIT_PROPERTY = TemplateSpec("template_property_prediction.py", "rdkit_descriptors", "molecules.csv", "predictions.csv", {"round_digits": 4})
 _RDKIT_MANIP = TemplateSpec("template_rdkit_manipulation.py", "graph_manipulation", "molecules.smi", "graph_features.csv", {"canonical": True})
 _GENERIC = TemplateSpec("template_generic.py", "generic_run", "input.json", "results.csv", {})
@@ -228,34 +233,44 @@ _RDKIT_MANIP_HINTS = (
 # (an ML predictor / semiempirical method with bundled parameters) the smoke runs
 # the ACTUAL computation on a tiny system, so a wrong API call/keyword fails during
 # REPAIR instead of the real run. For a heavy or external-data calculator (full DFT,
-# or one needing pseudopotential/Slater-Koster files) it only loads the calculator,
-# since a real run can't happen in a smoke check. Both carry {output_file}/{property}
-# placeholders and are pre-formatted before being spliced into the prompt.
+# or one needing pseudopotential/Slater-Koster files) it only builds the structure
+# and loads the calculator, then writes a sentinel output row -- the real value can't
+# be computed inside a fast smoke check, and forcing one would make --smoke as slow as
+# the full run (which is what made a GPAW smoke time out). Both carry
+# {output_file}/{property} placeholders and are pre-formatted before the prompt splice.
 _SMOKE_COMPUTE = (
     '- Provide argparse with `--output` (CSV path, default "{output_file}") and '
     "`--smoke`. In --smoke mode, build the ACTUAL target system using the SAME "
     "structure-building code your full run uses -- never a smaller or simpler "
     "substitute material -- then "
-    "run the real {property} computation once, end-to-end, at the cheapest valid "
-    "settings (minimal basis/cutoff, a single k-point, fewest steps): reduce COST "
-    "through settings only, never by swapping in a different system. INCLUDE the real "
-    "prediction/compute call and read the returned value, then write it and exit. "
-    "Do NOT stub, skip, or hard-code the computation in --smoke: its purpose is to make "
-    "a wrong API call, keyword argument, return type, or malformed structure fail fast "
-    "here. Downloading the tool's own model weights / parameter files is allowed; do "
+    "run the real {property} computation once, end-to-end, at the CHEAPEST valid "
+    "settings so it finishes quickly (aim for seconds, and well under a minute): "
+    "minimal basis/cutoff, a single k-point, the fewest iterations/steps that still "
+    "complete one real call. Reduce COST through settings ONLY, never by swapping in a "
+    "different system, and never carry these smoke settings into the full run. INCLUDE "
+    "the real prediction/compute call and read the returned value, then write it and "
+    "exit. Do NOT stub, skip, or hard-code the computation in --smoke: its purpose is to "
+    "make a wrong API call, keyword argument, return type, or malformed structure fail "
+    "fast here. Downloading the tool's own model weights / parameter files is allowed; do "
     "not use the network otherwise."
 )
 _SMOKE_LOAD_ONLY = (
     '- Provide argparse with `--output` (CSV path, default "{output_file}") and '
     "`--smoke`. In --smoke mode, build the ACTUAL target system using the SAME "
     "structure-building code your full run uses (never a smaller or simpler substitute "
-    "material), and construct/load "
-    "the calculator (instantiate it, or load the pretrained model) to prove it is real "
-    "and callable; then exit WITHOUT the expensive part (no large SCF, dense k-grid, or "
-    "long dynamics) -- a full run needs external parameter files or is too costly for a "
-    "smoke check. Building the real structure here is what surfaces a broken builder "
-    "before a costly run. Downloading the tool's own model weights / "
-    "parameter files is allowed; do not use the network otherwise."
+    "material), and construct/load the calculator (instantiate it, or load the pretrained "
+    "model) to prove it is real and callable -- then STOP before any expensive numerical "
+    "work and exit. A --smoke check is a fast wiring test that must finish in a few "
+    "seconds: do NOT start an SCF cycle, a geometry or cell relaxation, dense k-point "
+    "sampling, a band-structure or DOS pass, or any dynamics in --smoke -- those belong "
+    "ONLY to the full (non-smoke) run, because for this tool they are too costly or need "
+    "external parameter files. You must still write the {output_file} CSV row so the "
+    "smoke check finds its output file, but you do NOT need the real {property} value to "
+    "do so: write a sentinel (e.g. null / NaN / empty) in place of any number the skipped "
+    "computation would have produced, and add a boolean 'smoke' column so the placeholder "
+    "is unmistakable. Building the real structure and loading the calculator here is what "
+    "surfaces a broken builder or wrong API before a costly run. Downloading the tool's "
+    "own model weights / parameter files is allowed; do not use the network otherwise."
 )
 
 
@@ -291,6 +306,7 @@ would come out wrong, the fix is to CORRECT the structure-building code so it pr
 right cell -- never to bolt on a validator that halts execution. You may print the \
 composition, cell, and minimum interatomic distance for visibility, but a mismatch must \
 never stop the computation.
+{structure_note}
 - Attach the {calculator} calculator (`{calculator_import}`) and compute {property}. \
 Do NOT invent model, dataset, or parameter-set identifiers -- a name you guess may \
 not exist. If the calculator loads a named pretrained model, discover the valid \
@@ -308,8 +324,8 @@ forces/stress, and compute from the relaxed structure -- not from an arbitrary \
 unrelaxed guess.
 - In the real (non-smoke) run, use numerical settings converged well enough for \
 {property} (adequate k-point density, plane-wave/basis cutoff, SCF tolerance, sampling); \
-use the library's documented production defaults when unsure, and do not leave \
-smoke-level coarse settings in the full run.
+use the library's documented production defaults when unsure, and do not carry any \
+reduced settings from the --smoke check into the full run.
 - Print every metric WITH its physical unit, and for any fitted or derived value also \
 print a fit-quality / convergence diagnostic (e.g. fit residual, R^2, number of sample \
 points) so the result's reliability is visible.
@@ -326,8 +342,20 @@ metrics as one CSV row to --output.
 - End the file with an `if __name__ == "__main__":` block that runs the script \
 (calls your main function). Output the COMPLETE script in one reply -- do not stop \
 partway or omit the entrypoint.
-- Use the Python standard library, `{library_import}`, and `{calculator_import}`. \
-{also_available} The script MUST compile and MUST succeed when run with --smoke.
+- Run entirely IN-PROCESS on the packages installed in the run environment (the Python \
+standard library, `{library_import}`, and `{calculator_import}`). {also_available} Do NOT \
+require an external command-line program or separate binary that is not part of that \
+installed stack -- a tool you assume is on PATH may be absent and will crash the run. Do \
+NOT add physics corrections that computing {property} does not require. When a driver uses \
+ASE and a DFT-D3 dispersion correction IS warranted (e.g. a van-der-Waals-bound molecular \
+crystal), the IN-PROCESS `dftd3.ase.DFTD3` calculator (from the installed dftd3-python) is \
+available -- prefer it, and do NOT use `ase.calculators.dftd3.DFTD3`, which shells out to an \
+external `dftd3` executable that is not installed. If you DO attach any optional add-on that \
+delegates to an external backend, guard the actual energy/force/stress EVALUATION -- not \
+merely the object's construction, which can succeed even when the backend is missing -- with \
+try/except, so an absent backend falls back to the base calculator and the run still \
+completes instead of aborting mid-calculation. The script MUST compile and MUST succeed when \
+run with --smoke.
 
 Acceptance criteria (JSON list of {{metric_name, target_value, tolerance}}): \
 {acceptance_json}
@@ -363,6 +391,7 @@ atom-count, or space-group assertions that abort the run. If the built structure
 wrong, CORRECT the structure-building code so it produces the right cell instead of adding \
 a validator that halts execution. Printing the composition and cell for visibility is \
 fine; a mismatch must never stop the computation.
+{structure_note}
 - Compute the quantity the property NAME denotes -- if {property} names a specific \
 route or averaging scheme, compute THAT, not a cheaper proxy, and comment how your \
 printed number maps to {property}. Do NOT invent method, basis-set, functional, or \
@@ -384,8 +413,14 @@ CSV row to --output.
 - End the file with an `if __name__ == "__main__":` block that runs the script \
 (calls your main function). Output the COMPLETE script in one reply -- do not stop \
 partway or omit the entrypoint.
-- Use the Python standard library and `{library_import}`. {also_available} The script \
-MUST compile and MUST succeed when run with --smoke.
+- Run entirely IN-PROCESS on the packages installed in the run environment (the Python \
+standard library and `{library_import}`). {also_available} Do NOT require an external \
+command-line program or separate binary that is not part of that installed stack -- a tool \
+you assume is on PATH may be absent and will crash the run. Do NOT add corrections that \
+computing {property} does not require. If you use an optional external-backend helper, \
+guard the actual computation call (not merely its construction) with try/except so a \
+missing backend degrades gracefully instead of aborting mid-run. The script MUST compile \
+and MUST succeed when run with --smoke.
 
 Acceptance criteria (JSON list of {{metric_name, target_value, tolerance}}): \
 {acceptance_json}
@@ -661,7 +696,14 @@ class CodegenEngine:
         # falling back to the tool-agnostic stub, which computes nothing. Without an
         # agent (offline/tests) it still renders the deterministic template.
         spec = self.select_template(tool_name, hint=self._hint_from(plan, intent))
-        if spec is _GENERIC and plan.get("requested_property") and agent is not None:
+        # Prefer LLM synthesis (which the REPAIR stage then self-heals) over a
+        # fail-loud template whenever the model can write real code: either no
+        # dedicated template fits (_GENERIC), or the chosen template needs a real
+        # structure the plan didn't carry. Both cases are fixable by synthesis +
+        # REPAIR rather than aborting the run. When a real structure IS present it
+        # is baked into the template below, so we keep the deterministic path.
+        needs_structure = spec.requires_structure and not self._structure_for(plan, intent)
+        if (spec is _GENERIC or needs_structure) and plan.get("requested_property") and agent is not None:
             return self._generate_with_calculator(
                 plan, libraries, None, None, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
@@ -732,6 +774,10 @@ class CodegenEngine:
         driver_import = driver_deps[0].import_name if driver_deps else canonical_tool_key(driver)
         also = [lib for lib in libraries if lib.lower() != driver.lower()]
         material = self._material_brief(plan, intent)
+        # A real cell (atoms + lattice) baked in upstream (CIF / Materials Project)
+        # is passed to the model so it builds THAT verified structure verbatim
+        # instead of reconstructing lattice constants from a bare space group.
+        structure = self._structure_for(plan, intent)
 
         brief = {
             "library": driver,
@@ -742,6 +788,7 @@ class CodegenEngine:
             "property": requested_property,
             "material": material,
             "material_desc": self._material_desc(material),
+            "structure": structure,
             "acceptance": acceptance,
             "output_file": "results.csv",
             # When True, the generated --smoke path runs the real (tiny) computation
@@ -855,6 +902,21 @@ class CodegenEngine:
         smoke_tmpl = _SMOKE_COMPUTE if brief.get("smoke_compute") else _SMOKE_LOAD_ONLY
         smoke_instruction = smoke_tmpl.format(
             output_file=brief["output_file"], property=brief["property"])
+        # When a verified cell was baked in upstream, direct the model to build it
+        # verbatim rather than reconstruct lattice constants from memory (the failure
+        # mode that produces a plausible-but-wrong crystal). With no baked cell we
+        # leave the standard "build the named polymorph" guidance above untouched.
+        structure = brief.get("structure") or {}
+        if isinstance(structure, dict) and structure.get("atoms") and structure.get("lattice"):
+            structure_note = (
+                "- A VERIFIED reference structure is provided as JSON below. Build "
+                "EXACTLY this cell -- use these lattice vectors and atomic positions "
+                "verbatim and do NOT re-derive lattice constants, Wyckoff positions, "
+                "or the space group from memory. Structure (JSON): "
+                + json.dumps(structure)
+            )
+        else:
+            structure_note = ""
         return template.format(
             property=brief["property"],
             material_desc=brief["material_desc"],
@@ -867,6 +929,7 @@ class CodegenEngine:
             acceptance_json=json.dumps(brief["acceptance"]),
             also_available=also_line,
             smoke_instruction=smoke_instruction,
+            structure_note=structure_note,
         )
 
     @staticmethod
