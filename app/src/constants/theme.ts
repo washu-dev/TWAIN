@@ -77,6 +77,7 @@ export const APP_STRINGS = {
   appTitle: 'TWAIN',
   appSubtitle: 'The WashU AI-Assisted Platform for Simulation From Narration',
   loginButton: 'Login',
+  logoutButton: 'Logout',
   testButton: 'Test',
   startSimulation: 'Start Simulation',
   resumeWorkflow: 'Resume Workflow',

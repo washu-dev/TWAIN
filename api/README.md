@@ -10,14 +10,27 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configure Database Connection
-Edit `.env` file with your PostgreSQL credentials:
+
+DB connection properties are read from **AWS Secrets Manager** under the
+`TWAIN/database/*` group (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`,
+`DB_PASSWORD`), managed by the Terraform in `../terraform`.
+
+**In AWS (ECS/Fargate):** the task role is `TWAIN-secrets-reader` (see
+`ecs-task-definition.json`), so the container reads + decrypts the secrets with
+its default credentials — no DB values in the task definition.
+
+**Locally:** set the reader role in `.env` so your IAM user assumes it:
 ```
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=twain_db
-DB_USER=postgres
-DB_PASSWORD=your_password_here
+AWS_REGION=us-east-1
+TWAIN_SECRET_PREFIX=TWAIN/database
+TWAIN_SECRETS_ROLE_ARN=arn:aws:iam::730335203321:role/TWAIN-secrets-reader
 ```
+
+**Offline (no AWS):** set `TWAIN_DB_FROM_ENV=true` and provide the `DB_*` values
+directly in `.env` instead.
+
+To change a credential, edit `../terraform/secrets.json` and run
+`terraform apply` — do not put DB credentials in this service's env or code.
 
 ### 3. Create Greetings Table (First Time Only)
 ```bash
