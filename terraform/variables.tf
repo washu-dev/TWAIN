@@ -32,6 +32,24 @@ variable "assume_role_principal_arns" {
   default     = []
 }
 
+variable "ci_principal_arns" {
+  description = "IAM principal ARNs (e.g. the CI user) allowed to assume the SSO-only CI reader role. Empty disables the role."
+  type        = list(string)
+  default     = []
+}
+
+variable "ci_role_name" {
+  description = "Name of the SSO-scoped CI reader role used to inject EXPO_PUBLIC_AZURE_* at build time."
+  type        = string
+  default     = "TWAIN-sso-ci-reader"
+}
+
+variable "sso_ci_secret_keys" {
+  description = "secrets.json keys the CI reader role may read (the public SSO identifiers injected into the web build)."
+  type        = list(string)
+  default     = ["sso/APP_ID", "sso/TENANT_ID"]
+}
+
 variable "trusted_service_principals" {
   description = "AWS service principals allowed to assume the read role (e.g. ECS tasks that read the secrets at runtime)."
   type        = list(string)

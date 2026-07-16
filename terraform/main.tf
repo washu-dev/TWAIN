@@ -163,3 +163,59 @@ resource "aws_iam_role_policy" "twain_secrets_read" {
   role   = aws_iam_role.twain_secrets.id
   policy = data.aws_iam_policy_document.secrets_read.json
 }
+
+# ─── CI role: SSO-only read access for injecting EXPO_PUBLIC_AZURE_* at build ──
+# Least privilege: this role reads ONLY the public SSO identifiers, never the
+# database or Secure-AI secrets, so a compromised web-build pipeline can't leak
+# them. Created only when ci_principal_arns is non-empty.
+
+locals {
+  create_ci_role = length(var.ci_principal_arns) > 0
+  ci_secret_arns = [for k in var.sso_ci_secret_keys : aws_secretsmanager_secret.this[k].arn]
+}
+
+data "aws_iam_policy_document" "ci_assume" {
+  count = local.create_ci_role ? 1 : 0
+
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "AWS"
+      identifiers = var.ci_principal_arns
+    }
+  }
+}
+
+resource "aws_iam_role" "sso_ci_reader" {
+  count              = local.create_ci_role ? 1 : 0
+  name               = var.ci_role_name
+  description        = "CI: read-only ${var.name_prefix}/sso identifiers for the web build"
+  assume_role_policy = data.aws_iam_policy_document.ci_assume[0].json
+  tags               = local.common_tags
+}
+
+data "aws_iam_policy_document" "ci_read" {
+  count = local.create_ci_role ? 1 : 0
+
+  statement {
+    sid       = "ReadSsoSecrets"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = local.ci_secret_arns
+  }
+
+  statement {
+    sid       = "DecryptWithTwainKey"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt", "kms:DescribeKey"]
+    resources = [aws_kms_key.twain_secrets.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "sso_ci_reader" {
+  count  = local.create_ci_role ? 1 : 0
+  name   = "${var.ci_role_name}-read"
+  role   = aws_iam_role.sso_ci_reader[0].id
+  policy = data.aws_iam_policy_document.ci_read[0].json
+}
