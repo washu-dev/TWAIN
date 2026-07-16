@@ -45,7 +45,11 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
             kind="chat", state="BUILD",
         )
     else:
-        decision = request_plan_approval(db, session_id, engine.read_execution_plan(orch))
+        decision, slurm_overrides = request_plan_approval(
+            db, session_id, engine.read_execution_plan(orch),
+            compute_target=engine.compute_target_of(orch),
+            slurm_cluster=engine.slurm_cluster_of(orch),
+        )
         if decision != "approve":
             db.set_conversation_status(session_id, "rejected")
             db.add_assistant_message(
@@ -55,9 +59,18 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
                 kind="chat",
             )
             return
-        db.add_assistant_message(
-            session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
-        )
+        if slurm_overrides:
+            engine.apply_slurm_overrides(orch, slurm_overrides)
+            db.add_assistant_message(
+                session_id,
+                "Plan approved with updated Slurm settings. Building and executing…",
+                kind="chat", state="BUILD",
+            )
+        else:
+            db.add_assistant_message(
+                session_id, "Plan approved. Building and executing…",
+                kind="chat", state="BUILD",
+            )
 
     # Leg 2: build → execute → interpret → validate → accept → terminate.
     status = orch.run()
@@ -88,7 +101,26 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         ask=DbAsk(db, session_id),
         sink=PgEventSink(db, session_id),
         store=PgStore(db),
+        # Per-run execution backend picked in the UI ('local' | 'slurm');
+        # None falls back to the runner's env-configured default.
+        compute_target=params.get("compute_target"),
     )
+    # Announce the backend early so the chat shows RIS vs local before planning.
+    target = engine.compute_target_of(orch)
+    if target == "slurm":
+        cluster = engine.slurm_cluster_of(orch) or "compute2"
+        db.add_assistant_message(
+            session_id,
+            f"Compute target: RIS cluster via Slurm ({cluster}). "
+            "The run will be submitted to the HPC queue after you approve the plan.",
+            kind="chat",
+        )
+    else:
+        db.add_assistant_message(
+            session_id,
+            "Compute target: this server (local / Docker).",
+            kind="chat",
+        )
     try:
         _drive_run(db, session_id, orch, engine)
     finally:

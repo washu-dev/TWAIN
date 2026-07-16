@@ -389,8 +389,9 @@ def test_execute_skips_gracefully_when_profile_unusable(machine, tmp_path):
 
 
 def test_build_slurm_adapter_uses_plan_request(machine, tmp_path):
+    # Plan contract: ram in GB, max_time in hours. Adapter receives MB + minutes.
     plan = {"slurm_request": {"cpu_count": 16, "gpu_count": 1,
-                              "max_time": 90, "ram": 32000}}
+                              "max_time": 1.5, "ram": 32}}
     path = tmp_path / "execution_plan_seed.json"
     path.write_text(json.dumps(plan))
     machine.context.artifacts["execution_plan"] = str(path)
@@ -399,7 +400,22 @@ def test_build_slurm_adapter_uses_plan_request(machine, tmp_path):
     assert adapter is not None
     assert adapter.request.cpu_count == 16
     assert adapter.request.gpu_count == 1
+    assert adapter.request.ram == 32 * 1024  # GB -> MB
+    assert adapter.request.max_time == 90.0  # hours -> minutes
     assert adapter.workspace_root == str(tmp_path)
+
+
+def test_build_slurm_adapter_applies_ram_floor(machine, tmp_path):
+    # A planner that asks for 1 GB must still submit with the 4 GB floor.
+    plan = {"slurm_request": {"cpu_count": 4, "gpu_count": 0,
+                              "max_time": 0.05, "ram": 1}}
+    path = tmp_path / "execution_plan_seed.json"
+    path.write_text(json.dumps(plan))
+    machine.context.artifacts["execution_plan"] = str(path)
+
+    adapter = machine._build_slurm_adapter()
+    assert adapter.request.ram == 4 * 1024
+    assert adapter.request.max_time == 10.0  # MIN_WALL_MINUTES
 
 
 def test_execute_slurm_off_keeps_execute_a_noop(tmp_path):

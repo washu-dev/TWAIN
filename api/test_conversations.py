@@ -39,6 +39,22 @@ class TestStart:
         response = client.post("/api/conversations", json={"request": "   "})
         assert response.status_code == 422
 
+    @patch("conversations.create_conversation", return_value=CONVERSATION)
+    def test_start_forwards_compute_target(self, mock_create):
+        response = client.post(
+            "/api/conversations",
+            json={"request": "band gap of silicon", "compute_target": "slurm"},
+        )
+        assert response.status_code == 200
+        assert mock_create.call_args.kwargs["compute_target"] == "slurm"
+
+    def test_start_rejects_unknown_compute_target(self):
+        response = client.post(
+            "/api/conversations",
+            json={"request": "band gap of silicon", "compute_target": "mainframe"},
+        )
+        assert response.status_code == 422
+
 
 class TestListAndGet:
     @patch("conversations.list_conversations", return_value=[CONVERSATION])
@@ -83,7 +99,18 @@ class TestMessagesAndApproval:
     def test_post_approval(self, _mock_conv, mock_add):
         response = client.post("/api/conversations/conv-1/approval", json={"decision": "approve"})
         assert response.status_code == 200
-        mock_add.assert_called_once_with("conv-1", "approve")
+        mock_add.assert_called_once_with("conv-1", "approve", slurm_request=None)
+
+    @patch("conversations.add_approval_response", return_value={**MESSAGE, "kind": "approval_response"})
+    @patch("conversations.get_conversation", return_value=CONVERSATION)
+    def test_post_approval_with_slurm_overrides(self, _mock_conv, mock_add):
+        body = {
+            "decision": "approve",
+            "slurm_request": {"cpu_count": 16, "gpu_count": 0, "ram": 32, "max_time": 1.0},
+        }
+        response = client.post("/api/conversations/conv-1/approval", json=body)
+        assert response.status_code == 200
+        assert mock_add.call_args.kwargs["slurm_request"]["ram"] == 32
 
     @patch("conversations.get_conversation", return_value=CONVERSATION)
     def test_post_approval_rejects_bad_decision(self, _mock_conv):

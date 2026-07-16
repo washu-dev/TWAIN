@@ -146,8 +146,10 @@ docker run --rm --platform linux/amd64 --env-file .env -e TWAIN_AUTO_RUN=1 \
 ## Run on the Slurm cluster (WashU RIS Compute2)
 When a run exceeds what your laptop (or the Docker route) should carry, EXECUTE
 can submit the built RunBundle to the school's HPC cluster instead
-(Story 5.4). Set `TWAIN_EXECUTE_SLURM=1` (runner/env) or pass `--slurm` to the
-orchestrator CLI:
+(Story 5.4). Pick **"RIS cluster (Slurm)"** in the web app's "Run on" selector
+when starting a run (it rides in the job's `compute_target` param), set
+`TWAIN_EXECUTE_SLURM=1` to make it the runner-wide default, or pass `--slurm`
+to the orchestrator CLI:
 
 ```bash
 pixi run python modules/07_runtime_orchestrator/orchestrator.py --slurm

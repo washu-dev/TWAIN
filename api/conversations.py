@@ -16,8 +16,17 @@ from database import get_connection
 TERMINAL_STATUSES = ("completed", "error", "rejected")
 
 
-def create_conversation(user_id: str, request: str, title: str | None = None) -> dict:
+def create_conversation(
+    user_id: str,
+    request: str,
+    title: str | None = None,
+    *,
+    compute_target: str | None = None,
+) -> dict:
     """Create a conversation, store the first user turn, and enqueue a start job.
+
+    ``compute_target`` ('local' | 'slurm') rides in the job params so the runner
+    can pick the execution backend per run; None keeps the runner's default.
 
     All three writes share one transaction so a conversation never exists
     without its opening message and queued job.
@@ -42,9 +51,12 @@ def create_conversation(user_id: str, request: str, title: str | None = None) ->
             """,
             (session_id, request),
         )
+        params = {"request": request, "researcher_id": user_id}
+        if compute_target:
+            params["compute_target"] = compute_target
         cursor.execute(
             "INSERT INTO jobs (session_id, kind, params) VALUES (%s, 'start', %s);",
-            (session_id, json.dumps({"request": request, "researcher_id": user_id})),
+            (session_id, json.dumps(params)),
         )
         conn.commit()
         cursor.close()
@@ -169,8 +181,23 @@ def add_message(conversation_id: str, content: str, *, kind: str = "chat") -> di
         conn.close()
 
 
-def add_approval_response(conversation_id: str, decision: str) -> dict:
-    """Record the user's plan-approval decision ('approve' | 'reject')."""
+def add_approval_response(
+    conversation_id: str,
+    decision: str,
+    *,
+    slurm_request: dict | None = None,
+) -> dict:
+    """Record the user's plan-approval decision ('approve' | 'reject').
+
+    When the user edited Slurm settings on the approval card, ``slurm_request``
+    (plan units: ram GB, max_time hours) is embedded in the message content so
+    the runner can patch the execution plan before BUILD/EXECUTE.
+    """
+    content = (
+        json.dumps({"decision": decision, "slurm_request": slurm_request})
+        if slurm_request is not None
+        else decision
+    )
     conn = get_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -180,7 +207,7 @@ def add_approval_response(conversation_id: str, decision: str) -> dict:
             VALUES (%s, 'user', %s, 'approval_response')
             RETURNING id, role, content, kind, state, created_at;
             """,
-            (conversation_id, decision),
+            (conversation_id, content),
         )
         row = cursor.fetchone()
         conn.commit()

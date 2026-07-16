@@ -9,6 +9,10 @@ export type ConversationStatus =
   | 'error'
   | 'rejected';
 
+// Where the run's EXECUTE stage happens: the runner host itself, or a job
+// submitted to the WashU RIS Slurm cluster. Omitted = the runner's default.
+export type ComputeTarget = 'local' | 'slurm';
+
 export type MessageRole = 'user' | 'assistant' | 'system';
 export type MessageKind =
   | 'chat'
@@ -91,8 +95,14 @@ class APIClient {
   }
 
   // ── Conversations / chat (Phase 1) ─────────────────────────────────────────
-  async startConversation(request: string): Promise<Conversation> {
-    const response = await this.client.post('/api/conversations', { request });
+  async startConversation(
+    request: string,
+    computeTarget?: ComputeTarget,
+  ): Promise<Conversation> {
+    const response = await this.client.post('/api/conversations', {
+      request,
+      ...(computeTarget ? { compute_target: computeTarget } : {}),
+    });
     return response.data.data;
   }
 
@@ -113,9 +123,19 @@ class APIClient {
     return response.data.data;
   }
 
-  async sendApproval(id: string, decision: 'approve' | 'reject'): Promise<Message> {
+  async sendApproval(
+    id: string,
+    decision: 'approve' | 'reject',
+    slurmRequest?: {
+      cpu_count?: number;
+      gpu_count?: number;
+      ram?: number;
+      max_time?: number;
+    },
+  ): Promise<Message> {
     const response = await this.client.post(`/api/conversations/${id}/approval`, {
       decision,
+      ...(slurmRequest ? { slurm_request: slurmRequest } : {}),
     });
     return response.data.data;
   }

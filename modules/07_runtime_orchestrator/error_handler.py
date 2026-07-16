@@ -158,6 +158,22 @@ def classify(exc: BaseException, state: Optional[str] = None) -> ClassifiedError
             category = ErrorCategory.LLM
             hint = ("Rate limited (HTTP 429) by the model provider — wait for the limit "
                     "to reset, then resume.")
+        elif status is not None and status >= 500:
+            # Upstream model gateway fault (e.g. aiapi.wustl.edu 500). Must not
+            # fall through to the OSError -> RESOURCE rule — HTTPError subclasses
+            # OSError and would otherwise suggest reducing memory/CPU.
+            category = ErrorCategory.LLM
+            hint = (
+                f"The model provider returned HTTP {status} (temporary server error). "
+                "Wait a minute and resume; if it keeps failing, check "
+                "https://aiapi.wustl.edu status or try again on campus VPN."
+            )
+        elif status is not None:
+            category = ErrorCategory.LLM
+            hint = (
+                f"The model provider returned HTTP {status}. Check the request / "
+                "API credentials, then resume."
+            )
         else:
             category = _heuristic_category(exc)
             hint = _FALLBACKS[category]

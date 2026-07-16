@@ -26,10 +26,15 @@ from plan_synthesizer.risk_assessor import RiskAssessor
 _VERSION_NUM = re.compile(r"(\d+)(?:\.(\d+))?")
 
 # Slurm defaults when the caller doesn't specify resources.
+# ``ram`` is gigabytes (matches schemas/examples + codegen's ``ram_gb``);
+# the Slurm adapter converts to MB at submit time. Never go below the floor —
+# 16M OOMs a venv install on RIS (see Story 5.4 runs).
 DEFAULT_CPU_COUNT = 8
 DEFAULT_GPU_COUNT = 0
-DEFAULT_RAM = 16
+DEFAULT_RAM = 16          # GB
+MIN_RAM_GB = 4            # floor applied in synthesize()
 DEFAULT_WALL_MINUTES = 10.0
+MIN_WALL_MINUTES = 10.0
 
 
 def version_to_number(version: str) -> float:
@@ -81,7 +86,12 @@ class PlanSynthesizer:
 
         entry = candidate.entry
 
-        cost = self.cost_estimator.estimate(wall_minutes=wall_minutes, cpu_count=cpu_count)
+        # Clamp so a bad/missing estimate can't produce an un-runnable sbatch
+        # (e.g. --mem=16M). Plan stores ram in GB and max_time in hours.
+        ram_gb = max(int(ram), MIN_RAM_GB)
+        wall = max(float(wall_minutes), MIN_WALL_MINUTES)
+
+        cost = self.cost_estimator.estimate(wall_minutes=wall, cpu_count=cpu_count)
         risk = self.risk_assessor.assess(entry, requested_capability=requested_capability)
 
         safety_notes: List[str] = list(risk.notes)
@@ -100,8 +110,8 @@ class PlanSynthesizer:
             slurm_request=SlurmRequest(
                 cpu_count=cpu_count,
                 gpu_count=gpu_count,
-                max_time=round(wall_minutes / 60.0, 4),
-                ram=ram,
+                max_time=round(wall / 60.0, 4),
+                ram=ram_gb,
             ),
             cost_estimate=CostEstimate(min_tokens=cost.tokens, min_cost=cost.usd),
             metadata=ExecutionPlanMetadata(

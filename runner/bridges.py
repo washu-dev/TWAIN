@@ -69,40 +69,82 @@ class DbAsk:
 
 def request_plan_approval(
     db: RunnerDB, session_id: str, plan: dict | None,
+    *,
+    compute_target: str | None = None,
+    slurm_cluster: str | None = None,
     poll: float = DEFAULT_POLL_SECONDS, timeout: float = DEFAULT_WAIT_TIMEOUT,
     sleep=time.sleep,
-) -> str:
+) -> tuple[str, dict | None]:
     """Post the plan for approval and block for the user's decision.
 
-    Returns the raw decision string ('approve' or 'reject').
+    Returns ``(decision, slurm_overrides)`` where decision is ``'approve'`` or
+    ``'reject'`` and ``slurm_overrides`` is an optional plan-unit
+    ``slurm_request`` dict the user edited on the approval card (ram in GB,
+    max_time in hours).
     """
     baseline = db.max_message_id(session_id)
     db.add_assistant_message(
         session_id,
-        json.dumps(_plan_summary(plan)),
+        json.dumps(_plan_summary(plan, compute_target=compute_target,
+                                 slurm_cluster=slurm_cluster)),
         kind="approval_request",
         state="PLAN",
     )
     db.set_conversation_status(session_id, "awaiting_approval")
-    decision = _wait_for_reply(
+    raw = _wait_for_reply(
         db, session_id, baseline, kind="approval_response",
         poll=poll, timeout=timeout, sleep=sleep,
     )
-    return decision.strip().lower()
+    return _parse_approval_reply(raw)
 
 
-def _plan_summary(plan: dict | None) -> dict:
+def _parse_approval_reply(raw: str) -> tuple[str, dict | None]:
+    """Accept plain ``approve``/``reject`` or a JSON body with optional overrides."""
+    text = (raw or "").strip()
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        return text.lower(), None
+    if isinstance(body, dict) and "decision" in body:
+        decision = str(body.get("decision", "")).strip().lower()
+        overrides = body.get("slurm_request")
+        if not isinstance(overrides, dict):
+            overrides = None
+        return decision, overrides
+    return text.lower(), None
+
+
+def _plan_summary(
+    plan: dict | None,
+    *,
+    compute_target: str | None = None,
+    slurm_cluster: str | None = None,
+) -> dict:
     """Trim an ExecutionPlan artifact to the fields worth showing for approval."""
     if not plan:
-        return {"note": "No execution plan was produced."}
-    return {
-        "goal_id": plan.get("goal_id"),
+        return {
+            "note": "No execution plan was produced.",
+            "compute_target": compute_target or "local",
+        }
+    target = compute_target or "local"
+    summary = {
+        "compute_target": target,
         "selected_method": plan.get("selected_method"),
-        "cost": plan.get("cost"),
-        "compute_resources": plan.get("compute_resources"),
-        "risk_assessment": plan.get("risk_assessment"),
+        "cost_estimate": plan.get("cost_estimate"),
+        "compute_estimate": plan.get("compute_estimate"),
+        "slurm_request": plan.get("slurm_request"),
         "acceptance_metrics": plan.get("acceptance_metrics"),
+        "safety_notes": plan.get("safety_notes"),
     }
+    if target == "slurm":
+        summary["slurm_cluster"] = slurm_cluster or "compute2"
+        summary["slurm_units"] = {
+            "ram": "GB",
+            "max_time": "hours",
+            "cpu_count": "cores",
+            "gpu_count": "GPUs",
+        }
+    return summary
 
 
 class PgEventSink:

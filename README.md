@@ -98,7 +98,7 @@ cd app && npm run start
 | `AUTH_DISABLED=true` | API | skip Entra sign-in; every request is a dev admin. Local only. |
 | `TWAIN_EXECUTE_LOCALLY=1` | runner | actually run the generated script at EXECUTE (otherwise planning-only) |
 | `TWAIN_AUTO_RUN=1` | runner | fully unattended: executes and skips the plan-approval + heavy-calc gates |
-| `TWAIN_EXECUTE_SLURM=1` | runner | submit the run to the Compute2 Slurm cluster instead (see `runner/README.md`) |
+| `TWAIN_EXECUTE_SLURM=1` | runner | default runs to the Compute2 Slurm cluster; the web app's "Run on" selector overrides per run (see `runner/README.md`) |
 | `TWAIN_VERIFY_CODEGEN=1` | runner | verify + repair generated scripts before running (defaults on when executing) |
 | `DB_HOST/PORT/NAME/USER/PASSWORD` | API + runner | Postgres connection (dev defaults: `localhost:5432`, `twaindb`, `postgres`/`postgres`) |
 

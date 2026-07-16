@@ -1290,6 +1290,7 @@ class StateMachine:
         from execution_adapter.cluster_profile import ClusterProfile
         from execution_adapter.slurm_execution_adapter import SlurmExecutionAdapter
         from plan_synthesizer.execution_plan import SlurmRequest
+        from plan_synthesizer.plan_synthesizer import MIN_RAM_GB, MIN_WALL_MINUTES
         try:
             profile = ClusterProfile.load(self.slurm_cluster)
         except (OSError, ValueError, TypeError) as exc:
@@ -1300,7 +1301,16 @@ class StateMachine:
         raw = plan.get("slurm_request")
         if isinstance(raw, dict):
             try:
-                request = SlurmRequest(**raw)
+                # Plan contract: ram is GB, max_time is hours (plan_synthesizer /
+                # schema examples). The Slurm adapter expects MB + minutes.
+                ram_gb = max(MIN_RAM_GB, int(raw.get("ram") or MIN_RAM_GB))
+                max_hours = float(raw.get("max_time") or (MIN_WALL_MINUTES / 60.0))
+                request = SlurmRequest(
+                    cpu_count=int(raw.get("cpu_count") or 8),
+                    gpu_count=int(raw.get("gpu_count") or 0),
+                    max_time=max(MIN_WALL_MINUTES, max_hours * 60.0),
+                    ram=ram_gb * 1024,
+                )
             except (TypeError, ValueError):
                 request = None  # malformed plan request -> adapter default
         host = os.environ.get("TWAIN_SLURM_HOST")  # None => profile login node

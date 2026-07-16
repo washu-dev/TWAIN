@@ -39,6 +39,7 @@
           "type": "number"
         },
         "ram": {
+          "description": "Requested memory in gigabytes (floor 4 at synthesize/submit).",
           "type": "integer"
         }
       }

@@ -325,7 +325,13 @@ class SlurmExecutionAdapter:
                     f"Slurm job {job_id} hit its wall-clock limit and was killed")
         if state is JobState.CANCELLED:
             return ExecutionStatus.FAILED, f"Slurm job {job_id} was cancelled"
+        # OUT_OF_MEMORY maps to FAILED in parse_slurm_state; surface it clearly
+        # (sacct often reports ExitCode 0:125 which looks like success otherwise).
         blob = (stdout or "").lower()
+        if "oom" in blob or "out_of_memory" in blob or "oom_kill" in blob:
+            return (ExecutionStatus.FAILED,
+                    f"Slurm job {job_id} was killed (out of memory) — "
+                    f"raise RAM on the approval card (floor is 4 GB) and retry")
         # The smoke script exits 2 on a missing dependency; the payload chain
         # propagates it as the job's exit code.
         if exit_code == 2 or any(marker in blob for marker in _DEP_ERROR_MARKERS):

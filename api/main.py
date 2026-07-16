@@ -93,6 +93,9 @@ async def admin_set_user_role(user_id: str, body: RoleUpdate, _admin: AdminUser)
 class CreateConversation(BaseModel):
     request: str
     title: str | None = None
+    # Where EXECUTE runs: 'slurm' submits to the RIS cluster, 'local' runs on
+    # the runner host, None keeps the runner's env-configured default.
+    compute_target: Literal["local", "slurm"] | None = None
 
 
 class SendMessage(BaseModel):
@@ -101,6 +104,8 @@ class SendMessage(BaseModel):
 
 class SendApproval(BaseModel):
     decision: Literal["approve", "reject"]
+    # Optional plan-unit overrides (ram GB, max_time hours) from the approval card.
+    slurm_request: dict | None = None
 
 
 def _require_own_conversation(conversation_id: str, user: dict) -> dict:
@@ -115,7 +120,9 @@ async def start_conversation(body: CreateConversation, user: CurrentUser):
     """Start a new run from a natural-language request and enqueue it."""
     if not body.request.strip():
         raise HTTPException(status_code=422, detail="request must not be empty.")
-    conversation = convo.create_conversation(user["id"], body.request, body.title)
+    conversation = convo.create_conversation(
+        user["id"], body.request, body.title, compute_target=body.compute_target
+    )
     return {"data": conversation}
 
 
@@ -146,7 +153,11 @@ async def post_message(conversation_id: str, body: SendMessage, user: CurrentUse
 async def post_approval(conversation_id: str, body: SendApproval, user: CurrentUser):
     """Answer a plan-approval gate ('approve' resumes the run, 'reject' stops it)."""
     _require_own_conversation(conversation_id, user)
-    return {"data": convo.add_approval_response(conversation_id, body.decision)}
+    return {
+        "data": convo.add_approval_response(
+            conversation_id, body.decision, slurm_request=body.slurm_request
+        )
+    }
 
 
 def _sse_event_stream(conversation_id: str):

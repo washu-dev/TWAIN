@@ -100,11 +100,28 @@ class FakeOrchestrator:
 class FakeEngine:
     STATE_BUILD = "BUILD"
 
-    def __init__(self, plan=None):
+    def __init__(self, plan=None, *, compute_target="local", slurm_cluster="compute2"):
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
+        self.compute_targets = []  # what process_job forwarded from job params
+        self._compute_target = compute_target
+        self._slurm_cluster = slurm_cluster
+        self.applied_overrides = []
 
-    def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store):
+    def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store,
+                           compute_target=None):
+        self.compute_targets.append(compute_target)
+        if compute_target is not None:
+            self._compute_target = compute_target
         return FakeOrchestrator(ask, sink)
+
+    def compute_target_of(self, orch):
+        return self._compute_target
+
+    def slurm_cluster_of(self, orch):
+        return self._slurm_cluster if self._compute_target == "slurm" else None
+
+    def apply_slurm_overrides(self, orch, overrides):
+        self.applied_overrides.append(overrides)
 
     def read_execution_plan(self, orch):
         return self._plan
@@ -146,6 +163,34 @@ class TestProcessJob:
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
 
+    def test_compute_target_forwarded_from_job_params(self):
+        db = FakeDB(approval="approve")
+        engine = FakeEngine()
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start",
+             "params": {"compute_target": "slurm"}},
+            db, engine,
+        )
+        assert engine.compute_targets == ["slurm"]
+        assert any("RIS cluster" in m["content"] for m in db.messages)
+
+    def test_slurm_overrides_applied_on_approve(self):
+        payload = json.dumps({
+            "decision": "approve",
+            "slurm_request": {"cpu_count": 16, "ram": 32, "max_time": 1.0, "gpu_count": 0},
+        })
+        db = FakeDB(approval=payload)
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start",
+             "params": {"compute_target": "slurm"}},
+            db, engine,
+        )
+        assert engine.applied_overrides == [
+            {"cpu_count": 16, "ram": 32, "max_time": 1.0, "gpu_count": 0}
+        ]
+        assert any("updated Slurm settings" in m["content"] for m in db.messages)
+
     def test_unsupported_kind_raises(self):
         db = FakeDB()
         try:
@@ -184,9 +229,32 @@ class TestBridges:
 
     def test_request_plan_approval_returns_decision(self):
         db = FakeDB(approval="APPROVE")
-        decision = request_plan_approval(db, SESSION, {"cost": 1.0}, sleep=lambda _s: None)
+        decision, overrides = request_plan_approval(
+            db, SESSION, {"cost_estimate": {"min_cost": 1.0}}, sleep=lambda _s: None
+        )
         assert decision == "approve"  # normalized
+        assert overrides is None
         assert db.messages[0]["kind"] == "approval_request"
+        summary = json.loads(db.messages[0]["content"])
+        assert summary["compute_target"] == "local"
+        assert "slurm_request" in summary
+
+    def test_request_plan_approval_parses_slurm_overrides(self):
+        payload = json.dumps({
+            "decision": "approve",
+            "slurm_request": {"cpu_count": 16, "ram": 32, "max_time": 1.0, "gpu_count": 0},
+        })
+        db = FakeDB(approval=payload)
+        decision, overrides = request_plan_approval(
+            db, SESSION, {"slurm_request": {"ram": 16}},
+            compute_target="slurm", slurm_cluster="compute2",
+            sleep=lambda _s: None,
+        )
+        assert decision == "approve"
+        assert overrides["ram"] == 32
+        summary = json.loads(db.messages[0]["content"])
+        assert summary["compute_target"] == "slurm"
+        assert summary["slurm_cluster"] == "compute2"
 
     def test_event_sink_persists_and_mirrors_state(self):
         db = FakeDB()
