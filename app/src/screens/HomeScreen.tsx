@@ -10,8 +10,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Header, Footer, TileButton, MessageModal } from '@/components';
 import { APP_STRINGS, Spacing } from '@/constants/theme';
 import { apiClient } from '@/api/client';
+import { useAuth } from '@/auth/AuthProvider';
 
 export const HomeScreen: React.FC = () => {
+  const { isAuthenticated, account, login, logout } = useAuth();
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [modalTitle, setModalTitle] = useState('');
@@ -38,13 +40,35 @@ export const HomeScreen: React.FC = () => {
     }
   };
 
-  const handleLoginPress = () => {
-    showModal('Login', ['Login functionality will be implemented soon.']);
+  const handleLoginPress = async () => {
+    try {
+      await login();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      showModal('Sign in unavailable', [msg]);
+    }
   };
+
+  const handleLogoutPress = async () => {
+    try {
+      await logout();
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      showModal('Sign out failed', [msg]);
+    }
+  };
+
+  const userName = account?.name ?? account?.username ?? undefined;
 
   return (
     <SafeAreaView style={styles.container} edges={['left', 'right', 'bottom']}>
-      <Header onTestPress={handleTestPress} onLoginPress={handleLoginPress} />
+      <Header
+        onTestPress={handleTestPress}
+        onLoginPress={handleLoginPress}
+        onLogoutPress={handleLogoutPress}
+        isAuthenticated={isAuthenticated}
+        userName={userName}
+      />
 
       <ScrollView
         style={styles.scroll}
