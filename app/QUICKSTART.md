@@ -1,166 +1,100 @@
-# TWAIN Webapp - Quick Start Guide
+# TWAIN Web App — Quick Start
 
-This is an Expo + React Native Web application that runs on iOS, Android, and Web with a shared codebase.
+Expo + React Native Web app for TWAIN. Runs on Web (the deployment target), iOS,
+and Android from one codebase. Talks to the [`../api`](../api) FastAPI backend.
+
+> The fastest way to run the whole stack (DB + API + runner + app) is the
+> repo-root [`../dev.sh`](../dev.sh). This guide is for running the app alone.
 
 ## Installation
 
 ```bash
-cd webapp
+cd app
 npm install
 ```
 
-## Environment Configuration
+## Environment
 
-Create a `.env` file in the webapp directory with your API base URL:
+The app reads **`EXPO_PUBLIC_API_BASE_URL`** (Expo inlines `EXPO_PUBLIC_*` at
+build time). Defaults to `http://localhost:8000` when unset.
 
-```
-REACT_APP_API_BASE_URL=http://localhost:8000
-```
-
-For production:
-```
-REACT_APP_API_BASE_URL=https://twain-api.wustl.edu
-```
-
-## Running the App
-
-### Web
 ```bash
-npm run web
-```
-Opens at `http://localhost:8081`
+# local
+EXPO_PUBLIC_API_BASE_URL=http://localhost:8000
 
-### iOS (macOS only)
+# production build
+EXPO_PUBLIC_API_BASE_URL=https://twain-api.wustl.edu
+```
+
+Auth: set **`EXPO_PUBLIC_AUTH_DISABLED=true`** to skip the login screen locally
+(pair it with the API's `AUTH_DISABLED=true`). Without it, the app shows the
+interim email login and expects the API to have `INTERIM_JWT_SECRET` configured.
+
+## Running
+
 ```bash
-npm run ios
+npm run web        # http://localhost:8081
+npm run ios        # iOS simulator (macOS)
+npm run android    # Android emulator
+npm start          # interactive picker
 ```
 
-### Android
+## Building for web
+
 ```bash
-npm run android
+npm run build      # expo export --platform web → dist/
 ```
 
-### All Platforms (Interactive Menu)
-```bash
-npm start
-```
-Then select platform:
-- `w` — web
-- `i` — iOS
-- `a` — Android
+CI ([`../.github/workflows/deploy-app.yml`](../.github/workflows/deploy-app.yml))
+runs `tsc`, `expo lint`, and an audit, then exports and syncs `dist/` to
+S3/CloudFront on push to `master`.
 
-## Project Structure
+## Project structure
 
 ```
-webapp/
+app/
 ├── src/
-│   ├── app/              # Expo Router screens
-│   ├── components/       # Reusable components
-│   │   ├── Header.tsx
-│   │   ├── Footer.tsx
-│   │   └── TileButton.tsx
-│   ├── screens/          # Full screens
-│   │   └── HomeScreen.tsx
-│   ├── api/              # API client
-│   │   └── client.ts
-│   ├── constants/        # Theme and constants
-│   │   └── theme.ts
-│   ├── hooks/            # React hooks
-│   └── global.css        # Global styles (web)
-├── app.json              # Expo configuration
-├── package.json
-└── tsconfig.json
+│   ├── app/            # Expo Router routes (_layout, index, login, chat, browse, report)
+│   ├── screens/        # HomeScreen, LoginScreen, ChatScreen, BrowseScreen, ReportScreen
+│   ├── components/     # Header, Footer, TileButton, MessageModal, WashUShield
+│   ├── api/            # client.ts (axios) + storage.ts (token persistence)
+│   ├── hooks/          # useAuth (auth context), useColorScheme
+│   ├── constants/      # theme.ts (Colors, Spacing, API_CONFIG, strings)
+│   └── global.css      # web-only global styles
+├── app.json · package.json · tsconfig.json
 ```
 
 ## Features
 
-- **Header** — WashU branding with Login and Test buttons
-- **Test Button** — Calls `/api/greetings` and displays results in a popup
-- **Three Tiles** — Start Simulation, Resume Workflow, Browse
-- **Footer** — WashU footer with links (matches di2accelerator.wustl.edu)
-- **Responsive Design** — Works on mobile and web
-- **Accessibility** — WCAG 2.1 AA compliance
+- **Auth guard** — Expo Router `Stack.Protected` gates the app behind interim
+  email login (`useAuth`); a 401 from the API signs the user out.
+- **Chat** (`/chat`) — the conversational simulation flow with a live state
+  stepper, clarification replies, and inline plan approve/reject.
+- **Browse** (`/browse`) — past/active runs; **Report** (`/report`) — run summary
+  and downloadable artifacts.
+- **Header** — WashU branding, a `Test` button (calls `/api/health`), and a
+  sign-out button.
 
-## WashU Branding
+## WashU branding
 
-The app uses WashU official colors:
-- **Primary**: #00205B (Dark Blue)
-- **Secondary**: #E6A10A (Gold)
-- **Accent**: #C6007E (Berry)
+Colors from <https://marcomm.washu.edu/brand-color-palette/> (see
+`src/constants/theme.ts`):
 
-Fonts follow WashU typography guidelines from https://marcomm.washu.edu/
+- **Primary** — WashU Red `#BA0C2F`
+- **Secondary** — WashU Green `#215732`
 
-## API Integration
+## Development notes
 
-The Test button calls the FastAPI endpoint:
-```
-GET /api/greetings
-```
-
-Expected response:
-```json
-{
-  "data": [
-    {"message": "Hello, TWAIN!"}
-  ],
-  "count": 1,
-  "message": "Greetings retrieved successfully"
-}
-```
-
-## Development
-
-### TypeScript
-All code is TypeScript. See `tsconfig.json` for configuration.
-
-### Styling
-Uses React Native StyleSheet for cross-platform compatibility.
-
-### State Management
-Currently uses React `useState`. For complex state, consider Redux or Zustand.
-
-## Building for Production
-
-### Web
-```bash
-npm run build
-```
-
-### iOS/Android
-Use Expo CLI:
-```bash
-eas build --platform ios
-eas build --platform android
-```
+- **Language:** TypeScript (`tsconfig.json`). Path alias `@/*` → `src/*`.
+- **Styling:** React Native `StyleSheet` (cross-platform).
+- **State:** React `useState`/context. No Redux/Zustand yet.
+- **Expo SDK 56** — read the versioned docs at
+  <https://docs.expo.dev/versions/v56.0.0/> before writing code (see `AGENTS.md`).
 
 ## Troubleshooting
 
-### API Connection Issues
-- Verify the API is running: `http://localhost:8000/api/health`
-- Check `.env` has correct `REACT_APP_API_BASE_URL`
-- Ensure CORS is enabled on the FastAPI backend
-
-### Port Already in Use
-```bash
-npm start --clear
-```
-
-### Clear Cache
-```bash
-npm start -- --reset-cache
-```
-
-## Next Steps
-
-1. Start the FastAPI backend (see `../api/QUICKSTART.md`)
-2. Run the webapp: `npm run web`
-3. Test the API connection: click "Test" button
-4. Implement login flow for each button
-5. Add navigation between screens
-
-## Resources
-
-- [Expo Documentation](https://docs.expo.dev/versions/v56.0.0/)
-- [React Native Documentation](https://reactnative.dev/)
-- [WashU Branding Guidelines](https://marcomm.washu.edu/)
-- [WashU Accessibility Guidelines](https://digitalaccessibility.wustl.edu/)
+- API connection: verify `http://localhost:8000/api/health` responds and that
+  `EXPO_PUBLIC_API_BASE_URL` points at it; CORS must allow the app origin.
+- Stuck on the login screen locally: set `EXPO_PUBLIC_AUTH_DISABLED=true`, or
+  configure `INTERIM_JWT_SECRET` on the API.
+- Cache issues: `npm start -- --reset-cache`.

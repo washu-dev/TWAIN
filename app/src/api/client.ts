@@ -53,13 +53,28 @@ export interface Report {
   status: ConversationStatus;
   plan: Record<string, unknown> | string | null;
   execution_result: Record<string, unknown> | string | null;
+  result: Record<string, unknown> | null;
+  results_dir: string | null;
   budget: Record<string, unknown> | string | null;
   artifacts: ArtifactMeta[];
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  role: 'user' | 'admin';
+}
+
+export interface LoginResponse {
+  token: string;
+  user: AuthUser;
 }
 
 class APIClient {
   private client: AxiosInstance;
   private token: string | null = null;
+  private onUnauthorized: (() => void) | null = null;
 
   constructor() {
     this.client = axios.create({
@@ -67,27 +82,47 @@ class APIClient {
       timeout: API_CONFIG.timeout,
       headers: { 'Content-Type': 'application/json' },
     });
-    // Attach the bearer token when one is set (Entra sign-in lands in the
-    // Phase 0 frontend; until then the API runs with AUTH_DISABLED in dev).
+    // Attach the interim/Entra bearer token when one is set. In AUTH_DISABLED dev
+    // the API ignores it, so this stays harmless when the app runs without login.
     this.client.interceptors.request.use((config) => {
       if (this.token) {
         config.headers.Authorization = `Bearer ${this.token}`;
       }
       return config;
     });
+    // Drop the session on any 401 so the auth guard routes back to the login screen.
+    this.client.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        if (error?.response?.status === 401) {
+          this.onUnauthorized?.();
+        }
+        return Promise.reject(error);
+      },
+    );
   }
 
   setAuthToken(token: string | null) {
     this.token = token;
   }
 
+  setUnauthorizedHandler(handler: (() => void) | null) {
+    this.onUnauthorized = handler;
+  }
+
   setBaseURL(url: string) {
     this.client.defaults.baseURL = url;
   }
 
-  async getGreetings() {
-    const response = await this.client.get('/api/greetings');
+  async health(): Promise<{ status: string }> {
+    const response = await this.client.get('/api/health');
     return response.data;
+  }
+
+  // ── Auth (interim email login; pre-SSO) ─────────────────────────────────────
+  async login(email: string): Promise<LoginResponse> {
+    const response = await this.client.post('/api/auth/login', { email });
+    return response.data.data;
   }
 
   // ── Conversations / chat (Phase 1) ─────────────────────────────────────────

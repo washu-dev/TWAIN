@@ -5,9 +5,14 @@ import { APP_STRINGS, Spacing } from '@/constants/theme';
 interface HeaderProps {
   onTestPress?: () => void;
   onLoginPress?: () => void;
+  loginLabel?: string;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onTestPress, onLoginPress }) => {
+export const Header: React.FC<HeaderProps> = ({
+  onTestPress,
+  onLoginPress,
+  loginLabel = APP_STRINGS.loginButton,
+}) => {
   return (
     <View style={styles.container}>
       <View style={styles.content}>
@@ -35,10 +40,10 @@ export const Header: React.FC<HeaderProps> = ({ onTestPress, onLoginPress }) => 
             style={styles.buttonSolid}
             onPress={onLoginPress}
             accessible={true}
-            accessibilityLabel={APP_STRINGS.loginButton}
+            accessibilityLabel={loginLabel}
             accessibilityRole="button"
           >
-            <Text style={styles.buttonSolidText}>{APP_STRINGS.loginButton}</Text>
+            <Text style={styles.buttonSolidText}>{loginLabel}</Text>
           </TouchableOpacity>
         </View>
       </View>

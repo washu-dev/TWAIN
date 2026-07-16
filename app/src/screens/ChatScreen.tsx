@@ -42,7 +42,7 @@ export const ChatScreen: React.FC = () => {
   const isTerminal = !!status && TERMINAL_STATUSES.includes(status);
   const terminalMessage =
     status === 'completed'
-      ? 'Run complete.'
+      ? '✓ Simulation complete — your results are ready.'
       : status === 'rejected'
         ? 'Plan rejected — nothing was executed.'
         : 'The run ended with an error.';
@@ -198,7 +198,9 @@ export const ChatScreen: React.FC = () => {
             }
             accessibilityRole="button"
           >
-            <Text style={styles.reportText}>View report</Text>
+            <Text style={styles.reportText}>
+              {status === 'completed' ? 'View results' : 'View report'}
+            </Text>
           </TouchableOpacity>
         </View>
       ) : (

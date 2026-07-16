@@ -68,18 +68,13 @@ export const ReportScreen: React.FC = () => {
             </View>
           </View>
 
+          {(report.result || report.results_dir) && (
+            <ResultCard result={report.result ?? {}} resultsDir={report.results_dir} />
+          )}
+
           <SummaryCard report={report} />
 
-          <Text style={styles.sectionHeading}>Files</Text>
-          <Text style={styles.sectionHint}>
-            Tap to expand. {`run_bundle/main.py`} is the generated pymatgen script.
-          </Text>
-          {report.artifacts.length === 0 && (
-            <Text style={styles.empty}>No files were produced for this run yet.</Text>
-          )}
-          {report.artifacts.map((a) => (
-            <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
-          ))}
+          <Files report={report} />
         </ScrollView>
       )}
     </SafeAreaView>
@@ -189,6 +184,90 @@ const ArtifactRow: React.FC<{ conversationId: string; meta: ArtifactMeta }> = ({
   );
 };
 
+function formatValue(v: unknown): string {
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(4)));
+  }
+  return String(v);
+}
+
+// Headline scientific result: the property + value the run computed, plus where
+// the output files are stored. Falls back gracefully for arbitrary result shapes.
+const ResultCard: React.FC<{ result: Record<string, unknown>; resultsDir?: string | null }> = ({
+  result,
+  resultsDir,
+}) => {
+  const propName = typeof result['property'] === 'string' ? (result['property'] as string) : null;
+  const headline = propName ? result[propName] : undefined;
+  const unit = propName ? result[`${propName}_unit`] : undefined;
+
+  const hidden = new Set<string>(['property', 'smoke', 'output_file']);
+  if (propName) {
+    hidden.add(propName);
+    hidden.add(`${propName}_unit`);
+  }
+  const rows = Object.entries(result).filter(
+    ([k, v]) =>
+      !hidden.has(k) &&
+      (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'),
+  );
+
+  return (
+    <View style={styles.resultCard}>
+      <Text style={styles.resultCardTitle}>Result</Text>
+      {propName && headline != null && (
+        <Text style={styles.resultHeadline}>
+          {propName}: {formatValue(headline)}
+          {unit ? ` ${String(unit)}` : ''}
+        </Text>
+      )}
+      {rows.map(([k, v]) => (
+        <Row key={k} label={k} value={formatValue(v)} />
+      ))}
+      {resultsDir ? (
+        <View style={styles.resultPathBox}>
+          <Text style={styles.resultPathLabel}>Results stored at</Text>
+          <Text style={styles.resultPath} selectable>
+            {resultsDir}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
+// Artifacts split into what the run produced (output/…) vs. specs + the bundle.
+const Files: React.FC<{ report: Report }> = ({ report }) => {
+  const outputs = report.artifacts.filter((a) => a.name.startsWith('output/'));
+  const details = report.artifacts.filter((a) => !a.name.startsWith('output/'));
+  return (
+    <>
+      {outputs.length > 0 && (
+        <>
+          <Text style={styles.sectionHeading}>Output files</Text>
+          <Text style={styles.sectionHint}>
+            The files your run produced — results and solver logs.
+          </Text>
+          {outputs.map((a) => (
+            <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
+          ))}
+        </>
+      )}
+
+      <Text style={styles.sectionHeading}>Run details</Text>
+      <Text style={styles.sectionHint}>
+        Specs and the generated run bundle. run_bundle/main.py is the generated script.
+      </Text>
+      {report.artifacts.length === 0 && (
+        <Text style={styles.empty}>No files were produced for this run yet.</Text>
+      )}
+      {details.map((a) => (
+        <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
+      ))}
+    </>
+  );
+};
+
 const mono = Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' });
 
 const styles = StyleSheet.create({
@@ -223,6 +302,31 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   cardTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: Spacing.one },
+  resultCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.washuGreen,
+    borderLeftWidth: 4,
+    padding: Spacing.three,
+    gap: Spacing.one,
+    backgroundColor: C.washuWhite,
+  },
+  resultCardTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.washuGreen,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  resultHeadline: { fontSize: 22, fontWeight: '700', color: C.text, marginVertical: Spacing.one },
+  resultPathBox: { marginTop: Spacing.two, gap: 2 },
+  resultPathLabel: {
+    fontSize: 11,
+    color: C.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  resultPath: { fontSize: 12, color: C.text, fontFamily: mono },
   row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3, gap: Spacing.three },
   rowLabel: { color: C.textSecondary, fontSize: 14 },
   rowValue: { color: C.text, fontSize: 14, fontWeight: '600', flexShrink: 1, textAlign: 'right' },

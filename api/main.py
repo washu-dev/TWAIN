@@ -5,12 +5,13 @@ from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import auth
 import conversations as convo
 from auth import AdminUser, CurrentUser
-from database import list_users, query_greetings, set_user_role
+from database import list_users, set_user_role, upsert_user
 
 # How often (seconds) the SSE stream polls run_events, and its hard time cap.
 SSE_POLL_SECONDS = float(os.getenv("SSE_POLL_SECONDS", "1.0"))
@@ -38,29 +39,32 @@ async def health_check():
     return {"status": "ok"}
 
 
-@app.get("/api/greetings")
-async def get_greetings():
-    """Fetch all greetings from the database and return as JSON."""
-    try:
-        greetings = query_greetings()
-        if not greetings:
-            return JSONResponse(
-                status_code=200,
-                content={"data": [], "message": "No greetings found"},
-            )
-        return JSONResponse(
-            status_code=200,
-            content={
-                "data": greetings,
-                "count": len(greetings),
-                "message": "Greetings retrieved successfully",
-            },
+# ── Interim email login (pre-SSO) ─────────────────────────────────────────────
+class InterimLogin(BaseModel):
+    email: str
+
+
+@app.post("/api/auth/login")
+async def interim_login(body: InterimLogin):
+    """Interim email sign-in: validate the email, upsert the user, mint a token.
+
+    Available only when ``INTERIM_JWT_SECRET`` is configured. Entra tokens are
+    still accepted directly on every other endpoint once SSO is wired up.
+    """
+    if not auth.interim_auth_available():
+        raise HTTPException(status_code=503, detail="Interim auth is not configured.")
+    email = body.email.strip().lower()
+    if not auth.email_allowed(email):
+        raise HTTPException(
+            status_code=403, detail="This email is not permitted to sign in."
         )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e), "message": "Failed to retrieve greetings"},
-        )
+    user = upsert_user(
+        f"interim:{email}",
+        email,
+        email,
+        bootstrap_admin=email in auth.BOOTSTRAP_ADMIN_EMAILS,
+    )
+    return {"data": {"token": auth.mint_interim_token(user), "user": user}}
 
 
 class RoleUpdate(BaseModel):
@@ -187,17 +191,49 @@ def _load_json_artifact(conversation_id: str, name: str):
         return artifact["content"]
 
 
+def _extract_result(execution_result):
+    """Pull the structured result the generated script prints to stdout, if any.
+
+    Convention: the run's ``main.py`` prints a single-line JSON object with the
+    computed property, e.g. ``{"property": "band_gap", "band_gap": 6.73, ...}``.
+    Returns the last such object found, or None.
+    """
+    if not isinstance(execution_result, dict):
+        return None
+    stdout = execution_result.get("stdout")
+    if not isinstance(stdout, str):
+        return None
+    result = None
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                result = parsed
+    return result
+
+
 @app.get("/api/conversations/{conversation_id}/report")
 async def get_report(conversation_id: str, user: CurrentUser):
-    """Assemble a run report: summary + the list of downloadable artifacts."""
+    """Assemble a run report: headline result, summary, and downloadable artifacts."""
     conversation = _require_own_conversation(conversation_id, user)
+    execution_result = _load_json_artifact(conversation_id, "execution_result")
     return {
         "data": {
             "conversation": conversation,
             "final_state": conversation["current_state"],
             "status": conversation["status"],
             "plan": _load_json_artifact(conversation_id, "execution_plan"),
-            "execution_result": _load_json_artifact(conversation_id, "execution_result"),
+            "execution_result": execution_result,
+            "result": _extract_result(execution_result),
+            "results_dir": (
+                execution_result.get("artifacts_dir")
+                if isinstance(execution_result, dict)
+                else None
+            ),
             "budget": _load_json_artifact(conversation_id, "budget"),
             "artifacts": convo.list_artifacts(conversation_id),
         }

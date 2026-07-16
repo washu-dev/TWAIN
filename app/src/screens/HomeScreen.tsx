@@ -11,9 +11,11 @@ import { useRouter } from 'expo-router';
 import { Header, Footer, TileButton, MessageModal } from '@/components';
 import { APP_STRINGS, Spacing } from '@/constants/theme';
 import { apiClient } from '@/api/client';
+import { useAuth } from '@/hooks/useAuth';
 
 export const HomeScreen: React.FC = () => {
   const router = useRouter();
+  const { signOut } = useAuth();
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [modalTitle, setModalTitle] = useState('');
@@ -28,10 +30,8 @@ export const HomeScreen: React.FC = () => {
   const handleTestPress = async () => {
     setLoading(true);
     try {
-      const response = await apiClient.getGreetings();
-      const items: { message: string }[] = response?.data ?? [];
-      const messages = items.map((item) => item.message);
-      showModal('Greetings from API', messages);
+      const { status } = await apiClient.health();
+      showModal('API status', [`status: ${status}`]);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
       showModal('Error', [msg]);
@@ -40,13 +40,13 @@ export const HomeScreen: React.FC = () => {
     }
   };
 
-  const handleLoginPress = () => {
-    showModal('Login', ['Login functionality will be implemented soon.']);
-  };
-
   return (
     <SafeAreaView style={styles.container} edges={['left', 'right', 'bottom']}>
-      <Header onTestPress={handleTestPress} onLoginPress={handleLoginPress} />
+      <Header
+        onTestPress={handleTestPress}
+        onLoginPress={signOut}
+        loginLabel={APP_STRINGS.signOutButton}
+      />
 
       <ScrollView
         style={styles.scroll}

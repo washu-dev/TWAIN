@@ -3,9 +3,12 @@
 The state machine writes stage artifacts to the runner's local disk — JSON specs
 (intent_spec, goal_graph, discovery, execution_plan, budget, execution_result)
 and the generated RunBundle directory (main.py, config.yaml, requirements.txt,
-inline_tests.py). We copy their contents into the ``artifacts`` table so the API
-can serve them; the API never reads the runner's filesystem.
+inline_tests.py). We also capture the files the run *produced* (results.csv,
+solver logs, …) from the execution ``artifacts_dir`` under ``output/``. All of it
+goes into the ``artifacts`` table so the API can serve it; the API never reads the
+runner's filesystem.
 """
+import json
 import os
 
 MAX_BYTES = 512 * 1024  # generated files are small; cap defensively
@@ -18,6 +21,8 @@ _KIND_BY_EXT = {
     ".txt": "text",
     ".cfg": "text",
     ".md": "text",
+    ".csv": "text",
+    ".log": "text",
 }
 
 
@@ -46,9 +51,13 @@ def capture_artifacts(db, session_id: str, orch) -> int:
     context = getattr(getattr(orch, "sm", None), "context", None)
     artifacts = dict(getattr(context, "artifacts", {}) or {})
     saved = 0
+    bundle_names: set[str] = set()  # basenames captured from run_bundle (the inputs)
+    exec_result_path: str | None = None
     for name, path in artifacts.items():
         if name == "script" or not isinstance(path, str):
             continue
+        if name == "execution_result":
+            exec_result_path = path
         if os.path.isdir(path):
             for fname in sorted(os.listdir(path)):
                 fpath = os.path.join(path, fname)
@@ -58,9 +67,43 @@ def capture_artifacts(db, session_id: str, orch) -> int:
                 if content is not None:
                     db.upsert_artifact(session_id, f"{name}/{fname}", content, _kind(fname))
                     saved += 1
+                    if name == "run_bundle":
+                        bundle_names.add(fname)
         elif os.path.isfile(path):
             content = _safe_read(path)
             if content is not None:
                 db.upsert_artifact(session_id, name, content, _kind(path))
                 saved += 1
+    saved += _capture_outputs(db, session_id, exec_result_path, bundle_names)
+    return saved
+
+
+def _capture_outputs(db, session_id: str, exec_result_path: str | None, skip: set) -> int:
+    """Capture files the run produced (results.csv, solver logs) as ``output/<name>``.
+
+    The execution adapter writes outputs to ``execution_result["artifacts_dir"]``;
+    that directory also holds copies of the input bundle, so we skip any filename
+    already stored from run_bundle. Best-effort — returns the count saved.
+    """
+    if not exec_result_path or not os.path.isfile(exec_result_path):
+        return 0
+    try:
+        with open(exec_result_path, encoding="utf-8") as f:
+            result = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    out_dir = result.get("artifacts_dir") if isinstance(result, dict) else None
+    if not out_dir or not os.path.isdir(out_dir):
+        return 0
+    saved = 0
+    for fname in sorted(os.listdir(out_dir)):
+        if fname in skip:
+            continue
+        fpath = os.path.join(out_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+        content = _safe_read(fpath)
+        if content is not None:
+            db.upsert_artifact(session_id, f"output/{fname}", content, _kind(fname))
+            saved += 1
     return saved

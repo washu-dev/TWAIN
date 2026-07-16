@@ -48,19 +48,6 @@ def get_connection():
     )
 
 
-def query_greetings():
-    try:
-        conn = get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT message FROM greetings;")
-        results = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return results
-    except Exception as e:
-        raise Exception(f"Database query failed: {e}") from e
-
-
 ALLOWED_ROLES = ("user", "admin")
 
 

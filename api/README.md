@@ -1,98 +1,84 @@
-# TWAIN API Module
+# TWAIN API
 
-FastAPI module for TWAIN backend with PostgreSQL database connection.
+FastAPI backend for the TWAIN web UI. It is a **light request-server**: it
+validates auth, does CRUD on Postgres, enqueues runs into the `jobs` table, and
+streams progress back to the browser. It never drives the pipeline itself — the
+**runner** service claims jobs and runs the engine (see
+[`../docs/architecture/web_ui_plan.md`](../docs/architecture/web_ui_plan.md)).
 
 ## Setup
 
-### 1. Install Dependencies
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt          # or use the repo pixi env
+cp .env.example .env                      # then edit DB + auth settings
 ```
 
-### 2. Configure Database Connection
-Edit `.env` file with your PostgreSQL credentials:
-```
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=twain_db
-DB_USER=postgres
-DB_PASSWORD=your_password_here
-```
-
-### 3. Create Greetings Table (First Time Only)
-```bash
-psql -U postgres -h localhost -d twain_db
-```
-
-Then run this SQL:
-```sql
-CREATE TABLE IF NOT EXISTS greetings (
-    id SERIAL PRIMARY KEY,
-    message VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-INSERT INTO greetings (message) VALUES
-    ('Hello, TWAIN!'),
-    ('Welcome to the API'),
-    ('Greetings from FastAPI');
-```
-
-## Running the API
+The schema lives in [`migrations/`](migrations); apply every file to your
+database (the repo-root [`../dev.sh`](../dev.sh) does this automatically):
 
 ```bash
-python main.py
+for f in migrations/*.sql; do psql -d twaindb -f "$f"; done
 ```
 
-The API will start on `http://localhost:8000`
+## Configuration (env)
 
-- **API Documentation**: http://localhost:8000/docs
-- **Alternative Docs**: http://localhost:8000/redoc
+| Var | Effect |
+|---|---|
+| `DB_HOST/PORT/NAME/USER/PASSWORD` | Postgres connection |
+| `AWS_SECRET_ARN` | if set, DB password is resolved from Secrets Manager instead of `DB_PASSWORD` |
+| `AUTH_DISABLED` | `true` for local dev — every request is a dev admin (never in production) |
+| `INTERIM_JWT_SECRET` | enables interim email login (`POST /api/auth/login`); the HS256 signing key |
+| `INTERIM_ALLOWED_DOMAINS` / `INTERIM_ALLOWED_EMAILS` | who may sign in via interim auth (default domain `wustl.edu`) |
+| `ENTRA_TENANT_ID` / `ENTRA_API_AUDIENCE` | Entra (WashU SSO) JWT validation, once SSO is wired up |
+| `BOOTSTRAP_ADMIN_EMAILS` | seed admins promoted on first login |
+
+See [`.env.example`](.env.example) for the full list.
+
+## Running
+
+```bash
+python main.py           # dev server on http://localhost:8000 (reload on)
+# or: uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Interactive docs: <http://localhost:8000/docs>.
 
 ## Endpoints
 
-### Health Check
-```
-GET /api/health
-```
-Returns: `{"status": "ok"}`
+All endpoints require a valid bearer token except `/api/health` and
+`/api/auth/login`. Auth is either an interim session token (HS256) or an Entra
+access token (RS256) — both are accepted, routed by algorithm.
 
-### Get Greetings
-```
-GET /api/greetings
-```
-Returns:
-```json
-{
-  "data": [
-    {"message": "Hello, TWAIN!"},
-    {"message": "Welcome to the API"}
-  ],
-  "count": 2,
-  "message": "Greetings retrieved successfully"
-}
-```
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | liveness check |
+| POST | `/api/auth/login` | interim email sign-in → `{ token, user }` |
+| GET | `/api/me` | current user (id, email, name, role) |
+| GET | `/api/admin/users` · PATCH `/api/admin/users/{id}/role` | admin: list / set roles |
+| POST | `/api/conversations` | start a run from a prompt → enqueues a `start` job |
+| GET | `/api/conversations` · `/api/conversations/{id}` | list mine · one with transcript |
+| POST | `/api/conversations/{id}/messages` | add a chat / clarification reply |
+| POST | `/api/conversations/{id}/approval` | answer the plan-approval gate |
+| GET | `/api/conversations/{id}/stream` | **SSE** of pipeline progress (`run_events`) |
+| GET | `/api/conversations/{id}/report` | run summary + artifact list |
+| GET | `/api/conversations/{id}/artifacts` · `/artifacts/{name}` | list · fetch one artifact |
 
-## Running Tests
+## Tests
 
 ```bash
-pytest test_api.py -v
+pytest -q            # unit tests (fakes for DB; no Postgres needed)
+ruff check .
 ```
 
-Run specific test:
-```bash
-pytest test_api.py::TestGreetingsEndpoint::test_greetings_endpoint_returns_200 -v
-```
-
-## Project Structure
+## Project structure
 
 ```
 api/
-├── __init__.py           # Package init
-├── main.py               # FastAPI app and endpoints
-├── database.py           # Database connection logic
-├── .env                  # Database credentials (not in git)
-├── requirements.txt      # Python dependencies
-├── test_api.py           # Test suite
-└── README.md             # This file
+├── main.py            # FastAPI app + routes
+├── auth.py            # bearer-token auth: interim (HS256) + Entra (RS256)
+├── conversations.py   # conversation/message/artifact/event data access
+├── database.py        # Postgres connection + user CRUD (Secrets Manager aware)
+├── migrations/        # idempotent SQL schema
+├── requirements.txt
+└── test_*.py          # test suite
 ```
