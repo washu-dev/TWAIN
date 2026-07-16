@@ -143,6 +143,43 @@ docker run --rm --platform linux/amd64 --env-file .env -e TWAIN_AUTO_RUN=1 \
   -e DB_HOST=host.docker.internal -v "$PWD/logs:/app/logs" twain-runner
 ```
 
+## Run on the Slurm cluster (WashU RIS Compute2)
+When a run exceeds what your laptop (or the Docker route) should carry, EXECUTE
+can submit the built RunBundle to the school's HPC cluster instead
+(Story 5.4). Set `TWAIN_EXECUTE_SLURM=1` (runner/env) or pass `--slurm` to the
+orchestrator CLI:
+
+```bash
+pixi run python modules/07_runtime_orchestrator/orchestrator.py --slurm
+```
+
+What happens at EXECUTE:
+1. **stage** — the bundle is rsynced to
+   `<storage_root>/twain-runs/<session_id>/` on the cluster
+   (`configs/clusters/compute2.json` points at the writable allocation dir);
+2. **submit** — an `#SBATCH` script is rendered from the plan's `slurm_request`
+   (partition auto-selected from CPU/GPU/wall-time; `ml load ris slurm`) and
+   submitted on a login node over SSH;
+3. **wait** — `squeue`/`sacct` are polled (bounded). If the wait budget expires
+   the job is **left running** and the result says how to check on it
+   (`squeue --job <id>`) — a multi-hour job is never killed just because our
+   wait was shorter;
+4. **fetch** — outputs (`results.csv`, the job log) are rsynced back into the
+   session's artifacts dir, and `sacct` Elapsed/MaxRSS land on the execution
+   result for provenance.
+
+The job builds its own venv from the bundle's `requirements.txt` (compute
+nodes have no TWAIN environment), and the smoke test runs first so a missing
+dependency fails in seconds instead of after a long queue wait.
+
+Prerequisites and knobs:
+- WashU VPN (AnyConnect) + Duo, and an SSH key for the login node
+  (`ssh <wustl-key>@c2-login-001.ris.wustl.edu` must work non-interactively).
+- `TWAIN_SLURM_USER` — your WUSTL key (omit if `~/.ssh/config` handles it);
+  `TWAIN_SLURM_HOST` — override the login node, or set it to the empty string
+  when the process already runs *on* a login node (no SSH hop);
+  `TWAIN_SLURM_CLUSTER` / `--cluster` — another `configs/clusters/` profile.
+
 ## Test
 No DB or pixi env needed — the unit tests use in-memory fakes:
 

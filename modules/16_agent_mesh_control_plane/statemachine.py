@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -100,7 +101,8 @@ class StateMachine:
                  execute_keep_artifacts: bool = True, execute_timeout=None,
                  execution_adapter=None, verify_codegen: bool = False,
                  script_doctor=None, library_available=None, sim_available=None,
-                 auto_approve=False):
+                 auto_approve=False, execute_slurm: bool = False,
+                 slurm_cluster: str = None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -134,6 +136,12 @@ class StateMachine:
         self.execute_keep_artifacts = execute_keep_artifacts
         self.execute_timeout = execute_timeout
         self._execution_adapter = execution_adapter
+        # HPC execution (Story 5.4): when on, EXECUTE submits the RunBundle to
+        # the Slurm cluster named by ``slurm_cluster`` (configs/clusters/<name>.json,
+        # default compute2) instead of running it locally/in Docker. Implies the
+        # run happens even though execute_locally may be off.
+        self.execute_slurm = execute_slurm
+        self.slurm_cluster = slurm_cluster or "compute2"
         # When on, the REPAIR stage may call the LLM to repair the synthesized
         # calculator script and proactively scan it for latent bugs. Off by
         # default so offline/seeded/test runs make no network calls there; the
@@ -1151,7 +1159,7 @@ class StateMachine:
         ``execution_status`` is set from the run so the EXECUTE->INTERPRET guard
         reflects what actually happened.
         """
-        if not self.execute_locally:
+        if not (self.execute_locally or self.execute_slurm):
             return State.INTERPRET
 
         bundle_dir = self.context.artifacts.get("run_bundle")
@@ -1177,6 +1185,20 @@ class StateMachine:
 
         adapter = self._execution_adapter
         docker_route = False
+        slurm_route = False
+        if adapter is None and self.execute_slurm:
+            # HPC route (Story 5.4): stage the bundle to the cluster, submit via
+            # sbatch with the plan's resource request, poll to completion, and
+            # fetch outputs back. Takes precedence over local/Docker -- the
+            # researcher explicitly opted into the cluster.
+            adapter = self._build_slurm_adapter()
+            if adapter is None:
+                return self._skip_execution(
+                    bundle_dir, status="skipped_missing_dependency",
+                    note=f"Not run on the cluster: no usable profile for "
+                         f"'{self.slurm_cluster}' (configs/clusters/). ",
+                    how_to=self._how_to_run(bundle_dir))
+            slurm_route = True
         if adapter is None:
             # Route non-native engines (no build for this host, e.g. GPAW on a
             # Mac) into the linux-64 runner container; everything else runs in the
@@ -1223,14 +1245,17 @@ class StateMachine:
         result = adapter.execute(
             bundle_dir,
             # The sim env / Docker image already ship the whole stack, so never
-            # pip-install into a venv there; that only applies to default-interpreter runs.
-            install_deps=self.execute_install_deps and run_python is None and not docker_route,
+            # pip-install into a venv there; that only applies to default-interpreter
+            # runs -- and to Slurm jobs, whose compute nodes have no TWAIN env at all
+            # (the job builds a venv from the bundle's requirements.txt).
+            install_deps=slurm_route or (self.execute_install_deps
+                                         and run_python is None and not docker_route),
             keep_artifacts=self.execute_keep_artifacts,
             run_smoke=True,
             timeout=self.execute_timeout,
-            # Docker fixes the interpreter via the image; native uses run_python
-            # (None => the adapter's default interpreter).
-            python_executable=None if docker_route else run_python,
+            # Docker/Slurm fix the interpreter via the image/job; native uses
+            # run_python (None => the adapter's default interpreter).
+            python_executable=None if (docker_route or slurm_route) else run_python,
             run_id=self.run_id,  # names the workdir exec_<session_id> for traceability
         )
         self.context.artifacts["execution_result"] = self._write_artifact(
@@ -1251,6 +1276,41 @@ class StateMachine:
             return None
         name = (plan.get("selected_method") or {}).get("calculator")
         return find_calculator(name)
+
+    def _build_slurm_adapter(self):
+        """A SlurmExecutionAdapter wired from the cluster profile + the plan.
+
+        Resources come from the plan's ``slurm_request`` (synthesized during
+        PLAN); connection details from the profile, overridable via
+        ``TWAIN_SLURM_HOST`` (empty string => run sbatch locally, i.e. the
+        process is already on a login node) and ``TWAIN_SLURM_USER``. Returns
+        None when the profile can't be loaded, so execute() can skip gracefully
+        with guidance instead of crashing.
+        """
+        from execution_adapter.cluster_profile import ClusterProfile
+        from execution_adapter.slurm_execution_adapter import SlurmExecutionAdapter
+        from plan_synthesizer.execution_plan import SlurmRequest
+        try:
+            profile = ClusterProfile.load(self.slurm_cluster)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"[execute] cluster profile '{self.slurm_cluster}' unusable: {exc}")
+            return None
+        request = None
+        plan = self._load_artifact("execution_plan") or {}
+        raw = plan.get("slurm_request")
+        if isinstance(raw, dict):
+            try:
+                request = SlurmRequest(**raw)
+            except (TypeError, ValueError):
+                request = None  # malformed plan request -> adapter default
+        host = os.environ.get("TWAIN_SLURM_HOST")  # None => profile login node
+        return SlurmExecutionAdapter(
+            profile,
+            request=request,
+            host=host,
+            user=os.environ.get("TWAIN_SLURM_USER"),
+            workspace_root=str(self.artifacts_dir),
+        )
 
     def _confirm_heavy_execution(self) -> bool:
         """Ask the researcher before running a heavy calculation; True to proceed.

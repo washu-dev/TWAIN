@@ -789,6 +789,74 @@ This backlog breaks down the TWAIN MVP into actionable user stories, organized b
 
 ---
 
+### Story 5.4: Implement Slurm (HPC) Execution Adapter
+
+**As an** orchestrator  
+**I want to** execute a RunBundle on a Slurm cluster (WashU RIS Compute2)  
+**So that** runs that exceed local resources can use the school's HPC allocation
+
+**Context**: Story 5.2 covers the *local* adapter (subprocess on one machine). This
+story adds the HPC sibling behind a shared adapter interface, so the orchestrator
+can target `local` or `slurm` by config/policy without the rest of the pipeline
+changing. Resource requirements (`SlurmRequest`: cpu/gpu/ram/wall-time) are already
+produced during PLAN (Epic 4.4) and embedded in the `ExecutionPlan`.
+
+**Already scaffolded** (offline-testable, no live cluster):
+- `modules/08_execution_adapter/cluster_profile.py` — `ClusterProfile`/`Partition` dataclasses + loader
+- `modules/08_execution_adapter/slurm_adapter.py` — sbatch rendering, partition selection, submit/poll/cancel via an injected command runner, `JobState`/`ExecutionResult`
+- `configs/clusters/compute2.json` — Compute2 profile (login nodes, account, partitions, modules, storage)
+- `tests/unit/test_slurm_adapter.py` — rendering, selection, and squeue/sacct parsing
+
+**Acceptance Criteria**:
+- [ ] Shared adapter interface: `modules/08_execution_adapter/adapter.py`
+  - `ExecutionAdapter` protocol: `submit(JobSpec, SlurmRequest) -> handle`, `poll(handle) -> JobState`, `wait(handle) -> ExecutionResult`, `cancel(handle)`, `fetch_results(handle) -> path`
+  - `LocalAdapter` (5.2) and `SlurmAdapter` both implement it; orchestrator selects by config
+- [ ] Cluster profile correctness (verify against the live cluster, see Open Questions):
+  - Partitions reflect `sinfo`: `general-cpu`, `general-gpu`, `general-bigmem`, `general-interactive`, and `general-preempt-{cpu,gpu}` (per ris-tips), reconciled with the official guidelines
+  - Account is the user's real allocation (`compute2-<PI>`), discovered via `sacctmgr show user $(whoami) withassoc` — not a hardcoded placeholder
+  - GPU request syntax matches cluster convention: `--gres=gpu:N` (and `gpu:<type>:N`, e.g. `H100`), not `--gpus=N`
+  - Wall time rendered as `HH:MM:SS` / `D-HH:MM:SS`; memory as `--mem=<N>M` (`SlurmRequest.ram` is in MB)
+- [ ] File staging: `modules/08_execution_adapter/staging.py`
+  - Push the RunBundle to the cluster working dir under `/storageN/fs1/<PI>/Active/...` (home/storage auto-mounts on Compute2; `rsync`/`scp` for off-cluster submission)
+  - Pull stdout/stderr (`%j.out`/`%j.err`) and output artifacts back into the run's local artifacts dir
+  - Container path: support pyxis `--container-image`/`--container-mounts`/`--container-workdir` for tool-image runs
+- [ ] Submission transport: local (on a login node) or SSH (`ssh wustl-id@c2-login-00N.ris.wustl.edu`), reusing the injected runner; document VPN (AnyConnect) + Duo 2FA prerequisite
+- [ ] Submit-and-poll lifecycle (do **not** block the EXECUTE stage timeout):
+  - `submit()` returns a job id immediately; orchestrator checkpoints a "running on cluster" state (reuse session checkpoint + crash recovery)
+  - On resume, `poll()` queries `squeue` (→ `sacct` once finished); only fetch results + advance to INTERPRET on a terminal `COMPLETED`
+  - Bound polling (interval + max wait); surface `PENDING`/`RUNNING` as progress events on the bus
+- [ ] Error classification (wire into `error_handler`): queue/`PENDING` limits and node failures → transient/retryable; `TIMEOUT`/`OUT_OF_MEMORY`/bad account/invalid partition → permanent, with an actionable message
+- [ ] Accounting: record job id, partition, and `sacct` Elapsed/MaxRSS into provenance (Story 7.1) and the budget tracker
+- [ ] Tests:
+  - sbatch script matches cluster conventions (partition, `--gres`, time/mem formats) for CPU and GPU jobs
+  - Partition selection honors GPU need and wall-clock limits; infeasible request fails clearly
+  - submit/poll/cancel parse real `sbatch`/`squeue`/`sacct` output (fixtures), incl. terminal-state transitions, via a fake runner
+  - Resume-from-"running" reaches INTERPRET only after a terminal COMPLETED
+
+**Definition of Done**:
+- A RunBundle submits to Compute2 and its result is fetched back without manual steps
+- Long jobs survive the EXECUTE timeout via checkpoint + poll-on-resume
+- Local vs Slurm is a config switch; no other stage changes
+- Failures are classified and surfaced with actionable guidance
+
+**Resolved against the live cluster** (Compute2, verified via `sinfo`/`sacctmgr`/`ml`; captured in `configs/clusters/compute2.json`):
+- Slurm 23.02.5. Partitions + time limits: `general-cpu`/`general-gpu`/`general-bigmem` (15d = 21600m), `general-interactive` (5d = 7200m), `general-short` (30m), `general-preempt-{cpu,gpu}` (15d). `condo-*` partitions are lab-owned and excluded. ris-tips' naming was correct; the official PDF was stale.
+- Accounts: user belongs to `compute2-mdan` (default) and `compute2-workshop` — no hardcoded placeholder. `account` is overridable per `JobSpec`.
+- GPUs are H100 (`gpu:H100:4` per `sinfo -o "%G"`); some nodes report untyped `gpu:4`. Adapter emits `--gres=gpu:N` by default and `--gres=gpu:<type>:N` when a type is set on the job or profile.
+- Wall time rendered as `HH:MM:SS` / `D-HH:MM:SS`. Modules `ris`/`slurm` confirmed (`ml load ris slurm`); `py-torch/2.5.1`, `python/3.11.9`, `cuda/12.4.1` available for GPU jobs.
+
+**Storage** (verified via `groups`/`df`/`test -w`): the writable staging root is `/storage2/fs1/mdan/Active/dtrc2026-workshop` (`drwxrwxrwx`, group `storage2-mdan-dtrc2026-workshop-rw`); the PI root `/storage2/fs1/mdan/Active` itself is read-only. `storage_root` in `compute2.json` is set to this allocation dir. 5.4's `staging.py` should create per-run subdirs under it (e.g. `<storage_root>/twain-runs/<session_id>/`) rather than writing to the root directly. A mirror exists on `/storage3/fs1` if redundancy is needed.
+
+**References**:
+- Compute2 General Guidelines (official RIS docs / provided PDF): partitions, modules (`ml load ris slurm`), `sbatch`/`srun`/`squeue`/`scancel`, containers (pyxis)
+- [washu-dev/ris-tips](https://github.com/washu-dev/ris-tips) — practical SLURM basics, partition table, `--gres`/account conventions, storage layout, VPN/SSH setup
+
+**Effort**: L (1–2 weeks)  
+**Owner**: TBD  
+**Depends on**: Stories 5.1 (RunBundle), 5.2 (adapter interface), 4.4 (SlurmRequest)
+
+---
+
 ## Epic 6: Validation & Self-Correction
 
 **Goal**: Interpret results, validate against baselines, and propose iterative improvements.

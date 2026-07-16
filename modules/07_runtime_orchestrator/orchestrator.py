@@ -122,6 +122,8 @@ class Orchestrator:
         execute_install_deps: bool = False,
         verify_codegen: bool = False,
         auto_approve: bool = False,
+        execute_slurm: bool = False,
+        slurm_cluster: Optional[str] = None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -194,6 +196,11 @@ class Orchestrator:
             # run reaches completion without human input (see the runner's
             # TWAIN_AUTO_RUN). The plan-approval gate is enforced by the driver.
             auto_approve=auto_approve,
+            # HPC route (Story 5.4): submit the RunBundle to the Slurm cluster
+            # instead of running it locally/in Docker (see the runner's
+            # TWAIN_EXECUTE_SLURM / TWAIN_SLURM_CLUSTER).
+            execute_slurm=execute_slurm,
+            slurm_cluster=slurm_cluster,
         )
 
         if resuming:
@@ -498,6 +505,16 @@ def _main(argv=None) -> int:
         help="build a venv and pip-install the bundle's requirements before running "
              "(needed when the selected tool isn't already importable)",
     )
+    parser.add_argument(
+        "--slurm", action="store_true",
+        help="submit the RunBundle to the Slurm cluster (configs/clusters/, default "
+             "compute2) instead of executing locally; needs VPN + SSH key, or run "
+             "on a login node with TWAIN_SLURM_HOST=''",
+    )
+    parser.add_argument(
+        "--cluster", default=None,
+        help="cluster profile name for --slurm (default: compute2)",
+    )
     args = parser.parse_args(argv)
 
     if args.session_id and Session.exists(args.session_id):
@@ -509,8 +526,10 @@ def _main(argv=None) -> int:
 
     orch = Orchestrator.demo(
         session_id=args.session_id,
-        execute_locally=not args.no_execute,
+        execute_locally=not args.no_execute and not args.slurm,
         execute_install_deps=args.install_deps,
+        execute_slurm=args.slurm,
+        slurm_cluster=args.cluster,
     )
     status = orch.run()
     rs = orch.run_session
