@@ -92,6 +92,9 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ env.TWAIN_SSO_CI_ROLE_ARN }}
           role-session-name: twain-sso-build
+          # The role trust allows sts:AssumeRole but not sts:TagSession; skip the
+          # action's default session tagging so the assume isn't rejected.
+          role-skip-session-tagging: true
 
       - name: Load SSO config from Secrets Manager
         run: |
