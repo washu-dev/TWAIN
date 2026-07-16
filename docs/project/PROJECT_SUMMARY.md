@@ -66,14 +66,14 @@
 - Provides module dependency graph
 - Includes risk mitigation strategies
 
-### 2. **Detailed Implementation Backlog** (`docs/backlog/DETAILED_BACKLOG.md`)
+### 2. **Detailed Implementation Backlog** (`../backlog/DETAILED_BACKLOG.md`)
 - **40+ user stories** broken down by epic
 - Acceptance criteria for each story
 - Effort estimates (S/M/L/XL scale)
 - Dependencies and blocking relationships
 - Test plan for each story
 
-### 3. **Architecture & Dataflow Diagrams** (`docs/architecture/pipeline_flow_diagram.md`)
+### 3. **Architecture & Dataflow Diagrams** (`../architecture/pipeline_flow_diagram.md`)
 - Complete system dataflow (16 modules, interaction paths)
 - Module dependency matrix
 - State machine (major transitions)
@@ -167,8 +167,8 @@
 ## What We Added This Week
 
 - ✅ **Architecture validation** (`REVIEW.md`) — identified gaps + recommendations
-- ✅ **Detailed backlog** (`docs/backlog/DETAILED_BACKLOG.md`) — 40+ actionable stories
-- ✅ **Pipeline diagrams** (`docs/architecture/pipeline_flow_diagram.md`) — visual architecture
+- ✅ **Detailed backlog** (`../backlog/DETAILED_BACKLOG.md`) — 40+ actionable stories
+- ✅ **Pipeline diagrams** (`../architecture/pipeline_flow_diagram.md`) — visual architecture
 - ✅ **Implementation roadmap** (`IMPLEMENTATION_ROADMAP.md`) — phased plan + timelines
 - ✅ **This summary** (`PROJECT_SUMMARY.md`) — executive overview
 
@@ -252,8 +252,8 @@
 | Document | Purpose | Audience |
 |----------|---------|----------|
 | `REVIEW.md` | Detailed architecture review, gaps, recommendations | Tech leads, architects |
-| `docs/backlog/DETAILED_BACKLOG.md` | 40+ user stories, effort estimates, acceptance criteria | Engineers, project managers |
-| `docs/architecture/pipeline_flow_diagram.md` | Visual diagrams (dataflow, state machine, interaction matrix) | All engineers |
+| `../backlog/DETAILED_BACKLOG.md` | 40+ user stories, effort estimates, acceptance criteria | Engineers, project managers |
+| `../architecture/pipeline_flow_diagram.md` | Visual diagrams (dataflow, state machine, interaction matrix) | All engineers |
 | `IMPLEMENTATION_ROADMAP.md` | Phased plan (7 phases), resource plan, immediate next steps | Project managers, stakeholders |
 | `PROJECT_SUMMARY.md` | This document — executive overview, status, what's next | All stakeholders |
 | `modules/README.md` | Module hierarchy overview | All engineers |

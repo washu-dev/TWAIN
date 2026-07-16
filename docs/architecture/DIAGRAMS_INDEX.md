@@ -164,7 +164,7 @@ To open and edit diagrams:
 | **Data contracts & validation** | Diagram 4 (Data Contracts) + schemas/\*.schema.json |
 | **Error handling strategy** | Diagram 5 (Error Recovery) + modules/\*/error_handler.py |
 | **Performance tuning** | Diagram 6 (Runtime Timeline) + modules/\*/NOTES.md |
-| **Architecture rationale** | REVIEW.md + docs/decisions/\*.md |
+| **Architecture rationale** | ../project/REVIEW.md + ../decisions/\*.md |
 | **Implementation details** | DETAILED_BACKLOG.md + code comments |
 
 ---

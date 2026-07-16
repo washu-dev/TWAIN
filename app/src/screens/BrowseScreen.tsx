@@ -14,6 +14,8 @@ import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
+const TERMINAL_STATUSES = ['completed', 'error', 'rejected'];
+
 export const BrowseScreen: React.FC = () => {
   const router = useRouter();
   const [items, setItems] = useState<Conversation[]>([]);
@@ -52,7 +54,11 @@ export const BrowseScreen: React.FC = () => {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} accessibilityRole="button">
+        {/* Direct loads (URL / refresh) have no history; fall back to home. */}
+        <TouchableOpacity
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+          accessibilityRole="button"
+        >
           <Text style={styles.back}>‹ Back</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Simulations</Text>
@@ -73,7 +79,14 @@ export const BrowseScreen: React.FC = () => {
             <TouchableOpacity
               key={item.id}
               style={styles.rowItem}
-              onPress={() => router.push({ pathname: '/report', params: { id: item.id } })}
+              // Active runs open the chat (where clarifications and the plan
+              // approval live); only finished runs go straight to the report.
+              onPress={() =>
+                router.push({
+                  pathname: TERMINAL_STATUSES.includes(item.status) ? '/report' : '/chat',
+                  params: { id: item.id },
+                })
+              }
               accessibilityRole="button"
             >
               <View style={styles.rowMain}>
