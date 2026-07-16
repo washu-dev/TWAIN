@@ -74,6 +74,8 @@ export const ReportScreen: React.FC = () => {
 
           <SummaryCard report={report} />
 
+          <BudgetCard report={report} />
+
           <Files report={report} />
         </ScrollView>
       )}
@@ -118,6 +120,42 @@ const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
         <Text style={styles.note}>
           No execution plan was produced (the run stopped before planning). The raw specs are below.
         </Text>
+      )}
+    </View>
+  );
+};
+
+// Actual spend for the run, from the budget.json artifact the orchestrator writes
+// each step. Renders nothing until a budget snapshot exists (e.g. very early runs).
+const BudgetCard: React.FC<{ report: Report }> = ({ report }) => {
+  const budget = typeof report.budget === 'object' && report.budget ? report.budget : null;
+  const run = budget?.run;
+  if (!run) return null;
+
+  const used = Number(run.cost ?? 0);
+  const max = Number(run.max_cost ?? 0);
+  const remaining = Math.max(max - used, 0);
+  const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
+  const overBudget = max > 0 && used >= max;
+  const mins = (secs?: number) => (secs != null ? `${(Number(secs) / 60).toFixed(1)} min` : '—');
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>Budget</Text>
+      <View style={styles.meterTrack}>
+        <View
+          style={[styles.meterFill, { width: `${pct}%` }, overBudget && styles.meterFillOver]}
+        />
+      </View>
+      <Row label="LLM cost used" value={`$${used.toFixed(4)} / $${max.toFixed(2)}`} />
+      <Row label="Remaining" value={`$${remaining.toFixed(4)}`} />
+      <Row label="Iterations" value={`${run.iterations ?? 0} / ${run.max_iterations ?? 0}`} />
+      <Row
+        label="Elapsed"
+        value={`${mins(run.elapsed_seconds)} / ${mins(run.wall_time_limit_seconds)}`}
+      />
+      {overBudget && (
+        <Text style={styles.note}>This run reached its cost budget and was stopped.</Text>
       )}
     </View>
   );
@@ -305,6 +343,15 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   cardTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: Spacing.one },
+  meterTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: C.backgroundElement,
+    overflow: 'hidden',
+    marginBottom: Spacing.two,
+  },
+  meterFill: { height: 8, borderRadius: 4, backgroundColor: C.washuGreen },
+  meterFillOver: { backgroundColor: C.washuRed },
   summaryText: { fontSize: 14, color: C.text, lineHeight: 20, marginBottom: Spacing.two },
   resultCard: {
     borderRadius: 12,

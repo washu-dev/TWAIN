@@ -16,11 +16,15 @@ from database import get_connection
 TERMINAL_STATUSES = ("completed", "error", "rejected")
 
 
-def create_conversation(user_id: str, request: str, title: str | None = None) -> dict:
+def create_conversation(
+    user_id: str, request: str, title: str | None = None, max_cost: float | None = None,
+) -> dict:
     """Create a conversation, store the first user turn, and enqueue a start job.
 
     All three writes share one transaction so a conversation never exists
-    without its opening message and queued job.
+    without its opening message and queued job. ``max_cost`` (optional) is the
+    per-run LLM cost cap; it rides the job ``params`` to the runner, which passes
+    it to the orchestrator (falling back to the deployment default when unset).
     """
     conn = get_connection()
     try:
@@ -42,9 +46,12 @@ def create_conversation(user_id: str, request: str, title: str | None = None) ->
             """,
             (session_id, request),
         )
+        params = {"request": request, "researcher_id": user_id}
+        if max_cost is not None:
+            params["max_cost"] = max_cost
         cursor.execute(
             "INSERT INTO jobs (session_id, kind, params) VALUES (%s, 'start', %s);",
-            (session_id, json.dumps({"request": request, "researcher_id": user_id})),
+            (session_id, json.dumps(params)),
         )
         conn.commit()
         cursor.close()
@@ -249,5 +256,39 @@ def get_events(session_id: str, after_id: int = 0) -> list:
         return rows
     except Exception as e:
         raise Exception(f"Failed to read events: {e}") from e
+    finally:
+        conn.close()
+
+
+def delete_conversation(conversation_id: str, user_id: str) -> bool:
+    """Delete a conversation the caller owns, plus everything keyed to its run.
+
+    ``messages`` cascade via their FK; the engine/runner tables (``run_events``,
+    ``artifacts``, ``jobs``, ``sessions``) key off the session id (= the
+    conversation id as text) with no FK, so they are removed explicitly in the
+    same transaction. Ownership is checked first, so a foreign id deletes nothing.
+    Returns False when the conversation doesn't exist or isn't the caller's.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM conversations WHERE id = %s AND user_id = %s;",
+            (conversation_id, user_id),
+        )
+        if cursor.fetchone() is None:
+            cursor.close()
+            return False
+        cursor.execute("DELETE FROM run_events WHERE session_id = %s;", (conversation_id,))
+        cursor.execute("DELETE FROM artifacts WHERE session_id = %s;", (conversation_id,))
+        cursor.execute("DELETE FROM jobs WHERE session_id = %s;", (conversation_id,))
+        cursor.execute("DELETE FROM sessions WHERE session_id = %s;", (conversation_id,))
+        cursor.execute("DELETE FROM conversations WHERE id = %s;", (conversation_id,))
+        conn.commit()
+        cursor.close()
+        return True
+    except Exception as e:
+        conn.rollback()
+        raise Exception(f"Failed to delete conversation: {e}") from e
     finally:
         conn.close()

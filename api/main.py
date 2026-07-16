@@ -97,6 +97,9 @@ async def admin_set_user_role(user_id: str, body: RoleUpdate, _admin: AdminUser)
 class CreateConversation(BaseModel):
     request: str
     title: str | None = None
+    # Optional per-run LLM cost cap (USD). None => deployment default (the runner
+    # falls back to TWAIN_RUN_MAX_COST). Must be positive when supplied.
+    max_cost: float | None = None
 
 
 class SendMessage(BaseModel):
@@ -119,7 +122,11 @@ async def start_conversation(body: CreateConversation, user: CurrentUser):
     """Start a new run from a natural-language request and enqueue it."""
     if not body.request.strip():
         raise HTTPException(status_code=422, detail="request must not be empty.")
-    conversation = convo.create_conversation(user["id"], body.request, body.title)
+    if body.max_cost is not None and body.max_cost <= 0:
+        raise HTTPException(status_code=422, detail="max_cost must be a positive number.")
+    conversation = convo.create_conversation(
+        user["id"], body.request, body.title, max_cost=body.max_cost
+    )
     return {"data": conversation}
 
 
@@ -135,6 +142,14 @@ async def get_conversation_detail(conversation_id: str, user: CurrentUser):
     """Return a conversation plus its full transcript."""
     conversation = _require_own_conversation(conversation_id, user)
     return {"data": {**conversation, "messages": convo.list_messages(conversation_id)}}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def remove_conversation(conversation_id: str, user: CurrentUser):
+    """Delete a conversation and all of its data (owner only)."""
+    if not convo.delete_conversation(conversation_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"data": {"id": conversation_id, "deleted": True}}
 
 
 @app.post("/api/conversations/{conversation_id}/messages")

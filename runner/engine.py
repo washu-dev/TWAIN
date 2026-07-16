@@ -29,6 +29,28 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var; ``default`` when unset or unparseable."""
+    v = os.environ.get(name)
+    if v is None or not v.strip():
+        return default
+    try:
+        return float(v)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var; ``default`` when unset or unparseable."""
+    v = os.environ.get(name)
+    if v is None or not v.strip():
+        return default
+    try:
+        return int(v)
+    except ValueError:
+        return default
+
+
 def _load():
     """Wire sys.path and import the engine (mirrors the orchestrator bootstrap)."""
     repo_root = pathlib.Path(__file__).resolve().parent.parent
@@ -51,7 +73,9 @@ class _RealEngine:
         self._Orchestrator, self._State, self._AgentInterface = _load()
         self.STATE_BUILD = self._State.BUILD
 
-    def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store):
+    def build_orchestrator(
+        self, *, session_id, researcher_id, request, ask, sink, store, max_cost=None,
+    ):
         # Real execution is env-gated so the SAME image works everywhere: set
         # TWAIN_EXECUTE_LOCALLY=1 (local `docker run -e ...` or the ECS task
         # definition) to actually run the generated calculation at EXECUTE -- e.g.
@@ -71,6 +95,11 @@ class _RealEngine:
         # (TWAIN_SLURM_HOST="").
         slurm = _env_flag("TWAIN_EXECUTE_SLURM")
         execute = auto or slurm or _env_flag("TWAIN_EXECUTE_LOCALLY")
+        # Budget caps: a per-run ``max_cost`` (from the user) overrides the
+        # deployment default (TWAIN_RUN_MAX_COST); iteration/wall-time rails are
+        # deployment-wide. Without this wiring the orchestrator silently fell back
+        # to its own $1.00 / 50-iter / 30-min defaults on every run.
+        run_max_cost = max_cost if max_cost is not None else _env_float("TWAIN_RUN_MAX_COST", 1.0)
         return self._Orchestrator(
             session_id=session_id,
             researcher_id=researcher_id,
@@ -80,6 +109,9 @@ class _RealEngine:
             event_bus=sink,
             store=store,
             context=dict(SEED_CONTEXT),
+            run_max_cost=run_max_cost,
+            run_max_iterations=_env_int("TWAIN_RUN_MAX_ITERATIONS", 50),
+            run_wall_time_minutes=_env_int("TWAIN_RUN_WALL_MINUTES", 30),
             provenance=False,  # run_events is the durable trail; skip local JSONL
             execute_locally=execute and not slurm,
             execute_slurm=slurm,

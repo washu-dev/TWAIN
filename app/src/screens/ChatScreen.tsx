@@ -31,6 +31,7 @@ export const ChatScreen: React.FC = () => {
   const params = useLocalSearchParams<{ id?: string }>();
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState('');
+  const [budget, setBudget] = useState('');  // per-run cost cap (USD); blank => default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<ScrollView>(null);
@@ -97,7 +98,9 @@ export const ChatScreen: React.FC = () => {
     setError(null);
     try {
       if (!conversation) {
-        const created = await apiClient.startConversation(text);
+        const parsed = budget.trim() ? Number(budget) : NaN;
+        const maxCost = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+        const created = await apiClient.startConversation(text, maxCost);
         setConversation(created);
       } else {
         await apiClient.sendMessage(conversation.id, text);
@@ -204,24 +207,41 @@ export const ChatScreen: React.FC = () => {
           </TouchableOpacity>
         </View>
       ) : (
-        <View style={styles.inputBar}>
-          <TextInput
-            style={styles.input}
-            value={input}
-            onChangeText={setInput}
-            placeholder={conversation ? 'Type your reply…' : 'Describe your simulation…'}
-            placeholderTextColor={C.textSecondary}
-            editable={!busy && (!conversation || isActive)}
-            onSubmitEditing={handleSend}
-            multiline
-          />
-          <TouchableOpacity
-            style={[styles.sendBtn, (busy || (!conversation && !input.trim())) && styles.disabled]}
-            onPress={handleSend}
-            accessibilityRole="button"
-          >
-            <Text style={styles.sendText}>{conversation ? 'Send' : 'Start'}</Text>
-          </TouchableOpacity>
+        <View style={styles.composer}>
+          {!conversation && (
+            <View style={styles.budgetRow}>
+              <Text style={styles.budgetLabel}>Budget $</Text>
+              <TextInput
+                style={styles.budgetInput}
+                value={budget}
+                onChangeText={setBudget}
+                placeholder="default"
+                placeholderTextColor={C.textSecondary}
+                keyboardType="decimal-pad"
+                editable={!busy}
+              />
+              <Text style={styles.budgetHint}>optional — caps LLM spend for this run</Text>
+            </View>
+          )}
+          <View style={styles.inputBar}>
+            <TextInput
+              style={styles.input}
+              value={input}
+              onChangeText={setInput}
+              placeholder={conversation ? 'Type your reply…' : 'Describe your simulation…'}
+              placeholderTextColor={C.textSecondary}
+              editable={!busy && (!conversation || isActive)}
+              onSubmitEditing={handleSend}
+              multiline
+            />
+            <TouchableOpacity
+              style={[styles.sendBtn, (busy || (!conversation && !input.trim())) && styles.disabled]}
+              onPress={handleSend}
+              accessibilityRole="button"
+            >
+              <Text style={styles.sendText}>{conversation ? 'Send' : 'Start'}</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
     </SafeAreaView>
@@ -438,13 +458,35 @@ const styles = StyleSheet.create({
   working: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, padding: Spacing.two },
   workingText: { color: C.textSecondary, fontSize: 13 },
   error: { color: C.washuRed, paddingHorizontal: Spacing.three, paddingVertical: Spacing.one },
+  composer: {
+    borderTopWidth: 1,
+    borderTopColor: C.backgroundElement,
+  },
+  budgetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    paddingTop: Spacing.two,
+  },
+  budgetLabel: { fontSize: 14, fontWeight: '600', color: C.text },
+  budgetInput: {
+    width: 80,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#DDDDDD',
+    paddingHorizontal: Spacing.two,
+    fontSize: 15,
+    color: C.text,
+    backgroundColor: C.washuWhite,
+  },
+  budgetHint: { flex: 1, fontSize: 12, color: C.textSecondary },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: Spacing.two,
     padding: Spacing.two,
-    borderTopWidth: 1,
-    borderTopColor: C.backgroundElement,
   },
   input: {
     flex: 1,

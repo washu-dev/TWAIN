@@ -47,6 +47,22 @@ export interface ArtifactContent {
   content: string;
 }
 
+// One run's budget snapshot (from the budget.json artifact the orchestrator
+// writes each step). Costs are USD; iterations/wall-time are the run's rails.
+export interface RunBudgetSnapshot {
+  cost: number;
+  max_cost: number;
+  iterations: number;
+  max_iterations: number;
+  elapsed_seconds: number;
+  wall_time_limit_seconds: number;
+}
+
+export interface BudgetArtifact {
+  run?: RunBudgetSnapshot;
+  global?: Record<string, unknown>;
+}
+
 export interface Report {
   conversation: Conversation;
   final_state: string;
@@ -55,7 +71,7 @@ export interface Report {
   execution_result: Record<string, unknown> | string | null;
   result: Record<string, unknown> | null;
   results_dir: string | null;
-  budget: Record<string, unknown> | string | null;
+  budget: BudgetArtifact | string | null;
   artifacts: ArtifactMeta[];
 }
 
@@ -126,8 +142,10 @@ class APIClient {
   }
 
   // ── Conversations / chat (Phase 1) ─────────────────────────────────────────
-  async startConversation(request: string): Promise<Conversation> {
-    const response = await this.client.post('/api/conversations', { request });
+  async startConversation(request: string, maxCost?: number | null): Promise<Conversation> {
+    const body: { request: string; max_cost?: number } = { request };
+    if (maxCost != null) body.max_cost = maxCost;
+    const response = await this.client.post('/api/conversations', body);
     return response.data.data;
   }
 
@@ -139,6 +157,10 @@ class APIClient {
   async getConversation(id: string): Promise<Conversation> {
     const response = await this.client.get(`/api/conversations/${id}`);
     return response.data.data;
+  }
+
+  async deleteConversation(id: string): Promise<void> {
+    await this.client.delete(`/api/conversations/${id}`);
   }
 
   async sendMessage(id: string, content: string): Promise<Message> {

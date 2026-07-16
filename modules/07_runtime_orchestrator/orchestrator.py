@@ -145,7 +145,10 @@ class Orchestrator:
         )
 
         # ---- budget tracking ------------------------------------------------
-        self.budget_tracker = budget_tracker or BudgetTracker()
+        # A fresh tracker is scoped to this run, so its global ceiling is the run
+        # cost cap (keeps budget.json's "global" tier coherent with "run"); an
+        # injected tracker keeps whatever cross-run ceiling the caller set.
+        self.budget_tracker = budget_tracker or BudgetTracker(global_budget=run_max_cost)
         self.run_budget = RunBudget(
             max_cost=run_max_cost,
             max_iterations=run_max_iterations,
@@ -439,6 +442,17 @@ class Orchestrator:
                 "from": state.name, "to": entered.name,
                 "budget": self.run_budget.to_dict(),
             })
+
+            # 4b) post-step budget gate. The pre-step gate (step 0) only sees the
+            #     cost *before* this stage ran; re-check now that this stage's LLM
+            #     spend has been synced so a run stops promptly once it hits the
+            #     cap, rather than overshooting by up to one stage. A run that just
+            #     reached TERMINATE is already done -- don't fail a finished run.
+            if entered != State.TERMINATE:
+                try:
+                    self._check_budget()
+                except (OverBudget, OverMaxIterations, OverMaxWallTime) as exc:
+                    return self._handle_error(exc, entered)
 
             # 5) hard safety net against runaway transition counts
             if self.run_session.transition_count > self.max_transitions:

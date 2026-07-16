@@ -78,13 +78,16 @@ def _event(event_type, payload):
 class FakeOrchestrator:
     """Two-leg run: leg 1 clarifies + pauses at BUILD, leg 2 completes."""
 
-    def __init__(self, ask, sink):
+    def __init__(self, ask, sink, max_cost=1.0):
         self.ask = ask
         self.sink = sink
         self.sm = types.SimpleNamespace(
             context=types.SimpleNamespace(artifacts={}),
             current_state=types.SimpleNamespace(name="TERMINATE"),
         )
+        # Mirror the real orchestrator's run_budget so the pre-flight budget
+        # warning in _drive_run has a cap to compare the plan estimate against.
+        self.run_budget = types.SimpleNamespace(max_cost=max_cost)
         self._leg = 0
 
     def run(self, until=None):
@@ -102,9 +105,16 @@ class FakeEngine:
 
     def __init__(self, plan=None):
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
+        self.built_with = None  # records build_orchestrator kwargs for assertions
 
-    def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store):
-        return FakeOrchestrator(ask, sink)
+    def build_orchestrator(
+        self, *, session_id, researcher_id, request, ask, sink, store, max_cost=None,
+    ):
+        self.built_with = {
+            "session_id": session_id, "researcher_id": researcher_id,
+            "request": request, "max_cost": max_cost,
+        }
+        return FakeOrchestrator(ask, sink, max_cost=max_cost if max_cost is not None else 1.0)
 
     def read_execution_plan(self, orch):
         return self._plan
@@ -153,6 +163,44 @@ class TestProcessJob:
             raise AssertionError("expected NotImplementedError")
         except NotImplementedError:
             pass
+
+    def test_max_cost_forwarded_from_params(self):
+        # A per-run budget in the job params must reach build_orchestrator so the
+        # orchestrator caps this run's spend (rather than the deployment default).
+        db = FakeDB(approval="approve")
+        engine = FakeEngine()
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start",
+             "params": {"request": "r", "researcher_id": "u", "max_cost": 2.5}},
+            db, engine,
+        )
+        assert engine.built_with["max_cost"] == 2.5
+
+    def test_no_max_cost_forwards_none(self):
+        # Absent from params => None, so the engine applies the deployment default.
+        db = FakeDB(approval="approve")
+        engine = FakeEngine()
+        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, engine)
+        assert engine.built_with["max_cost"] is None
+
+    def test_pre_flight_warns_when_estimate_over_budget(self):
+        # Plan estimate ($5) above the run budget ($1) => a warn-only heads-up
+        # posted before the approval gate (the run is not blocked).
+        db = FakeDB(approval="approve")
+        engine = FakeEngine(plan={"cost_estimate": {"min_cost": 5.0}})
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start", "params": {"max_cost": 1.0}}, db, engine,
+        )
+        assert any("budget" in m["content"].lower() for m in db.messages)
+        assert db.status == "completed"  # warned, but still ran to completion
+
+    def test_pre_flight_silent_when_estimate_within_budget(self):
+        db = FakeDB(approval="approve")
+        engine = FakeEngine(plan={"cost_estimate": {"min_cost": 0.5}})
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start", "params": {"max_cost": 1.0}}, db, engine,
+        )
+        assert not any("heads up" in m["content"].lower() for m in db.messages)
 
 
 class TestRunLoop:

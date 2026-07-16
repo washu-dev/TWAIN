@@ -21,6 +21,28 @@ from runner.pg_store import PgStore
 DEFAULT_POLL_SECONDS = 2.0
 
 
+def _budget_warning(plan: dict | None, run_budget) -> str | None:
+    """A warn-only heads-up when a plan's estimated cost exceeds the run budget.
+
+    The budget caps *actual* LLM spend at runtime; the plan's ``cost_estimate``
+    is a pre-run figure, so this only flags the risk — it never blocks the run.
+    Returns the message to post, or ``None`` when there's nothing to warn about.
+    """
+    if not plan or run_budget is None:
+        return None
+    max_cost = getattr(run_budget, "max_cost", None)
+    if not max_cost:
+        return None
+    estimate = (plan.get("cost_estimate") or {}).get("min_cost")
+    if not isinstance(estimate, (int, float)) or estimate <= max_cost:
+        return None
+    return (
+        f"⚠️ Heads up: the estimated cost (~${estimate:.2f}) is above this "
+        f"run's budget of ${max_cost:.2f}. You can still approve it, but the run "
+        f"will stop automatically if actual LLM spend reaches the budget."
+    )
+
+
 def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
     """Run the two legs of the pipeline, gating on plan approval at BUILD."""
     # Leg 1: intake → clarify → decompose → discover → plan, pausing at BUILD.
@@ -36,6 +58,15 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
         db.add_assistant_message(session_id, engine.final_summary(orch), kind="chat")
         return
 
+    plan = engine.read_execution_plan(orch)
+
+    # Pre-flight budget check (warn only): if the plan's estimated cost is above
+    # this run's budget, flag it before the user decides. The budget caps actual
+    # LLM spend, so this is an early heads-up, not a hard gate.
+    warning = _budget_warning(plan, getattr(orch, "run_budget", None))
+    if warning:
+        db.add_assistant_message(session_id, warning, kind="chat", state="PLAN")
+
     # Approval gate: normally show the plan and block for the user's decision.
     # In unattended mode (TWAIN_AUTO_RUN) skip it and run straight through --
     # combined with execution being on, TWAIN runs the calculation automatically.
@@ -45,7 +76,7 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
             kind="chat", state="BUILD",
         )
     else:
-        decision = request_plan_approval(db, session_id, engine.read_execution_plan(orch))
+        decision = request_plan_approval(db, session_id, plan)
         if decision != "approve":
             db.set_conversation_status(session_id, "rejected")
             db.add_assistant_message(
@@ -88,6 +119,8 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         ask=DbAsk(db, session_id),
         sink=PgEventSink(db, session_id),
         store=PgStore(db),
+        # Per-run budget override (falls back to the deployment default in engine).
+        max_cost=params.get("max_cost"),
     )
     try:
         _drive_run(db, session_id, orch, engine)
