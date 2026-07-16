@@ -663,13 +663,61 @@ class StateMachine:
 
     def _primary_goal_id(self) -> str:
         """Resolve the goal id the plan targets (the execution goal), with fallback."""
-        graph = self._load_artifact("goal_graph")
-        if graph and graph.get("goals"):
-            for goal in graph["goals"]:
-                if goal.get("category") == "execution":
-                    return goal["id"]
-            return graph["goals"][0]["id"]
+        goal = self._primary_goal()
+        if goal is not None:
+            return goal["id"]
         return f"goal-{self.run_id}"
+
+    def _primary_goal(self) -> Optional[dict]:
+        """The goal the plan targets: the execution goal, else the first goal."""
+        graph = self._load_artifact("goal_graph")
+        if not graph or not graph.get("goals"):
+            return None
+        goals = graph["goals"]
+        return next((g for g in goals if g.get("category") == "execution"), goals[0])
+
+    @staticmethod
+    def _describe_system(sd: dict) -> str:
+        """Human label for the target material, e.g. 'Ag (Silver), fcc crystal'."""
+        if not sd:
+            return "the target system"
+        crystal = sd.get("crystal") or {}
+        formula = sd.get("formula") or crystal.get("formula")
+        name = crystal.get("name") or sd.get("name")
+        label = formula or name or "the target system"
+        if name and formula and name.lower() != formula.lower():
+            label = f"{formula} ({name})"
+        qualifiers = " ".join(x for x in [crystal.get("phase"), sd.get("kind")] if x)
+        if qualifiers and label != "the target system":
+            return f"{label}, {qualifiers}"
+        return label
+
+    def _compose_plan_summary(
+        self, intent: dict, requested_property: Optional[str],
+        libraries: list, calc_entry, recommendation,
+    ) -> str:
+        """Plain-language description of what this run will do (for the approval gate)."""
+        prop = requested_property
+        if not prop:
+            for metric in intent.get("acceptance_metrics", []) or []:
+                if isinstance(metric, dict) and metric.get("metric_name"):
+                    prop = metric["metric_name"]
+                    break
+        prop = prop or "the requested property"
+
+        system = self._describe_system(intent.get("system_descriptors") or {})
+        toolset = " + ".join(libraries) if libraries else "the selected tools"
+        calc = f" with the {calc_entry.name} calculator" if calc_entry is not None else ""
+
+        parts = [f"Compute {prop} for {system} using {toolset}{calc}."]
+        goal = self._primary_goal()
+        purpose = (goal or {}).get("purpose")
+        if purpose:
+            parts.append(f"Goal: {purpose}")
+        reasoning = getattr(recommendation, "reasoning", None) if recommendation is not None else None
+        if reasoning:
+            parts.append(f"Approach: {reasoning}")
+        return " ".join(parts)
 
     def decompose(self) -> State:
         """Turn the clarified IntentSpec into a validated GoalGraph artifact.
@@ -877,6 +925,8 @@ class StateMachine:
                     f"(runner/README.md), and TWAIN will run it in the linux-64 container.")
         execution_plan.target_system = intent.get("system_descriptors") or None
         execution_plan.requested_property = requested_property
+        execution_plan.summary = self._compose_plan_summary(
+            intent, requested_property, libraries, calc_entry, recommendation)
 
         self.context.artifacts["execution_plan"] = self._write_artifact(
             "execution_plan", asdict(execution_plan))

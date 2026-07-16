@@ -260,12 +260,7 @@ const StateStepper: React.FC<{ current: string; status?: string }> = ({ current,
 const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   const isUser = message.role === 'user';
   if (message.kind === 'approval_request') {
-    return (
-      <View style={styles.planCard}>
-        <Text style={styles.planTitle}>Proposed execution plan</Text>
-        <Text style={styles.planBody}>{prettyPlan(message.content)}</Text>
-      </View>
-    );
+    return <PlanCard content={message.content} />;
   }
   return (
     <View style={[styles.bubble, isUser ? styles.userBubble : styles.assistantBubble]}>
@@ -277,13 +272,112 @@ const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   );
 };
 
-function prettyPlan(content: string): string {
-  try {
-    return JSON.stringify(JSON.parse(content), null, 2);
-  } catch {
-    return content;
-  }
+interface PlanSummary {
+  summary?: string | null;
+  goal_id?: string | null;
+  target_system?: {
+    formula?: string;
+    kind?: string;
+    crystal?: { name?: string; phase?: string };
+  } | null;
+  requested_property?: string | null;
+  selected_method?: {
+    tool_name?: string;
+    tool_version?: number | string;
+    calculator?: string;
+    libraries?: string[];
+  } | null;
+  cost_estimate?: { min_cost?: number } | null;
+  compute_estimate?: { cpu_hours?: number } | null;
+  acceptance_metrics?: { metric_name?: string; target_value?: number; tolerance?: number }[] | null;
+  safety_notes?: string[] | null;
 }
+
+// Renders the approval-gate plan: leads with the plain-language summary of what
+// the run will do, then the concrete method / system / cost / notes.
+const PlanCard: React.FC<{ content: string }> = ({ content }) => {
+  let plan: PlanSummary | null = null;
+  try {
+    plan = JSON.parse(content) as PlanSummary;
+  } catch {
+    plan = null;
+  }
+  if (!plan) {
+    return (
+      <View style={styles.planCard}>
+        <Text style={styles.planTitle}>Proposed execution plan</Text>
+        <Text style={styles.planBody}>{content}</Text>
+      </View>
+    );
+  }
+
+  const method = plan.selected_method ?? undefined;
+  const methodText = method?.tool_name
+    ? [
+        `${method.tool_name}${method.tool_version ? ` ${method.tool_version}` : ''}`,
+        method.calculator ? `+ ${method.calculator}` : '',
+      ]
+        .filter(Boolean)
+        .join(' ')
+    : undefined;
+  const libs = method?.libraries?.length ? method.libraries.join(' + ') : undefined;
+
+  const sys = plan.target_system ?? undefined;
+  const sysText = sys
+    ? [sys.formula ?? sys.crystal?.name, sys.crystal?.phase, sys.kind].filter(Boolean).join(', ')
+    : undefined;
+
+  const cost = plan.cost_estimate?.min_cost;
+  const cpu = plan.compute_estimate?.cpu_hours;
+  const costText = [
+    cost != null ? `$${Number(cost).toFixed(2)} LLM` : null,
+    cpu != null ? `${Number(cpu).toFixed(2)} CPU·h` : null,
+  ]
+    .filter(Boolean)
+    .join(' + ');
+
+  const metrics = plan.acceptance_metrics ?? [];
+  const notes = plan.safety_notes ?? [];
+
+  return (
+    <View style={styles.planCard}>
+      <Text style={styles.planTitle}>Proposed execution plan</Text>
+      {plan.summary ? <Text style={styles.planSummary}>{plan.summary}</Text> : null}
+      {sysText ? <PlanRow label="System" value={sysText} /> : null}
+      {plan.requested_property ? <PlanRow label="Property" value={plan.requested_property} /> : null}
+      {methodText ? (
+        <PlanRow label="Method" value={libs ? `${methodText}  ·  ${libs}` : methodText} />
+      ) : null}
+      {costText ? <PlanRow label="Estimated cost" value={costText} /> : null}
+      {plan.goal_id ? <PlanRow label="Goal" value={plan.goal_id} /> : null}
+      {metrics.length > 0 ? (
+        <PlanRow
+          label="Accept if"
+          value={metrics
+            .map((m) => `${m.metric_name} ≈ ${m.target_value} ± ${m.tolerance}`)
+            .join('; ')}
+        />
+      ) : null}
+      {notes.length > 0 ? (
+        <View style={styles.planNotes}>
+          <Text style={styles.planNotesLabel}>Notes</Text>
+          {notes.map((n, i) => (
+            <Text key={`note-${i}`} style={styles.planNote}>
+              • {n}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
+const PlanRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <View style={styles.planRow}>
+    <Text style={styles.planRowLabel}>{label}</Text>
+    <Text style={styles.planRowValue}>{value}</Text>
+  </View>
+);
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
@@ -328,6 +422,19 @@ const styles = StyleSheet.create({
     color: C.text,
     fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' }),
   },
+  planSummary: { fontSize: 14, color: C.text, lineHeight: 20, marginBottom: Spacing.two },
+  planRow: { flexDirection: 'row', gap: Spacing.two, paddingVertical: 3 },
+  planRowLabel: { fontSize: 12, color: C.textSecondary, fontWeight: '600', width: 96 },
+  planRowValue: { fontSize: 13, color: C.text, flex: 1 },
+  planNotes: { marginTop: Spacing.two, gap: 3 },
+  planNotesLabel: {
+    fontSize: 11,
+    color: C.washuGreen,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  planNote: { fontSize: 12, color: C.textSecondary, lineHeight: 17 },
   working: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, padding: Spacing.two },
   workingText: { color: C.textSecondary, fontSize: 13 },
   error: { color: C.washuRed, paddingHorizontal: Spacing.three, paddingVertical: Spacing.one },

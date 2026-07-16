@@ -110,7 +110,14 @@ class ExecutionPlan:
     # hard-coded sample.
     target_system: Optional[dict] = None
     requested_property: Optional[str] = None
+    # A plain-language description of what this run will do -- the property, the
+    # concrete system, the toolset, and the reasoning behind the approach. Built
+    # at plan time so the approval gate shows *what will happen*, not just which
+    # tools are used. Optional so existing plans/tests are unaffected.
+    summary: Optional[str] = None
     def __post_init__(self):
+        if self.summary is not None and type(self.summary) is not str:
+            raise ValueError("summary must be a str when provided")
         if type(self.selected_method) is dict:
             self.selected_method = SelectedMethod(**self.selected_method)
         elif type(self.selected_method) is not SelectedMethod:

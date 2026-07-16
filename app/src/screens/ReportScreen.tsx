@@ -105,9 +105,12 @@ const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
     ? String(exec['status'] ?? (exec['succeeded'] ? 'succeeded' : 'failed'))
     : 'not run locally (execution disabled)';
 
+  const summary = typeof plan?.['summary'] === 'string' ? (plan['summary'] as string) : null;
+
   return (
     <View style={styles.card}>
       <Text style={styles.cardTitle}>Summary</Text>
+      {summary ? <Text style={styles.summaryText}>{summary}</Text> : null}
       <Row label="Selected method" value={methodText} />
       <Row label="Estimated cost" value={costParts.length ? costParts.join(' + ') : '—'} />
       <Row label="Execution" value={execText} />
@@ -302,6 +305,7 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   cardTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: Spacing.one },
+  summaryText: { fontSize: 14, color: C.text, lineHeight: 20, marginBottom: Spacing.two },
   resultCard: {
     borderRadius: 12,
     borderWidth: 1,
