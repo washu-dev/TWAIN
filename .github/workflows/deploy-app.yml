@@ -16,6 +16,9 @@ env:
   S3_BUCKET: twain-dev-1781888831
   CLOUDFRONT_DISTRIBUTION_ID: E3PINHJ1G0F5PS
   NODE_VERSION: '20'
+  # SSO-only reader role (Terraform: sso_ci_reader_role_arn). Injects the public
+  # EXPO_PUBLIC_AZURE_* identifiers into the build; cannot read other TWAIN secrets.
+  TWAIN_SSO_CI_ROLE_ARN: arn:aws:iam::730335203321:role/TWAIN-sso-ci-reader
 
 jobs:
   # ── Quality & Security Checks ──────────────────────────────────────────────
@@ -80,13 +83,35 @@ jobs:
         working-directory: app
         run: npm ci
 
+      # Assume the SSO-only reader role to fetch the public Entra identifiers.
+      - name: Configure AWS credentials (SSO config read)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.TWAIN_SSO_CI_ROLE_ARN }}
+          role-session-name: twain-sso-build
+
+      - name: Load SSO config from Secrets Manager
+        run: |
+          set -euo pipefail
+          client_id=$(aws secretsmanager get-secret-value --secret-id TWAIN/sso/APP_ID    --query SecretString --output text)
+          tenant_id=$(aws secretsmanager get-secret-value --secret-id TWAIN/sso/TENANT_ID --query SecretString --output text)
+          echo "EXPO_PUBLIC_AZURE_CLIENT_ID=${client_id}" >> "$GITHUB_ENV"
+          echo "EXPO_PUBLIC_AZURE_TENANT_ID=${tenant_id}" >> "$GITHUB_ENV"
+          echo "Loaded Entra client/tenant IDs from Secrets Manager."
+
       - name: Build Expo web app
         working-directory: app
         env:
           EXPO_PUBLIC_API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          # EXPO_PUBLIC_AZURE_CLIENT_ID / EXPO_PUBLIC_AZURE_TENANT_ID come from
+          # $GITHUB_ENV (set in the previous step) and are inlined by expo export.
         run: npx expo export --platform web
 
-      - name: Configure AWS credentials
+      # Reset to the base CI credentials for the S3/CloudFront deploy.
+      - name: Configure AWS credentials (deploy)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}

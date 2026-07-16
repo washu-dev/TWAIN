@@ -8,6 +8,10 @@ aws_region = "us-east-1"
 #   aws sts get-caller-identity --query Arn --output text
 # assume_role_principal_arns = ["arn:aws:iam::123456789012:user/arifs"]
 
+# CI (GitHub Actions) principal allowed to assume the SSO-only reader role that
+# injects EXPO_PUBLIC_AZURE_* into the web build. Leave empty to skip the role.
+# ci_principal_arns = ["arn:aws:iam::123456789012:user/ci-user"]
+
 # name_prefix             = "TWAIN"
 # role_name               = "TWAIN-secrets-reader"
 # recovery_window_in_days = 7
