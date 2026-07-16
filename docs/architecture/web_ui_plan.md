@@ -56,8 +56,8 @@
 
 ### 2.6 What the original docs already specified for the web UI
 - Backlog stretch story **S1 "Web UI for Approval & Result Review"** — FastAPI + React, visual plan with approve/reject/edit, results with Plotly (`docs/backlog/DETAILED_BACKLOG.md`).
-- Roadmap **Phase 8 "Production Hardening"** — multi-tenant OAuth auth + a cost-monitoring dashboard (`IMPLEMENTATION_ROADMAP.md`).
-- **REVIEW.md** — CLI first, web UI later; approval UI shows plan + cost and waits for yes/no/edit.
+- Roadmap **Phase 8 "Production Hardening"** — multi-tenant OAuth auth + a cost-monitoring dashboard (`../project/IMPLEMENTATION_ROADMAP.md`).
+- **`../project/REVIEW.md`** — CLI first, web UI later; approval UI shows plan + cost and waits for yes/no/edit.
 
 ---
 

@@ -172,13 +172,9 @@ def _parse_smiles_csv(text, column="smiles"):
     return out
 
 
-def _sample_smiles():
-    """Return a tiny built-in molecule set for smoke runs.
-
-    >>> _sample_smiles()[0]
-    'CCO'
-    """
-    return ["CCO", "CC(=O)O", "c1ccccc1", "CC(C)Cc1ccc(cc1)C(C)C(=O)O"]
+# No built-in sample molecules: TWAIN never fabricates a placeholder. Predictions
+# run on the real SMILES set from --input; with none provided, run() fails loudly
+# rather than substituting stand-in molecules.
 
 
 # ───────────────────────────── defaults from plan ───────────────────────────
@@ -195,10 +191,13 @@ def run(config, input_path, output_path, *, smoke=False):
     from rdkit import Chem  # heavy import, kept lazy
     from rdkit.Chem import Crippen, Descriptors, rdMolDescriptors
 
-    if smoke or not Path(input_path).is_file():
-        smiles = _sample_smiles()
-    else:
+    if Path(input_path).is_file():
         smiles = _parse_smiles_csv(Path(input_path).read_text(encoding="utf-8"))
+    else:
+        raise SystemExit(
+            "no molecules to predict: this bundle needs a real SMILES set via "
+            "--input <molecules.csv>. TWAIN refuses to fabricate placeholder molecules."
+        )
 
     digits = int(config.get("round_digits", 4))
     rows = []

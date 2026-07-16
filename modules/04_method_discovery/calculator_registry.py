@@ -3,8 +3,8 @@
 A *calculator* is the compute engine that provides the physics (total energy,
 electronic structure, ...); a *driver library* (ASE, Pymatgen -- see
 ``configs/discovery_registry.json``) builds the atomic system and orchestrates
-the run. TWAIN picks both: e.g. the band gap of silicon is computed by the
-**GPAW** calculator driven through the **ASE** library.
+the run. TWAIN picks both: e.g. a band gap is computed by a plane-wave DFT
+calculator (such as **GPAW**) driven through a builder library (such as **ASE**).
 
 This module answers two questions the planner needs:
 
@@ -424,7 +424,10 @@ def select_calculator(
 if __name__ == "__main__":  # pragma: no cover - manual smoke of the module
     import sys
 
-    q = " ".join(sys.argv[1:]) or "what is the band gap of silicon"
+    q = " ".join(sys.argv[1:])
+    if not q:
+        print("usage: python calculator_registry.py <free-text objective>")
+        sys.exit(2)
     prop = canonical_property(q)
     calc = select_calculator(prop)
     print(f"query    : {q!r}")

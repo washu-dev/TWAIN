@@ -1,11 +1,23 @@
+"""Cost / iteration / wall-time budgets for the control plane.
+
+Three nested scopes guard a run against runaway cost or loops:
+
+* :class:`RunBudget` -- one pipeline run: caps dollar cost, iteration count, and
+  wall-clock time, raising the matching ``Over*`` exception when a limit trips.
+* :class:`ProjectBudget` -- a group of runs sharing a cost ceiling.
+* :class:`BudgetTracker` -- the top-level ledger across projects, enforcing a
+  global spend cap and tracking remaining API quota.
+"""
 import time
 
 
 class OverBudget(Exception):
     pass
 
+
 class OverMaxIterations(Exception):
     pass
+
 
 class OverMaxWallTime(Exception):
     pass
@@ -26,7 +38,7 @@ class RunBudget:
     def add_iteration(self):
         self.iterations += 1
 
-    def getCost(self):
+    def get_cost(self):
         return self.cost
 
     def elapsed(self):
@@ -63,33 +75,33 @@ class ProjectBudget:
         self.max_cost = max_cost
         self.run_budgets = []
 
-    def getCost(self):
-        return sum(rb.getCost() for rb in self.run_budgets)
+    def get_cost(self):
+        return sum(rb.get_cost() for rb in self.run_budgets)
 
     def add_run(self, run_budget):
         self.run_budgets.append(run_budget)
 
     def check(self):
-        if self.getCost() > self.max_cost:
+        if self.get_cost() > self.max_cost:
             raise OverBudget(
-                f"Project cost ${self.getCost():.4f} exceeds limit ${self.max_cost:.4f}"
+                f"Project cost ${self.get_cost():.4f} exceeds limit ${self.max_cost:.4f}"
             )
         if self.tracker.budget_exceeded():
             raise OverBudget("Global budget exceeded")
 
 
-class Budget_Tracker:
-    def __init__(self, globalBudget=1.0):
-        self.projectBudgets = []
-        self.globalBudget = globalBudget
+class BudgetTracker:
+    def __init__(self, global_budget=1.0):
+        self.project_budgets = []
+        self.global_budget = global_budget
         self.api_quota_prior = None
         self.api_quota_remaining = None
 
     def add_project(self, project):
-        self.projectBudgets.append(project)
+        self.project_budgets.append(project)
 
     def set_budget(self, budget):
-        self.globalBudget = budget
+        self.global_budget = budget
 
     def request_project(self, project):
         if self.budget_exceeded():
@@ -97,13 +109,13 @@ class Budget_Tracker:
         self.add_project(project)
 
     def budget_used(self):
-        return sum(p.getCost() for p in self.projectBudgets)
+        return sum(p.get_cost() for p in self.project_budgets)
 
     def budget_exceeded(self):
-        return self.budget_used() >= self.globalBudget
+        return self.budget_used() >= self.global_budget
 
     def budget_remaining(self):
-        return max(self.globalBudget - self.budget_used(), 0)
+        return max(self.global_budget - self.budget_used(), 0)
 
     def update_quota(self, quota_prior, quota_remaining):
         self.api_quota_prior = quota_prior
@@ -111,10 +123,10 @@ class Budget_Tracker:
 
     def to_dict(self):
         return {
-            "global_budget": self.globalBudget,
+            "global_budget": self.global_budget,
             "budget_used": round(self.budget_used(), 6),
             "budget_remaining": round(self.budget_remaining(), 6),
             "api_quota_prior": self.api_quota_prior,
             "api_quota_remaining": self.api_quota_remaining,
-            "projects": len(self.projectBudgets),
+            "projects": len(self.project_budgets),
         }

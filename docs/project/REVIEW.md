@@ -423,7 +423,7 @@ Sandboxes and exploratory work:
 
 ## References
 
-- Current architecture doc: `docs/architecture/domain-neutral-agentic-pipeline.md`
-- Initial backlog: `docs/backlog/initial-backlog.md`
+- Current architecture doc: `../architecture/domain-neutral-agentic-pipeline.md`
+- Initial backlog: `../backlog/initial-backlog.md`
 - Module hierarchy: `modules/README.md`
 - Existing drawio diagram: `TWAIN_Architecture.drawio` (review and update with Phase 1–6 flow)

@@ -317,11 +317,11 @@ A: No. Each engineer writes tests for their code (TDD). Validation engineer (2 F
 
 ## Document References
 
-- **Project Summary**: `PROJECT_SUMMARY.md` — executive overview
-- **Review & Architecture**: `REVIEW.md` — detailed architecture, gaps, recommendations
-- **Implementation Roadmap**: `IMPLEMENTATION_ROADMAP.md` — phased plan, resource plan
-- **Getting Started**: `GETTING_STARTED.md` — quick orientation
-- **Detailed Backlog**: `docs/backlog/DETAILED_BACKLOG.md` — full user stories (40+ items)
+- **Project Summary**: `../project/PROJECT_SUMMARY.md` — executive overview
+- **Review & Architecture**: `../project/REVIEW.md` — detailed architecture, gaps, recommendations
+- **Implementation Roadmap**: `../project/IMPLEMENTATION_ROADMAP.md` — phased plan, resource plan
+- **Getting Started**: `../project/GETTING_STARTED.md` — quick orientation
+- **Detailed Backlog**: `DETAILED_BACKLOG.md` — full user stories (40+ items)
 
 ---
 

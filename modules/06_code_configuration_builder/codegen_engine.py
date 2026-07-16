@@ -233,23 +233,29 @@ _RDKIT_MANIP_HINTS = (
 # placeholders and are pre-formatted before being spliced into the prompt.
 _SMOKE_COMPUTE = (
     '- Provide argparse with `--output` (CSV path, default "{output_file}") and '
-    "`--smoke`. In --smoke mode, build the SMALLEST valid system and run the ACTUAL "
-    "{property} computation once, end-to-end, at the cheapest valid settings (a tiny "
-    "cell/molecule, minimal basis/cutoff, a single k-point) -- INCLUDING the real "
-    "prediction/compute call and reading the returned value -- then write it and exit. "
+    "`--smoke`. In --smoke mode, build the ACTUAL target system using the SAME "
+    "structure-building code your full run uses -- never a smaller or simpler "
+    "substitute material -- then "
+    "run the real {property} computation once, end-to-end, at the cheapest valid "
+    "settings (minimal basis/cutoff, a single k-point, fewest steps): reduce COST "
+    "through settings only, never by swapping in a different system. INCLUDE the real "
+    "prediction/compute call and read the returned value, then write it and exit. "
     "Do NOT stub, skip, or hard-code the computation in --smoke: its purpose is to make "
-    "a wrong API call, keyword argument, or return type fail fast here. Downloading the "
-    "tool's own model weights / parameter files is allowed; do not use the network "
-    "otherwise."
+    "a wrong API call, keyword argument, return type, or malformed structure fail fast "
+    "here. Downloading the tool's own model weights / parameter files is allowed; do "
+    "not use the network otherwise."
 )
 _SMOKE_LOAD_ONLY = (
     '- Provide argparse with `--output` (CSV path, default "{output_file}") and '
-    "`--smoke`. In --smoke mode, build a SMALL system and construct/load the calculator "
-    "(instantiate it, or load the pretrained model) to prove it is real and callable, "
-    "then exit WITHOUT the expensive part (no large SCF, dense k-grid, or long dynamics) "
-    "-- a full run needs external parameter files or is too costly for a smoke check. "
-    "Downloading the tool's own model weights / parameter files is allowed; do not use "
-    "the network otherwise."
+    "`--smoke`. In --smoke mode, build the ACTUAL target system using the SAME "
+    "structure-building code your full run uses (never a smaller or simpler substitute "
+    "material), and construct/load "
+    "the calculator (instantiate it, or load the pretrained model) to prove it is real "
+    "and callable; then exit WITHOUT the expensive part (no large SCF, dense k-grid, or "
+    "long dynamics) -- a full run needs external parameter files or is too costly for a "
+    "smoke check. Building the real structure here is what surfaces a broken builder "
+    "before a costly run. Downloading the tool's own model weights / "
+    "parameter files is allowed; do not use the network otherwise."
 )
 
 
@@ -269,18 +275,44 @@ Hard requirements:
 - Build the atomic system in code for {material_desc}. Do NOT read any external \
 structure file. Build the EXACT phase/polymorph named -- if a space group is given, \
 construct THAT structure (e.g. `ase.spacegroup.crystal(...)` with that space group, or \
-pymatgen), and never substitute a different or more common polymorph (e.g. do not build \
-rutile when anatase was requested). For a simple element or binary that `ase.build.bulk` \
-supports, use it (it carries the correct experimental lattice constant); otherwise supply \
-the standard reference lattice parameters and Wyckoff positions for the named polymorph -- \
-these are structural INPUTS that define the cell, not the {property} you compute. Do NOT \
-hardcode the {property} value itself or any other result you are meant to calculate.
+pymatgen), and never substitute a different or more common polymorph than the one \
+requested. For a simple element or binary that `ase.build.bulk` supports, use it (it \
+carries the correct experimental lattice constant); otherwise supply the standard \
+reference lattice parameters and Wyckoff positions for the named polymorph -- these are \
+structural INPUTS that define the cell, not the {property} you compute. Do NOT hardcode \
+the {property} value itself or any other result you are meant to calculate.
+- Build the structure CORRECTLY rather than defensively. Use the standard reference cell \
+for the named polymorph -- correct lattice parameters, Wyckoff positions, and the right \
+stoichiometric ratio for the formula -- so the cell is right the first time. Do NOT write \
+runtime guards that raise or exit when the composition, atom count, formula-unit count, \
+or detected symmetry is not what you expected: no `if counts[...] != n: raise`, no \
+stoichiometry, atom-count, or space-group assertions that abort the run. If the structure \
+would come out wrong, the fix is to CORRECT the structure-building code so it produces the \
+right cell -- never to bolt on a validator that halts execution. You may print the \
+composition, cell, and minimum interatomic distance for visibility, but a mismatch must \
+never stop the computation.
 - Attach the {calculator} calculator (`{calculator_import}`) and compute {property}. \
 Do NOT invent model, dataset, or parameter-set identifiers -- a name you guess may \
 not exist. If the calculator loads a named pretrained model, discover the valid \
 identifier at runtime (e.g. call the library's "list available/pretrained models" \
 API and select the one matching the task) rather than hardcoding a guessed string. \
 Call every API with the argument types it documents.
+- Compute the quantity the property NAME denotes. If {property} names a specific route \
+or averaging scheme (e.g. an elastic-tensor-derived modulus and its averaging \
+convention, a specific gap type, a named ensemble), compute THAT quantity by its proper \
+method -- do not report a cheaper proxy under the requested name -- and add a comment \
+stating how the number you print maps to {property}.
+- If {property} is only defined for an equilibrium structure, RELAX the geometry first \
+(atomic positions, and the cell when the property depends on it) to converged \
+forces/stress, and compute from the relaxed structure -- not from an arbitrary \
+unrelaxed guess.
+- In the real (non-smoke) run, use numerical settings converged well enough for \
+{property} (adequate k-point density, plane-wave/basis cutoff, SCF tolerance, sampling); \
+use the library's documented production defaults when unsure, and do not leave \
+smoke-level coarse settings in the full run.
+- Print every metric WITH its physical unit, and for any fitted or derived value also \
+print a fit-quality / convergence diagnostic (e.g. fit residual, R^2, number of sample \
+points) so the result's reliability is visible.
 - Keep the heavy imports (`{library_import}`, `{calculator_import}`) INSIDE functions \
 so the module still imports where they are not installed.
 - First thing in the `if __name__ == "__main__":` block, anchor the working \
@@ -320,9 +352,20 @@ file. For a molecule, build from its formula/SMILES with the library's own tools
 crystal, build the EXACT phase/polymorph named -- if a space group is given, construct \
 THAT structure and never substitute a different or more common polymorph; its standard \
 reference lattice parameters are structural INPUTS, not the {property} you compute. \
-Optimize the geometry first if the property needs a relaxed structure. Do NOT hardcode \
-the {property} value or any other result you are meant to calculate.
-- Compute {property} with {library}. Do NOT invent method, basis-set, functional, or \
+Optimize the geometry first if the property needs a relaxed structure, using numerical \
+settings converged well enough for {property} in the real run. Do NOT hardcode the \
+{property} value or any other result you are meant to calculate.
+- Build the structure CORRECTLY rather than defensively: use the standard reference cell \
+for the named polymorph (correct lattice parameters, Wyckoff positions, and stoichiometric \
+ratio for the formula). Do NOT write runtime guards that raise or exit when the \
+composition, atom count, or symmetry is not what you expected -- no stoichiometry, \
+atom-count, or space-group assertions that abort the run. If the built structure would be \
+wrong, CORRECT the structure-building code so it produces the right cell instead of adding \
+a validator that halts execution. Printing the composition and cell for visibility is \
+fine; a mismatch must never stop the computation.
+- Compute the quantity the property NAME denotes -- if {property} names a specific \
+route or averaging scheme, compute THAT, not a cheaper proxy, and comment how your \
+printed number maps to {property}. Do NOT invent method, basis-set, functional, or \
 parameter identifiers -- a name you guess may not exist. Use documented defaults or \
 discover valid identifiers at runtime, and call every API with the argument types it \
 documents.
@@ -334,7 +377,9 @@ __file__)))`) so relative outputs and calculator scratch files land next to the 
 script, never in the caller's working directory.
 {smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
-value(s)), plus "tool", "property", and "output_file". Write the same metrics as one \
+value(s)), plus "tool", "property", and "output_file"; print each metric WITH its \
+physical unit, and for any fitted or derived value also print a fit-quality / \
+convergence diagnostic so its reliability is visible. Write the same metrics as one \
 CSV row to --output.
 - End the file with an `if __name__ == "__main__":` block that runs the script \
 (calls your main function). Output the COMPLETE script in one reply -- do not stop \
@@ -353,59 +398,14 @@ Begin the script now."""
 
 
 # --------------------------------------------------------------------------- #
-# Minimal offline elemental-crystal table.
+# No offline structure fabrication.
 #
-# Lets material-aware templates build the *requested* element (conventional cubic
-# cell) instead of a hard-coded sample, with no ASE dependency at generation
-# time. Returns None for anything not in the table, so the template keeps its
-# built-in default. (symbol -> (structure, lattice constant in Å))
+# TWAIN ships NO hard-coded lattice constants or sample structures. A run must
+# build the *actual* requested system (the LLM path) or be handed a real
+# structure; material-aware templates fail loudly rather than substitute a
+# placeholder, so a missing structure surfaces as an error instead of a
+# silently wrong-material result.
 # --------------------------------------------------------------------------- #
-_ELEMENTAL_CRYSTALS: Dict[str, tuple] = {
-    "Si": ("diamond", 5.43), "Ge": ("diamond", 5.658), "C": ("diamond", 3.567),
-    "Fe": ("bcc", 2.87), "W": ("bcc", 3.16), "Na": ("bcc", 4.23), "Cr": ("bcc", 2.88),
-    "Cu": ("fcc", 3.61), "Al": ("fcc", 4.05), "Au": ("fcc", 4.08),
-    "Ag": ("fcc", 4.09), "Ni": ("fcc", 3.52), "Pt": ("fcc", 3.92), "Pd": ("fcc", 3.89),
-}
-
-_CONVENTIONAL_BASIS: Dict[str, list] = {
-    "fcc": [(0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5)],
-    "bcc": [(0, 0, 0), (0.5, 0.5, 0.5)],
-    "diamond": [
-        (0, 0, 0), (0.5, 0.5, 0), (0.5, 0, 0.5), (0, 0.5, 0.5),
-        (0.25, 0.25, 0.25), (0.75, 0.75, 0.25), (0.75, 0.25, 0.75), (0.25, 0.75, 0.75),
-    ],
-}
-
-
-def elemental_structure(formula: Optional[str]) -> Optional[dict]:
-    """Build a conventional cubic cell for a known elemental crystal, else None.
-
-    >>> s = elemental_structure("Si")
-    >>> s["crystalstructure"], len(s["atoms"]), s["atoms"][0]["species"]
-    ('diamond', 8, 'Si')
-    >>> elemental_structure("Unobtanium") is None
-    True
-    >>> elemental_structure(None) is None
-    True
-    """
-    if not formula:
-        return None
-    symbol = str(formula).strip()
-    info = _ELEMENTAL_CRYSTALS.get(symbol)
-    if info is None:
-        return None
-    structure, a = info
-    matrix = [[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]]
-    return {
-        "formula": symbol,
-        "crystalstructure": structure,
-        "a": a,
-        "lattice": matrix,
-        "cell": matrix,
-        "pbc": True,
-        "atoms": [{"species": symbol, "coordinates": list(c)} for c in _CONVENTIONAL_BASIS[structure]],
-        "coordinateSystem": "fractional",
-    }
 
 
 # --------------------------------------------------------------------------- #
@@ -937,13 +937,28 @@ class CodegenEngine:
 
     @staticmethod
     def _structure_for(plan: dict, intent: Optional[dict]) -> dict:
-        """Structure baked into material-aware standard templates (see task 6).
+        """Real structure to bake into a material-aware template, or ``{}``.
 
-        Returns ``{}`` when the material can't be resolved to a crystal, so the
-        template keeps its built-in sample.
+        TWAIN never fabricates a structure from a bare formula or space group: it
+        bakes one only when an explicit cell (atoms + lattice) was actually provided
+        upstream (e.g. from a CIF or Materials Project entry). Otherwise it returns
+        ``{}`` and the template fails loudly rather than analysing a placeholder.
         """
-        material = CodegenEngine._material_brief(plan, intent)
-        return elemental_structure(material.get("formula")) or {}
+        for src in (intent or {}, plan or {}):
+            if not isinstance(src, dict):
+                continue
+            descriptors = src.get("system_descriptors")
+            target = src.get("target_system")
+            candidates = (
+                src.get("structure"),
+                descriptors.get("structure") if isinstance(descriptors, dict) else None,
+                target.get("structure") if isinstance(target, dict) else None,
+            )
+            for candidate in candidates:
+                if (isinstance(candidate, dict)
+                        and candidate.get("atoms") and candidate.get("lattice")):
+                    return candidate
+        return {}
 
     @staticmethod
     def _config_doc(plan, spec, tool_name, tool_import, params, generated_at, acceptance) -> dict:

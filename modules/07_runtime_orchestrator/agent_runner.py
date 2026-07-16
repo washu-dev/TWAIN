@@ -11,8 +11,11 @@ cross-cutting concerns the acceptance criteria require:
   schema (a JSON Schema dict or a predicate). A contract violation is permanent.
 * **Retry** -- *transient* failures (network, 5xx, rate limit) are retried with
   exponential backoff + jitter; *permanent* failures fail fast. The
-  transient/permanent split reuses ``retry_policy.classify_error`` (Story 2.3);
-  the broken ``RetryPolicy.execute`` is intentionally not used.
+  transient/permanent split reuses ``retry_policy.classify_error`` (Story 2.3).
+  This module implements its own retry loop (rather than reusing
+  ``RetryPolicy.execute``) so retries interleave with the per-agent timeout
+  thread below; ``RetryPolicy``/``ResilientCaller`` are used at the coarser
+  run-step level by the orchestrator.
 
 An "agent" is anything callable as ``agent(input_spec)`` or an object exposing
 ``.run`` / ``.invoke``. This keeps real agent modules and test doubles
@@ -39,7 +42,7 @@ DEFAULT_TIMEOUTS: Dict[str, int] = {
     # REPAIR may run several --smoke verifications (up to 5 min each) plus a few
     # LLM repair/review calls, so it gets a generous stage budget.
     "REPAIR": 20 * 60,
-    "EXECUTE": 20 * 60,
+    "EXECUTE": 2 * 60 * 60,
     "INTERPRET": 10 * 60,
     "VALIDATE": 10 * 60,
     "CORRECT": 10 * 60,

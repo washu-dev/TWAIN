@@ -84,7 +84,7 @@ class FakeAgent:
             intent["metadata"]["confidence_scores"]["SMILES_confidence"] = 0.4
         self._intent_json = json.dumps(intent)
 
-    def callAgent(self, prompt, **kwargs):
+    def call_agent(self, prompt, **kwargs):
         if "questions" in str(prompt).lower():
             return {"content": [{"text": "1. Which solvent and temperature?"}]}
         return {"content": [{"text": self._intent_json}]}
@@ -285,6 +285,16 @@ class TestExecuteRunsBundle:
         "metadata": {"timestamp": "2026-06-15T12:00:00Z", "goal_id": "g1", "candidate_rank": 1},
         "acceptance_metrics": [{"metric_name": "density", "target_value": 7.8, "tolerance": 0.5}],
         "safety_notes": ["Verify SLURM partition limits"],
+        # A real structure the caller resolved upstream (TWAIN never fabricates one),
+        # so the material-aware Pymatgen bundle has something legitimate to analyse.
+        "target_system": {"structure": {
+            "lattice": [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]],
+            "atoms": [
+                {"species": "Na", "coordinates": [0.0, 0.0, 0.0]},
+                {"species": "Cl", "coordinates": [0.5, 0.5, 0.5]},
+            ],
+            "coordinateSystem": "fractional",
+        }},
     }
 
     def _machine_with_bundle(self, tmp_path):

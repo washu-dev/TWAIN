@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover
     from execution_result import ExecutionResult, ExecutionStatus
     from resource_monitor import ResourceMonitor, terminate_process
 
-DEFAULT_EXEC_TIMEOUT = 1200.0   # 20 min, matching the orchestrator's EXECUTE budget
+DEFAULT_EXEC_TIMEOUT = 7200.0   # 2 hr, matching the orchestrator's EXECUTE budget
 DEFAULT_SMOKE_TIMEOUT = 300.0   # smoke should be quick
 _DEP_ERROR_MARKERS = ("modulenotfounderror", "importerror", "no module named")
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")

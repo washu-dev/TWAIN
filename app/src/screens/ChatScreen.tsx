@@ -131,7 +131,11 @@ export const ChatScreen: React.FC = () => {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} accessibilityRole="button">
+        {/* Direct loads (URL / refresh) have no history; fall back to home. */}
+        <TouchableOpacity
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+          accessibilityRole="button"
+        >
           <Text style={styles.back}>‹ Back</Text>
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1}>

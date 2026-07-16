@@ -19,6 +19,10 @@ REPO_ROOT = Path(__file__).resolve().parent
 # Static, version-controlled inputs (JSON schemas, etc.) shipped with the repo.
 SCHEMAS_DIR = REPO_ROOT / "schemas"
 
+# Version-controlled data-driven config (registries, discovery maps) the pipeline
+# reads at runtime instead of hardcoding in Python.
+CONFIGS_DIR = REPO_ROOT / "configs"
+
 # DFTB+ Slater-Koster parameter files (.skf). Not committed (CC-BY-SA data,
 # fetched by runner/fetch_slako.sh into this repo-anchored dir); DFTB_PREFIX is
 # pointed here via pixi's [activation.env]. Kept here so the execution adapter

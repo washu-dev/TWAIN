@@ -150,26 +150,9 @@ def _check_acceptance(metrics, criteria):
     return report
 
 
-def _sample_atoms_spec():
-    """Return a tiny built-in FCC-copper cell for smoke runs.
-
-    >>> spec = _sample_atoms_spec()
-    >>> len(spec["atoms"]), spec["atoms"][0]["species"]
-    (4, 'Cu')
-    """
-    a = 3.6
-    h = a / 2.0
-    return {
-        "atoms": [
-            {"species": "Cu", "coordinates": [0.0, 0.0, 0.0]},
-            {"species": "Cu", "coordinates": [0.0, h, h]},
-            {"species": "Cu", "coordinates": [h, 0.0, h]},
-            {"species": "Cu", "coordinates": [h, h, 0.0]},
-        ],
-        "cell": [[a, 0.0, 0.0], [0.0, a, 0.0], [0.0, 0.0, a]],
-        "pbc": True,
-        "coordinateSystem": "cartesian",
-    }
+# No built-in sample system: TWAIN never fabricates a placeholder. A molecular-
+# dynamics run reads its atomic system from --input; with none provided, run()
+# fails loudly rather than substituting a stand-in material.
 
 
 def _atoms_from_spec(spec):
@@ -177,9 +160,13 @@ def _atoms_from_spec(spec):
 
     Accepts either a flat spec or one wrapped in ``{"structure": {...}}``.
 
-    >>> sym, coords, cell, pbc, cart = _atoms_from_spec(_sample_atoms_spec())
+    >>> _demo = {"atoms": [{"species": "X", "coordinates": [0.0, 0.0, 0.0]},
+    ...                    {"species": "X", "coordinates": [1.5, 1.5, 1.5]}],
+    ...          "cell": [[3.0, 0, 0], [0, 3.0, 0], [0, 0, 3.0]],
+    ...          "pbc": True, "coordinateSystem": "cartesian"}
+    >>> sym, coords, cell, pbc, cart = _atoms_from_spec(_demo)
     >>> sym[0], len(coords), pbc, cart
-    ('Cu', 4, True, True)
+    ('X', 2, True, True)
     """
     if isinstance(spec, dict) and "structure" in spec:
         spec = spec["structure"]
@@ -207,10 +194,14 @@ def run(config, input_path, output_path, *, smoke=False):
     from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
     from ase.md.verlet import VelocityVerlet
 
-    if smoke or not Path(input_path).is_file():
-        spec = _sample_atoms_spec()
-    else:
+    if Path(input_path).is_file():
         spec = json.loads(Path(input_path).read_text(encoding="utf-8"))
+    else:
+        raise SystemExit(
+            "no atomic system to run: this molecular-dynamics bundle needs a real "
+            "system via --input <system.json>. TWAIN refuses to fabricate a "
+            "placeholder system."
+        )
 
     symbols, coords, cell, pbc, cartesian = _atoms_from_spec(spec)
     if cartesian:

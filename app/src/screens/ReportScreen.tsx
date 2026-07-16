@@ -43,7 +43,11 @@ export const ReportScreen: React.FC = () => {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} accessibilityRole="button">
+        {/* Direct loads (URL / refresh) have no history; fall back to home. */}
+        <TouchableOpacity
+          onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
+          accessibilityRole="button"
+        >
           <Text style={styles.back}>‹ Back</Text>
         </TouchableOpacity>
         <Text style={styles.title} numberOfLines={1}>
@@ -84,17 +88,34 @@ export const ReportScreen: React.FC = () => {
 
 const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
   const plan = typeof report.plan === 'object' && report.plan ? report.plan : null;
-  const method = plan?.['selected_method'] as { name?: string; version?: string } | undefined;
-  const exec = typeof report.execution_result === 'object' ? report.execution_result : null;
+  // Field names follow schemas/execution_plan.schema.json.
+  const method = plan?.['selected_method'] as
+    | { tool_name?: string; tool_version?: string | number }
+    | undefined;
+  const cost = plan?.['cost_estimate'] as { min_cost?: number } | undefined;
+  const compute = plan?.['compute_estimate'] as { cpu_hours?: number } | undefined;
+  const exec =
+    typeof report.execution_result === 'object' ? report.execution_result : null;
+
+  const methodText = method?.tool_name
+    ? `${method.tool_name} ${method.tool_version ?? ''}`.trim()
+    : '—';
+  const costParts = [
+    cost?.min_cost != null ? `$${Number(cost.min_cost).toFixed(2)} LLM` : null,
+    compute?.cpu_hours != null ? `${Number(compute.cpu_hours).toFixed(2)} CPU·h` : null,
+  ].filter(Boolean);
+  // Prefer the adapter's status verbatim (it distinguishes success from
+  // skipped/deferred runs); fall back to the boolean for older results.
+  const execText = exec
+    ? String(exec['status'] ?? (exec['succeeded'] ? 'succeeded' : 'failed'))
+    : 'not run locally (execution disabled)';
+
   return (
     <View style={styles.card}>
       <Text style={styles.cardTitle}>Summary</Text>
-      <Row label="Selected method" value={method?.name ? `${method.name} ${method.version ?? ''}`.trim() : '—'} />
-      <Row label="Estimated cost" value={plan?.['cost'] != null ? String(plan['cost']) : '—'} />
-      <Row
-        label="Execution"
-        value={exec ? (exec['succeeded'] ? 'succeeded' : 'failed') : 'not run locally (execution disabled)'}
-      />
+      <Row label="Selected method" value={methodText} />
+      <Row label="Estimated cost" value={costParts.length ? costParts.join(' + ') : '—'} />
+      <Row label="Execution" value={execText} />
       {!plan && (
         <Text style={styles.note}>
           No execution plan was produced (the run stopped before planning). The raw specs are below.

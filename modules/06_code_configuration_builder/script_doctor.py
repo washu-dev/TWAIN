@@ -164,7 +164,15 @@ produce a wrong result at run time -- for example: calling a library API with th
 wrong argument types or arity, using a model/dataset/parameter identifier that may \
 not exist, unit or array-shape mistakes, an uninitialized or undefined variable, a \
 resource blow-up (dense k-grid or huge cell in the main path), or logic that does \
-not actually compute {property}.
+not actually compute {property}. Flag SCIENTIFIC-CORRECTNESS defects too: a built \
+structure with the wrong stoichiometry or atom count, or physically impossible \
+geometry (atoms fused far below a bond length, a doubled or overlapping cell, a \
+wrong space-group setting or origin choice) -- flag these so the structure-building \
+code can be CORRECTED, not so a runtime guard can be added; \
+computing {property} at an unrelaxed geometry when it is only defined at \
+equilibrium; numerical settings far too coarse to converge {property} in the main \
+run; reporting a cheaper proxy that does not match the quantity or averaging scheme \
+{property} names; or a value reported without its physical unit.
 
 Do NOT report style, formatting, naming, or import-placement preferences. Only \
 report real, actionable bugs.
@@ -201,6 +209,16 @@ AttributeError), match the library's documented signature and types.
 - If a variable is undefined or the script looks truncated, complete the logic.
 - Do NOT hardcode physical constants, lattice parameters, or the expected answer; \
 build the system from the library's reference data and actually compute the value.
+- If the built structure is wrong (a previous attempt hallucinated the wrong cell, \
+stoichiometry, or space-group setting), OVERWRITE the structure-building code with a \
+correct version that builds the right cell (correct lattice parameters, Wyckoff \
+positions, and stoichiometric ratio for the formula). Do NOT add runtime guards that \
+raise or exit on an unexpected composition, atom count, or symmetry, and REMOVE any such \
+guard already present in the script -- fix the structure itself rather than halting on it.
+- If {property} needs an equilibrium structure, relax the geometry first; if the \
+numerical settings are too coarse, raise them to converged values; if the script \
+computes a proxy, replace it with the quantity {property} actually names, and report \
+the value with its physical unit.
 - Keep the same libraries, calculator, material, property, argparse flags \
 (--output and --smoke), and the JSON-to-stdout + CSV-to-output contract.
 - End the file with an `if __name__ == "__main__":` block that runs it. Output the \

@@ -168,12 +168,12 @@ def test_generate_threads_smoke_compute_into_prompt():
         return PYSCF_SCRIPT
 
     CodegenEngine().generate(_plan(), agent=agent, smoke_compute=True)
-    assert "run the ACTUAL" in seen["prompt"]           # exercise the real compute
+    assert "run the real" in seen["prompt"]             # exercise the real compute
     assert "Do NOT stub" in seen["prompt"]
 
     CodegenEngine().generate(_plan(), agent=agent, smoke_compute=False)
     assert "construct/load the calculator" in seen["prompt"]   # load-only
-    assert "run the ACTUAL" not in seen["prompt"]
+    assert "run the real" not in seen["prompt"]
 
 
 def test_build_chooses_smoke_compute_by_calculator_cost(tmp_path):
