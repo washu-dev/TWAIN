@@ -15,7 +15,7 @@ env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: twain-ecr
   ECS_CLUSTER: twain-cluster
-  ECS_SERVICE: twain-api
+  ECS_SERVICE: twain-washu
   ECS_TASK_DEFINITION: twain-api
   PYTHON_VERSION: '3.12'
 
