@@ -317,3 +317,35 @@ class TestCaptureArtifacts:
         assert "script" not in names
         assert kinds["run_bundle/main.py"] == "python"
         assert kinds["execution_plan"] == "json"
+
+    def test_nul_bytes_stripped_and_bad_upsert_does_not_abort(self, tmp_path):
+        # Binary outputs (e.g. a fetched .gpw file) carry NUL bytes, which
+        # Postgres TEXT rejects; they must be stripped and one failing upsert
+        # must not lose the remaining artifacts (like execution_result).
+        bundle = tmp_path / "run_bundle_x"
+        bundle.mkdir()
+        (bundle / "aaa.gpw").write_bytes(b"BIN\x00ARY\x00")
+        (bundle / "main.py").write_text("print('hi')")
+        result = tmp_path / "execution_result_x.json"
+        result.write_text('{"status": "success"}')
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                context=types.SimpleNamespace(
+                    artifacts={"run_bundle": str(bundle), "execution_result": str(result)}
+                )
+            )
+        )
+
+        class PickyDB(FakeDB):
+            def upsert_artifact(self, sid, name, content, kind):
+                assert "\x00" not in content  # sanitized before the DB sees it
+                if name.endswith("main.py"):
+                    raise RuntimeError("simulated db failure")
+                super().upsert_artifact(sid, name, content, kind)
+
+        db = PickyDB()
+        count = capture_artifacts(db, "s1", orch)
+        names = {a["name"] for a in db.artifacts}
+        assert count == 2  # gpw (sanitized) + execution_result; main.py skipped
+        assert "execution_result" in names
+        assert "run_bundle/aaa.gpw" in names

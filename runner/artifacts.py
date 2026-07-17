@@ -33,7 +33,19 @@ def _safe_read(path: str) -> str | None:
         return None
     if len(data) > MAX_BYTES:
         data = data[:MAX_BYTES] + "\n… [truncated]"
-    return data
+    # NUL is valid UTF-8 but Postgres TEXT rejects it ("string literal cannot
+    # contain NUL") — binary outputs (e.g. GPAW .gpw files) smuggle them in.
+    return data.replace("\x00", "")
+
+
+def _try_upsert(db, session_id: str, name: str, content: str, kind: str) -> bool:
+    """Upsert one artifact; a bad file must not lose the rest of the capture."""
+    try:
+        db.upsert_artifact(session_id, name, content, kind)
+        return True
+    except Exception as exc:  # noqa: BLE001 -- per-artifact best-effort
+        print(f"[runner] artifact {name!r} skipped for {session_id}: {exc}")
+        return False
 
 
 def capture_artifacts(db, session_id: str, orch) -> int:
@@ -41,7 +53,7 @@ def capture_artifacts(db, session_id: str, orch) -> int:
 
     ``run_bundle`` is a directory — each file inside is stored as
     ``run_bundle/<filename>``. ``script`` is skipped (it duplicates
-    run_bundle/main.py). Best-effort: unreadable files are skipped.
+    run_bundle/main.py). Best-effort: unreadable/unstorable files are skipped.
     """
     context = getattr(getattr(orch, "sm", None), "context", None)
     artifacts = dict(getattr(context, "artifacts", {}) or {})
@@ -55,12 +67,14 @@ def capture_artifacts(db, session_id: str, orch) -> int:
                 if not os.path.isfile(fpath):
                     continue
                 content = _safe_read(fpath)
-                if content is not None:
-                    db.upsert_artifact(session_id, f"{name}/{fname}", content, _kind(fname))
+                if content is not None and _try_upsert(
+                    db, session_id, f"{name}/{fname}", content, _kind(fname)
+                ):
                     saved += 1
         elif os.path.isfile(path):
             content = _safe_read(path)
-            if content is not None:
-                db.upsert_artifact(session_id, name, content, _kind(path))
+            if content is not None and _try_upsert(
+                db, session_id, name, content, _kind(path)
+            ):
                 saved += 1
     return saved

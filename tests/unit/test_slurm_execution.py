@@ -284,6 +284,34 @@ def test_payload_without_deps_or_smoke_is_bare_python(tmp_path):
     assert adapter._payload(bundle, install_deps=True, run_smoke=True) == "python3 main.py"
 
 
+def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
+    # env_pythons are tried in order at job start; only if none exists does the
+    # payload build a venv (which can't handle compiled calculators like GPAW).
+    adapter = _exec_adapter(
+        tmp_path, _happy_cluster_runner(),
+        env_pythons=["/envs/gpaw/bin/python", "/envs/default/bin/python"],
+    )
+    bundle = _bundle(tmp_path)
+    payload = adapter._payload(bundle, install_deps=True, run_smoke=True)
+    assert payload.startswith("set -e")
+    assert 'for CAND in /envs/gpaw/bin/python /envs/default/bin/python' in payload
+    assert '[ -x "$CAND" ]' in payload
+    assert "python3 -m venv .venv" in payload      # fallback still present
+    assert '"$PY" inline_tests.py' in payload
+    assert payload.rstrip().endswith('"$PY" main.py')
+
+
+def test_env_payload_without_requirements_falls_back_to_system_python(tmp_path):
+    adapter = _exec_adapter(
+        tmp_path, _happy_cluster_runner(), env_pythons=["/envs/xtb/bin/python"],
+    )
+    bundle = _bundle(tmp_path, with_requirements=False, with_smoke=False)
+    payload = adapter._payload(bundle, install_deps=True, run_smoke=True)
+    assert "venv" not in payload
+    assert 'PY="python3"' in payload
+    assert payload.rstrip().endswith('"$PY" main.py')
+
+
 def test_execute_reads_job_log_as_stdout(tmp_path):
     cluster = _happy_cluster_runner()
     adapter = _exec_adapter(tmp_path, cluster)
@@ -403,6 +431,24 @@ def test_build_slurm_adapter_uses_plan_request(machine, tmp_path):
     assert adapter.request.ram == 32 * 1024  # GB -> MB
     assert adapter.request.max_time == 90.0  # hours -> minutes
     assert adapter.workspace_root == str(tmp_path)
+
+
+def test_build_slurm_adapter_wires_env_candidates_from_profile(machine, tmp_path):
+    # calculator first, then tool_name, then the shared default env.
+    plan = {"selected_method": {"tool_name": "ASE", "calculator": "GPAW"},
+            "slurm_request": {"cpu_count": 4, "gpu_count": 0,
+                              "max_time": 0.5, "ram": 8}}
+    path = tmp_path / "execution_plan_seed.json"
+    path.write_text(json.dumps(plan))
+    machine.context.artifacts["execution_plan"] = str(path)
+
+    adapter = machine._build_slurm_adapter()
+    root = "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs"
+    assert adapter.env_pythons == [
+        f"{root}/gpaw/bin/python",
+        f"{root}/ase/bin/python",
+        f"{root}/default/bin/python",
+    ]
 
 
 def test_build_slurm_adapter_applies_ram_floor(machine, tmp_path):

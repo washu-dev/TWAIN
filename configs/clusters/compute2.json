@@ -12,6 +12,7 @@
   "gpu_modules": ["py-torch"],
   "gpu_type": null,
   "storage_root": "/storage2/fs1/mdan/Active/dtrc2026-workshop",
+  "envs_root": "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs",
   "default_partition": "general-cpu",
   "gpu_partition": "general-gpu",
   "short_partition": "general-short",

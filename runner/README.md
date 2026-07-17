@@ -174,6 +174,37 @@ The job builds its own venv from the bundle's `requirements.txt` (compute
 nodes have no TWAIN environment), and the smoke test runs first so a missing
 dependency fails in seconds instead of after a long queue wait.
 
+**Compiled calculators (GPAW, DFTB+) can't be pip-installed by the job** —
+GPAW needs libxc headers the compute nodes don't have. For those, provision a
+shared environment once under the profile's `envs_root`
+(`/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs` on compute2); the
+job automatically prefers `<envs_root>/<calculator>/bin/python` (then
+`<envs_root>/<tool>/`, then `<envs_root>/default/`) over building a venv.
+One-time setup on a login node (micromamba needs no modules or sudo):
+
+```bash
+ssh <wustl-key>@c2-login-001.ris.wustl.edu
+cd /storage2/fs1/mdan/Active/dtrc2026-workshop
+# standalone micromamba binary (no install)
+curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+  | tar -xj bin/micromamba
+# micromamba needs ABSOLUTE prefixes (-p): package post-link scripts fail on
+# relative ones. The nompi GPAW build avoids openmpi (TWAIN runs plain python).
+export MAMBA_ROOT_PREFIX=/storage2/fs1/mdan/Active/dtrc2026-workshop/.micromamba
+ROOT=/storage2/fs1/mdan/Active/dtrc2026-workshop
+# conda-forge ships prebuilt linux-64 GPAW with libxc included
+./bin/micromamba create -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
+  python=3.11 "gpaw=*=nompi*" ase numpy pandas pyyaml
+# optional shared fallback env for everything else
+./bin/micromamba create -y -p "$ROOT/twain-envs/default" -c conda-forge \
+  python=3.11 ase pymatgen xtb-python numpy pandas pyyaml
+# verify exactly the way the Slurm job invokes it (no activation):
+"$ROOT/twain-envs/gpaw/bin/python" -c "import gpaw, ase; print(gpaw.__version__)"
+```
+
+Env names are matched case-insensitively against the plan's calculator /
+tool name, so `twain-envs/gpaw` serves any plan that selects GPAW.
+
 Prerequisites and knobs:
 - WashU VPN (AnyConnect) + Duo, and an SSH key for the login node
   (`ssh <wustl-key>@c2-login-001.ris.wustl.edu` must work non-interactively).

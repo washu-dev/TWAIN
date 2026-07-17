@@ -1313,6 +1313,22 @@ class StateMachine:
                 )
             except (TypeError, ValueError):
                 request = None  # malformed plan request -> adapter default
+        # Pre-provisioned cluster envs: try <envs_root>/<calculator>/bin/python
+        # then <envs_root>/default/bin/python before falling back to a venv --
+        # compiled calculators (GPAW needs libxc) can't be pip-built on nodes.
+        env_pythons = []
+        if profile.envs_root:
+            method = plan.get("selected_method") or {}
+            names = []
+            for key in ("calculator", "tool_name"):
+                name = method.get(key)
+                if isinstance(name, str) and name.strip():
+                    name = name.strip().lower()
+                    if name not in names:
+                        names.append(name)
+            names.append("default")
+            env_pythons = [f"{profile.envs_root}/{n}/bin/python" for n in names]
+
         host = os.environ.get("TWAIN_SLURM_HOST")  # None => profile login node
         return SlurmExecutionAdapter(
             profile,
@@ -1320,6 +1336,7 @@ class StateMachine:
             host=host,
             user=os.environ.get("TWAIN_SLURM_USER"),
             workspace_root=str(self.artifacts_dir),
+            env_pythons=env_pythons,
         )
 
     def _confirm_heavy_execution(self) -> bool:

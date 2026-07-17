@@ -117,12 +117,19 @@ class SlurmExecutionAdapter:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         cluster_runner: Optional[Runner] = None,
         transfer_runner: Optional[Runner] = None,
+        env_pythons: Optional[List[str]] = None,
         sleep=None,
     ):
         """``cluster_runner`` executes sbatch/squeue/sacct (defaults to SSH to the
         profile's first login node, or locally when ``host`` is falsy -- i.e. the
         process already runs on a login node). ``transfer_runner`` executes the
-        rsync/ssh staging commands locally. Both are injectable for tests."""
+        rsync/ssh staging commands locally. Both are injectable for tests.
+
+        ``env_pythons`` lists pre-provisioned interpreters on cluster storage
+        (e.g. ``<envs_root>/gpaw/bin/python``), tried in order at job start;
+        the first that exists is used instead of building a venv -- required
+        for compiled calculators (GPAW needs libxc headers) that pip cannot
+        build on bare compute nodes."""
         self.profile = profile or ClusterProfile.load("compute2")
         # Default resource ask when the plan carries none: a small CPU job.
         self.request = request or SlurmRequest(
@@ -134,6 +141,7 @@ class SlurmExecutionAdapter:
         self.partition = partition
         self.max_wait = max_wait
         self.poll_interval = poll_interval
+        self.env_pythons = list(env_pythons or [])
         self._sleep = sleep
 
         if cluster_runner is None:
@@ -281,12 +289,17 @@ class SlurmExecutionAdapter:
     def _payload(self, local_dir, *, install_deps: bool, run_smoke: bool) -> str:
         """The shell payload the batch script runs inside the remote run dir.
 
-        Containers bring their own stack (pyxis mounts the run dir); otherwise a
-        venv from requirements.txt makes the job self-contained on compute nodes
-        that have no TWAIN environment. Smoke tests (inline_tests.py) run first
-        so a missing dependency fails in seconds, not after queueing the real run.
+        Containers bring their own stack (pyxis mounts the run dir). Otherwise
+        the job prefers a pre-provisioned environment from ``env_pythons``
+        (checked in order at runtime -- compiled calculators like GPAW can't be
+        pip-built on compute nodes), falling back to a venv from
+        requirements.txt. Smoke tests (inline_tests.py) run first so a missing
+        dependency fails in seconds, not after queueing the real run.
         """
         bundle = Path(local_dir)
+        if not self.container_image and self.env_pythons:
+            return self._env_payload(bundle, install_deps=install_deps,
+                                     run_smoke=run_smoke)
         steps: List[str] = []
         if self.container_image:
             python = "python3"
@@ -301,6 +314,37 @@ class SlurmExecutionAdapter:
             steps.append(f"{python} inline_tests.py")
         steps.append(f"{python} main.py")
         return " && ".join(steps)
+
+    def _env_payload(self, bundle: Path, *, install_deps: bool,
+                     run_smoke: bool) -> str:
+        """Multi-line payload: pick the first existing env python, else venv.
+
+        Existence is checked on the compute node at job start (``[ -x ... ]``)
+        because the adapter can't cheaply stat cluster storage from here.
+        ``set -e`` keeps the fail-fast behavior of the ``&&`` chain.
+        """
+        candidates = " ".join(shlex.quote(p) for p in self.env_pythons)
+        lines = [
+            "set -e",
+            'PY=""',
+            f"for CAND in {candidates}; do "
+            'if [ -x "$CAND" ]; then PY="$CAND"; break; fi; done',
+            'if [ -z "$PY" ]; then',
+        ]
+        if install_deps and (bundle / "requirements.txt").is_file():
+            lines += [
+                "  python3 -m venv .venv",
+                "  .venv/bin/python -m pip install -q --upgrade pip",
+                "  .venv/bin/python -m pip install -q -r requirements.txt",
+                '  PY=".venv/bin/python"',
+            ]
+        else:
+            lines.append('  PY="python3"')
+        lines.append("fi")
+        if run_smoke and (bundle / "inline_tests.py").is_file():
+            lines.append('"$PY" inline_tests.py')
+        lines.append('"$PY" main.py')
+        return "\n".join(lines)
 
     def _read_log(self, local_dir, job_name: str, job_id: str) -> str:
         path = Path(local_dir) / f"{job_name}-{job_id}.log"
