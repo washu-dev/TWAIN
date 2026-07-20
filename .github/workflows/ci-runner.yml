@@ -1,0 +1,110 @@
+name: Runner Service - Lint & Test
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'runner/**'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'runner/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: twain-runner-ecr
+  ECS_CLUSTER: twain-cluster
+  ECS_SERVICE: twain-runner
+  ECS_TASK_DEFINITION: twain-runner
+
+jobs:
+  quality:
+    name: Code Quality & Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        # Unit tests use in-memory fakes (no Postgres, no pixi engine); psycopg2
+        # is imported at module load, so the binary wheel is enough here.
+        run: pip install psycopg2-binary pytest ruff
+
+      - name: Lint — ruff
+        run: ruff check runner
+
+      - name: Unit tests
+        run: pytest runner/tests -v
+
+  # ── Deploy to ECS: build runner/Dockerfile from the repo ROOT → ECR → the
+  #    twain-runner service (linux-64, so the sim env ships GPAW → real DFT).
+  #    Prerequisites (one-time, see runner/README.md §Deploy): the ECR repo
+  #    `twain-runner-ecr`, the ECS service `twain-runner` on `twain-cluster`, the
+  #    Secrets Manager entries referenced by runner/ecs-task-definition.json, and
+  #    the AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY repo secrets.
+  deploy:
+    name: Deploy Runner → ECS
+    runs-on: ubuntu-latest
+    needs: quality
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        # The runner image bakes the full scientific pixi stack (GPAW, torch, …)
+        # and is large; reclaim runner disk so the build doesn't run out.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build context is the repo ROOT (the Dockerfile COPYs modules/, configs/,
+          # schemas/, twain_paths.py, …); the Dockerfile lives under runner/.
+          docker build -f runner/Dockerfile \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Render task definition with the new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: runner/ecs-task-definition.json
+          container-name: twain-runner
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true

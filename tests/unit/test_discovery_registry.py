@@ -147,7 +147,7 @@ class TestRegistryLoader:
         results = RegistryLoader().find_by_input_format("smiles")
         ids = {e.id for e in results}
         assert "rdkit" in ids
-        assert "deepchem" in ids
+        assert "openbabel" in ids
 
     def test_cache_returns_same_object(self, tmp_path, registry_dict):
         path = tmp_path / "registry.json"

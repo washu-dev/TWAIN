@@ -8,6 +8,7 @@ class State(Enum):
     DISCOVER = auto()
     PLAN = auto();
     BUILD = auto();
+    REPAIR = auto();
     EXECUTE = auto();
     INTERPRET = auto()
     VALIDATE = auto();

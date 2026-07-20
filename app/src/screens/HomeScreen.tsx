@@ -7,12 +7,14 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { Header, Footer, TileButton, MessageModal } from '@/components';
 import { APP_STRINGS, Spacing } from '@/constants/theme';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/auth/AuthProvider';
 
 export const HomeScreen: React.FC = () => {
+  const router = useRouter();
   const { isAuthenticated, account, login, logout } = useAuth();
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
@@ -79,7 +81,7 @@ export const HomeScreen: React.FC = () => {
           title={APP_STRINGS.startSimulation}
           description={APP_STRINGS.startSimulationDesc}
           accentColor="#BA0C2F"
-          onPress={() => showModal(APP_STRINGS.startSimulation, ['Coming soon.'])}
+          onPress={() => router.push('/chat')}
         />
 
         <TileButton
@@ -93,7 +95,7 @@ export const HomeScreen: React.FC = () => {
           title={APP_STRINGS.browse}
           description={APP_STRINGS.browseDesc}
           accentColor="#BA0C2F"
-          onPress={() => showModal(APP_STRINGS.browse, ['Coming soon.'])}
+          onPress={() => router.push('/browse')}
         />
 
         {loading && (

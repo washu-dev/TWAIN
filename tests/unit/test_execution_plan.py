@@ -245,6 +245,22 @@ class TestExecutionPlan:
 # --------------------------------------------------------------------------- #
 class TestRoundTrip:
     def test_asdict_roundtrips_example(self, example_dict):
-        """asdict() of a plan built from the example reproduces the example."""
+        """asdict() of a plan built from the example reproduces every field the
+        example specifies. The plan also carries optional calculator/material
+        fields (added for calculator-driven runs like a DFT band gap); when the
+        example omits them they round-trip as None."""
         plan = ExecutionPlan(**example_dict)
-        assert asdict(plan) == example_dict
+        dumped = asdict(plan)
+        for key, value in example_dict.items():
+            if key == "selected_method":
+                for sub_key, sub_value in value.items():
+                    assert dumped[key][sub_key] == sub_value
+            else:
+                assert dumped[key] == value
+        # Optional additions default to None / empty when unset.
+        assert dumped["selected_method"]["calculator"] is None
+        assert dumped["selected_method"]["calculator_import"] is None
+        assert dumped["selected_method"]["calculator_library"] is None
+        assert dumped["selected_method"]["libraries"] == []
+        assert dumped["target_system"] is None
+        assert dumped["requested_property"] is None

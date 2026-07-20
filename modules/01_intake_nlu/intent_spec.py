@@ -1,11 +1,17 @@
 import doctest
 from dataclasses import dataclass,field
 from enum import Enum
-from typing import List, Dict, Union
+from typing import List, Dict, Optional, Union
 
 class Domain(str, Enum):
     MATERIALS = "materials"
     QUANTUM = "quantum"
+
+# Allowed system-representation discriminators. A discrete molecule is described
+# by a SMILES; a periodic solid (bulk crystal or a surface/slab of one) is
+# described by a formula + polymorph/structure -- SMILES cannot encode a
+# periodic lattice, so the two representations are kept distinct.
+SYSTEM_KINDS = ("molecule", "crystal", "surface")
 
 @dataclass
 class Molecule:
@@ -18,16 +24,61 @@ class Molecule:
             raise ValueError("Molecule SMILES must be of type str")
 
 @dataclass
+class Crystal:
+    """A periodic solid (bulk crystal or surface/slab).
+
+    Only ``formula`` is required; the remaining fields pin the polymorph and the
+    structure source when they are known. ``phase`` names the polymorph (which
+    crystalline form, for a compound that has several), and exactly one of
+    ``mp_id`` / ``cif`` / ``space_group`` (+ ``crystal_system``) is enough to
+    resolve an unambiguous structure. These
+    field names mirror what the code-configuration builder already reads.
+    """
+    formula: str
+    name: Optional[str] = None
+    phase: Optional[str] = None
+    crystal_system: Optional[str] = None
+    space_group: Optional[str] = None
+    space_group_number: Optional[int] = None
+    mp_id: Optional[str] = None
+    cif: Optional[str] = None
+    def __post_init__(self):
+        if not self.formula or type(self.formula) is not str:
+            raise ValueError("Crystal formula must be a non-empty str")
+
+@dataclass
 class SystemDescriptors:
-    molecule: Union[Molecule,dict]
-    formula:str
+    """The physical system, described as EITHER a molecule OR a crystal.
+
+    ``formula`` is always present. Molecular systems carry a ``molecule``
+    (SMILES); periodic solids carry a ``crystal``. ``kind`` is the explicit
+    discriminator -- inferred from whichever sub-object is present when omitted.
+    """
+    formula: str
+    molecule: Optional[Union[Molecule, dict]] = None
+    crystal: Optional[Union[Crystal, dict]] = None
+    kind: Optional[str] = None
     def __post_init__(self):
         if self.formula is None or type(self.formula) is not str:
             raise ValueError("Formula must be of type str")
-        if type(self.molecule) is dict:
-            self.molecule = Molecule(**self.molecule)
-        elif type(self.molecule) is not Molecule:
-            raise ValueError("Molecule must be of type Molecule or dict")
+        if self.molecule is not None:
+            if type(self.molecule) is dict:
+                self.molecule = Molecule(**self.molecule)
+            elif type(self.molecule) is not Molecule:
+                raise ValueError("Molecule must be of type Molecule or dict")
+        if self.crystal is not None:
+            if type(self.crystal) is dict:
+                self.crystal = Crystal(**self.crystal)
+            elif type(self.crystal) is not Crystal:
+                raise ValueError("Crystal must be of type Crystal or dict")
+        if self.molecule is None and self.crystal is None:
+            raise ValueError("System descriptors must include a molecule or a crystal")
+        # Infer the discriminator from the populated sub-object, or validate an
+        # explicit one. A crystal wins if somehow both are supplied.
+        if self.kind is None:
+            self.kind = "crystal" if self.crystal is not None else "molecule"
+        elif self.kind not in SYSTEM_KINDS:
+            raise ValueError(f"kind must be one of {SYSTEM_KINDS}")
 
 @dataclass
 class AcceptanceCriterion:

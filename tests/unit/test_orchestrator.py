@@ -49,7 +49,7 @@ HAPPY = dict(clarified=True, plan_approved=True, execution_status=True,
              validation_result="accepted")
 
 HANDLER_NAMES = ["intake", "clarify", "decompose", "discover", "plan", "build",
-                 "execute", "interpret", "validate", "accept"]
+                 "repair", "execute", "interpret", "validate", "accept"]
 
 # A valid, already-confident IntentSpec the fake LLM returns. Confidence is above
 # the StateMachine's 0.8 threshold so clarify() needs no follow-up questions.
@@ -197,8 +197,9 @@ class TestDrivesStateMachine:
     def test_reaches_terminate_with_expected_transition_count(self, env):
         o = build(env, "count")
         o.run()
-        # INTAKE->CLARIFY->...->ACCEPT->TERMINATE is 10 transitions.
-        assert o.run_session.transition_count == 10
+        # INTAKE->CLARIFY->...->BUILD->REPAIR->EXECUTE->...->ACCEPT->TERMINATE
+        # is 11 transitions.
+        assert o.run_session.transition_count == 11
         assert o.run_session.get_state() == State.TERMINATE
 
     def test_no_notification_and_events_published(self, env):
@@ -207,8 +208,8 @@ class TestDrivesStateMachine:
         assert env["notes"] == []
         types = env["bus"].types()
         assert "run.started" in types and "run.completed" in types
-        assert types.count("stage.started") == 10
-        assert types.count("stage.completed") == 10
+        assert types.count("stage.started") == 11
+        assert types.count("stage.completed") == 11
 
     def test_provenance_records_mapped_stages(self, env):
         o = build(env, "prov")
@@ -484,3 +485,48 @@ class TestErrorClassifier:
         assert "do next" in msg
         assert "fallback" in msg
         assert "EXECUTE" in msg
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Local execution wiring (Story 5.2): the orchestrator forwards the flag to the
+# StateMachine it builds, and demo() enables it by default.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestLocalExecutionWiring:
+    def test_orchestrator_forwards_execute_locally(self, env):
+        o = build(env, "exec-on", execute_locally=True, execute_install_deps=True)
+        assert o.sm.execute_locally is True
+        assert o.sm.execute_install_deps is True
+
+    def test_default_is_off(self, env):
+        o = build(env, "exec-off")
+        assert o.sm.execute_locally is False
+
+    def test_demo_enables_local_execution(self, monkeypatch):
+        # demo() opts into local execution by default (the user's entry point).
+        # Patch __init__ + the eagerly-built Store/EventBus so no real DB/log is
+        # touched; just assert the kwarg demo forwards.
+        import event_bus as eb_mod
+        import orchestrator as orch_mod
+
+        captured = {}
+        monkeypatch.setattr(orch_mod.Orchestrator, "__init__",
+                            lambda self, *a, **k: captured.update(k) or None)
+        monkeypatch.setattr(orch_mod, "Store", lambda *a, **k: None)
+        monkeypatch.setattr(eb_mod, "EventBus", lambda *a, **k: None)
+
+        orch_mod.Orchestrator.demo(session_id="demo-exec")
+        assert captured.get("execute_locally") is True
+
+    def test_demo_allows_override(self, monkeypatch):
+        import event_bus as eb_mod
+        import orchestrator as orch_mod
+
+        captured = {}
+        monkeypatch.setattr(orch_mod.Orchestrator, "__init__",
+                            lambda self, *a, **k: captured.update(k) or None)
+        monkeypatch.setattr(orch_mod, "Store", lambda *a, **k: None)
+        monkeypatch.setattr(eb_mod, "EventBus", lambda *a, **k: None)
+
+        orch_mod.Orchestrator.demo(session_id="d", execute_locally=False)
+        assert captured.get("execute_locally") is False

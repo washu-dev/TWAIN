@@ -10,9 +10,9 @@
 ## Project Status: Pre-Implementation Discovery Phase ✓
 
 ### What's In Place
-- ✅ Architecture design document (`docs/architecture/domain-neutral-agentic-pipeline.md`)
+- ✅ Architecture design document (`../architecture/domain-neutral-agentic-pipeline.md`)
 - ✅ Module hierarchy folders (16 modules, `modules/*/`)
-- ✅ Initial backlog (`docs/backlog/initial-backlog.md`)
+- ✅ Initial backlog (`../backlog/initial-backlog.md`)
 - ✅ Contract-first design philosophy
 - ✅ Guiding principles (domain-neutral, human-in-loop, reproducible)
 
@@ -207,7 +207,7 @@
 
 ## Detailed Backlog
 
-See: **`docs/backlog/DETAILED_BACKLOG.md`** for:
+See: **`../backlog/DETAILED_BACKLOG.md`** for:
 - All 40+ user stories with acceptance criteria
 - Effort estimates (S/M/L/XL)
 - Dependencies and blocking relationships
@@ -343,7 +343,7 @@ See: **`docs/backlog/DETAILED_BACKLOG.md`** for:
 ### This Week (Developer Kickoff)
 
 1. **Team Meeting** (1 hour)
-   - Review architecture (`REVIEW.md`, `docs/architecture/`)
+   - Review architecture (`REVIEW.md`, `../architecture/`)
    - Confirm Epic 1 schema design (finalize contract structure)
    - Assign Phase 1 lead (senior engineer)
 
@@ -458,9 +458,9 @@ TWAIN is a **well-architected, domain-neutral agentic platform** ready for imple
 
 ## Document Cross-References
 
-- **Architecture**: `docs/architecture/domain-neutral-agentic-pipeline.md`
-- **Detailed Backlog**: `docs/backlog/DETAILED_BACKLOG.md`
-- **Pipeline Diagrams**: `docs/architecture/pipeline_flow_diagram.md`
+- **Architecture**: `../architecture/domain-neutral-agentic-pipeline.md`
+- **Detailed Backlog**: `../backlog/DETAILED_BACKLOG.md`
+- **Pipeline Diagrams**: `../architecture/pipeline_flow_diagram.md`
 - **This Project Review**: `REVIEW.md`
 - **Module Hierarchy**: `modules/README.md`
 - **Existing Drawio Diagram**: `TWAIN_Architecture.drawio` (review + update recommended)

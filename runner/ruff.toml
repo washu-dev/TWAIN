@@ -1,0 +1,14 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = ["E", "W", "F", "I", "S", "B", "UP"]
+ignore = [
+  "S101",  # asserts (tests)
+  "S105",  # false-positive "passwords" in env var names
+  "S106",
+  "S608",  # SQL built from constants with parameterized values
+]
+
+[lint.per-file-ignores]
+"tests/*.py" = ["S", "E501"]

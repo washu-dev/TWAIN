@@ -7,6 +7,20 @@ version = "0.1.0"
 
 [tasks]
 test = "pytest tests/"
+runner = "python -m runner.runner"
+dev = "bash dev.sh"
+# Fetch the DFTB+ Slater-Koster (.skf) parameter files into <repo>/slako/ (see
+# runner/fetch_slako.sh). Not committed (CC-BY-SA data); run once after checkout.
+fetch-slako = "bash runner/fetch_slako.sh"
+
+# DFTB+ finds its Slater-Koster parameter files via DFTB_PREFIX. Point it at the
+# repo-anchored slako/ dir (populated by `pixi run fetch-slako`). This workspace
+# block covers the DEFAULT env -- the runner runs there (`pixi run python -m
+# runner.runner`) and passes its environment down to the sim subprocess it spawns.
+# The sim env excludes the default feature (no-default-feature), so it needs its
+# own copy below. $PIXI_PROJECT_ROOT stays correct locally and in the /app image.
+[activation.env]
+DFTB_PREFIX = "$PIXI_PROJECT_ROOT/slako/"
 
 [dependencies]
 python = "3.12.*"
@@ -14,10 +28,115 @@ jsonschema = "*"
 pytest = "*"
 python-dotenv = ">=1.2.2,<2"
 requests = ">=2.34.2,<3"
+pymatgen = ">=2026.5.4,<2027"
+psutil = ">=7.2.2,<8"
+ase = ">=3.29.0,<4"
+# Runner service (web UI): shared Postgres access + Secrets Manager in AWS.
+psycopg2 = ">=2.9,<3"
+boto3 = ">=1.34"
+# API service (api/): FastAPI backend the web app talks to. pydantic rides in
+# with fastapi; cryptography provides PyJWT's [crypto] extra; httpx backs
+# fastapi.testclient in the api tests.
+fastapi = ">=0.115"
+uvicorn = ">=0.34"
+pyjwt = ">=2.10,<3"
+cryptography = "*"
+httpx = "*"
+pytest-cov = "*"
+
+# Preset scientific libraries -- the method-discovery "toolset". These are the
+# driver/analysis libraries the discovery registry (configs/discovery_registry.json)
+# picks from. They live in the default env so a plain library run resolves on the
+# default interpreter, and are mirrored into [feature.sim.dependencies] for
+# calculator runs. Discovery grounds every pick against what is importable here,
+# so the registry stays == what is actually installed.
+rdkit = "*"
+pyscf = "*"
+psi4 = "*"
+xtb-python = "*"
+openmm = "*"
+openff-toolkit = "*"
+scikit-learn = "*"
+mdanalysis = "*"
+mdtraj = "*"
+openbabel = "*"
+matminer = "*"
+dscribe = "*"
+phonopy = "*"
+spglib = "*"
+quacc = "*"
 
 # Per-workstream features: branches add their own dependencies here as needed,
-# e.g. [feature.sim.dependencies] ase/pymatgen for Benchmark,
-# [feature.workflows.dependencies] quacc/jobflow for WorkflowManagers.
+# e.g. [feature.workflows.dependencies] quacc/jobflow for WorkflowManagers.
+
+# Heavy calculator-execution stack, isolated on Python 3.11 (GPAW/DFTB+ have no
+# py3.12 conda builds) and kept separate from the default 3.12 env. Generated
+# RunBundles execute here:
+#   pixi run -e sim python <bundle>/main.py
+#   pixi run -e sim python modules/07_runtime_orchestrator/orchestrator.py
+# DFTB+ builds for BOTH linux-64 and osx-arm64, so a real band gap can be run on
+# a Mac too (it needs Slater-Koster parameter files -- see runner/README or set
+# DFTB_PREFIX). GPAW (full DFT) has no Apple-Silicon build, so it's scoped to
+# linux-64; discovery already picks DFTB+ on macOS and GPAW on Linux.
+[feature.sim]
+platforms = ["linux-64", "osx-arm64"]
+
+# The sim env is no-default-feature, so it doesn't inherit the workspace
+# [activation.env]; give it its own DFTB_PREFIX so a direct
+# `pixi run -e sim python <bundle>/main.py` finds the .skf files.
+[feature.sim.activation.env]
+DFTB_PREFIX = "$PIXI_PROJECT_ROOT/slako/"
+
+[feature.sim.dependencies]
+python = "3.11.*"
+dftbplus = "*"
+ase = "*"
+pandas = "*"
+pyyaml = "*"
+# So the whole pipeline can be driven under `-e sim` for a real run:
+jsonschema = "*"
+python-dotenv = ">=1.2.2,<2"
+requests = ">=2.34.2,<3"
+psutil = ">=7.2.2,<8"
+mdanalysis = ">=2.10.0,<3"
+mdtraj = ">=1.11.1,<2"
+openbabel = ">=3.1.1,<4"
+matminer = ">=0.10.1,<0.11"
+dscribe = ">=2.1.2,<3"
+phonopy = ">=4.3.1,<5"
+spglib = ">=2.7.0,<3"
+quacc = ">=1.3.2,<2"
+nwchem = ">=7.3.1,<8"
+# tblite (0.3.x C library) is a transitive dependency of dftbplus. Its 0.6.x
+# python bindings (tblite-python) can't coexist here -- dftbplus pins tblite
+# <0.4, and tblite-python 0.6 has no py3.11 build -- so the semiempirical
+# tight-binding CALCULATOR is provided by xtb-python's ASE interface instead.
+tblite = ">=0.3.0,<0.4"
+matgl = ">=3.0.3,<4"
+chgnet = ">=0.4.2,<0.5"
+# Preset scientific libraries, mirrored from the default env so a calculator run
+# in this env can also use them as drivers. (pyscf has no py3.11 osx-arm64 build,
+# so it lives in the default 3.12 env only -- plain pyscf runs execute there.)
+rdkit = "*"
+psi4 = "*"
+xtb-python = "*"
+openmm = "*"
+openff-toolkit = "*"
+
+# Full-DFT GPAW only where it has a build (the Linux runner).
+[feature.sim.target.linux-64.dependencies]
+gpaw = "*"
+# In-process DFT-D3 dispersion (simple-dftd3 Python bindings). Exposes an ASE
+# calculator at `dftd3.ase.DFTD3` that runs IN-PROCESS -- unlike
+# `ase.calculators.dftd3.DFTD3`, which shells out to an external `dftd3` binary
+# that conda-forge doesn't ship (a missing-binary crash we hit on a GPAW run).
+# Lets a generated GPAW/DFTB+ run add a dispersion correction (useful for vdW-bound
+# molecular crystals). linux-64 only: the runner platform where GPAW executes, and
+# this avoids gating the osx-arm64 solve.
+dftd3-python = "*"
 
 [environments]
 default = []
+# Isolated 3.11 calculator stack; the default 3.12 env keeps its exact deps
+# untouched. Runnable on both linux-64 (GPAW + DFTB+) and osx-arm64 (DFTB+).
+sim = { features = ["sim"], no-default-feature = true }

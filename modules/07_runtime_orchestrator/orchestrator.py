@@ -51,7 +51,7 @@ from session import Session, RunSession, RunStatus
 from store import Store
 from provenance_memory import event_log
 from budget_tracker import (
-    Budget_Tracker, ProjectBudget, RunBudget,
+    BudgetTracker, ProjectBudget, RunBudget,
     OverBudget, OverMaxIterations, OverMaxWallTime,
 )
 from retry_policy import (
@@ -111,13 +111,17 @@ class Orchestrator:
         max_replans: int = 3,
         max_corrections: int = 3,
         max_transitions: int = 100,
-        budget_tracker: Optional[Budget_Tracker] = None,
+        budget_tracker: Optional[BudgetTracker] = None,
         run_max_cost: float = 1.0,
         run_max_iterations: int = 50,
         run_wall_time_minutes: int = 30,
         circuit_breaker_max_errors: int = 5,
         circuit_breaker_window: int = 60,
         circuit_breaker_cooldown: int = 300,
+        execute_locally: bool = False,
+        execute_install_deps: bool = False,
+        verify_codegen: bool = False,
+        auto_approve: bool = False,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -139,7 +143,7 @@ class Orchestrator:
         )
 
         # ---- budget tracking ------------------------------------------------
-        self.budget_tracker = budget_tracker or Budget_Tracker()
+        self.budget_tracker = budget_tracker or BudgetTracker()
         self.run_budget = RunBudget(
             max_cost=run_max_cost,
             max_iterations=run_max_iterations,
@@ -177,6 +181,19 @@ class Orchestrator:
             agent=agent,
             ask=ask,
             artifacts_dir=sm_artifacts_dir,
+            # Wire local execution (Story 5.2): when enabled, the EXECUTE stage
+            # actually runs the RunBundle built in BUILD. Off by default so
+            # injected/seeded test machines keep EXECUTE a no-op.
+            execute_locally=execute_locally,
+            execute_install_deps=execute_install_deps,
+            # Verify LLM-synthesized calculator scripts (run --smoke in the sim env
+            # and repair real failures) before handing them off. Best-effort:
+            # degrades to a compile-only check when the env/network can't verify.
+            verify_codegen=verify_codegen,
+            # Unattended mode: skip the heavy-calculation confirmation prompt so a
+            # run reaches completion without human input (see the runner's
+            # TWAIN_AUTO_RUN). The plan-approval gate is enforced by the driver.
+            auto_approve=auto_approve,
         )
 
         if resuming:
@@ -400,11 +417,13 @@ class Orchestrator:
             self.run_session.transition_count += 1
             self._provenance(state)
 
-            # 3) bound replan/correct cycles
+            # 3) bound replan/correct cycles. Attribute a trip to the state we
+            #    just entered (the REPLAN/CORRECT we're now parked in), not the
+            #    pre-step state, so the notification names the right stage.
             try:
                 self._apply_loop_bounds(entered)
             except Exception as exc:  # noqa: BLE001
-                return self._handle_error(exc, state)
+                return self._handle_error(exc, entered)
 
             # 4) checkpoint the new good state + budget, then announce the transition
             self._write_budget_artifact()
@@ -432,8 +451,15 @@ class Orchestrator:
         The seed lets the stub handlers clear their guards so the run reaches
         TERMINATE today; as handlers gain logic that sets ``clarified`` /
         ``plan_approved`` / ... themselves, the seed becomes unnecessary.
+
+        Local execution is enabled by default here (Story 5.2), so a real run
+        actually executes the RunBundle built in BUILD and records an
+        ``execution_result`` artifact. Callers may override via kwargs.
         """
         from event_bus import EventBus
+        kwargs.setdefault("execute_locally", True)
+        # Real runs verify+repair generated calculator scripts before handoff.
+        kwargs.setdefault("verify_codegen", True)
         return cls(
             session_id=session_id,
             researcher_id="demo@twain.local",
@@ -446,6 +472,12 @@ class Orchestrator:
 
 def _main(argv=None) -> int:
     import argparse
+    import logging
+
+    # CLI entrypoint: surface the pipeline's INFO-level progress (the stage
+    # ``[clarify]``/``[repair]``/``[execute]`` lines) as plain messages. Kept out
+    # of import-time so library/embedded use doesn't touch the root logger config.
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     parser = argparse.ArgumentParser(
         description="Drive the TWAIN StateMachine end to end (Story 5.3). "
@@ -457,6 +489,15 @@ def _main(argv=None) -> int:
         help="Resume the run with this id (from logs/sessions/<id>.json or the "
              "session store). Omit to start a new run.",
     )
+    parser.add_argument(
+        "--no-execute", action="store_true",
+        help="skip local execution of the RunBundle (BUILD still generates it)",
+    )
+    parser.add_argument(
+        "--install-deps", action="store_true",
+        help="build a venv and pip-install the bundle's requirements before running "
+             "(needed when the selected tool isn't already importable)",
+    )
     args = parser.parse_args(argv)
 
     if args.session_id and Session.exists(args.session_id):
@@ -466,7 +507,11 @@ def _main(argv=None) -> int:
     else:
         print("▶ starting a new run (driving StateMachine)")
 
-    orch = Orchestrator.demo(session_id=args.session_id)
+    orch = Orchestrator.demo(
+        session_id=args.session_id,
+        execute_locally=not args.no_execute,
+        execute_install_deps=args.install_deps,
+    )
     status = orch.run()
     rs = orch.run_session
     print(f"\n■ run {orch.session_id} finished: {status.value}")

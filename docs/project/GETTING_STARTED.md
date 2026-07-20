@@ -45,20 +45,20 @@ Architecture designed ✓, backlog detailed ✓, ready for implementation.
   - Risk mitigation
   - Module descriptions
 
-- **Detailed diagrams**: [`docs/architecture/pipeline_flow_diagram.md`](docs/architecture/pipeline_flow_diagram.md)
+- **Detailed diagrams**: [`../architecture/pipeline_flow_diagram.md`](../architecture/pipeline_flow_diagram.md)
   - Complete dataflow diagram
   - Module interaction matrix
   - State machine
   - Contract sequence diagrams
   - Error recovery paths
 
-- **Original architecture**: [`docs/architecture/domain-neutral-agentic-pipeline.md`](docs/architecture/domain-neutral-agentic-pipeline.md)
+- **Original architecture**: [`../architecture/domain-neutral-agentic-pipeline.md`](../architecture/domain-neutral-agentic-pipeline.md)
   - High-level design principles
   - Data contracts overview
   - Non-functional requirements
 
 ### Implementation (1–2 hour read)
-- **Detailed backlog**: [`docs/backlog/DETAILED_BACKLOG.md`](docs/backlog/DETAILED_BACKLOG.md)
+- **Detailed backlog**: [`../backlog/DETAILED_BACKLOG.md`](../backlog/DETAILED_BACKLOG.md)
   - 40+ user stories (Epic 1–8)
   - Acceptance criteria per story
   - Effort estimates (S/M/L/XL)
@@ -94,7 +94,7 @@ Architecture designed ✓, backlog detailed ✓, ready for implementation.
 ### I'm a Tech Lead / Architect
 1. Read: `PROJECT_SUMMARY.md` (2 min)
 2. Read: `REVIEW.md` sections "Architecture Validation" + "Key Design Decisions" (15 min)
-3. Review: `docs/architecture/pipeline_flow_diagram.md` (20 min)
+3. Review: `../architecture/pipeline_flow_diagram.md` (20 min)
 4. Deep dive: `DETAILED_BACKLOG.md` Epic 1 + Epic 2 stories (30 min)
 5. Action: Schedule design review; confirm or propose alternative architectural decisions
 
@@ -104,7 +104,7 @@ Architecture designed ✓, backlog detailed ✓, ready for implementation.
 
 ### I'm a Back-End Engineer (Start Here)
 1. Read: `PROJECT_SUMMARY.md` (2 min)
-2. Review: `docs/architecture/pipeline_flow_diagram.md` (15 min) — understand module interactions
+2. Review: `../architecture/pipeline_flow_diagram.md` (15 min) — understand module interactions
 3. Read: `REVIEW.md` section "Module Dependency Graph & Staging" (5 min) — understand critical path
 4. Assign to you: Story from `DETAILED_BACKLOG.md` (Epic 1 or 2)
 5. Deep dive: Acceptance criteria for your assigned story
@@ -232,7 +232,7 @@ TWAIN/
    - Recommended: Token budget + iteration cap (e.g., max 5 corrections)
    - Alternatives: Compute time budget, per-month ceiling
 
-**Action**: Schedule 1-hour design review with tech team → document decisions in `docs/decisions/01_architecture_decisions.md`
+**Action**: Schedule 1-hour design review with tech team → document decisions in `../decisions/01_architecture_decisions.md`
 
 ---
 
@@ -253,7 +253,7 @@ TWAIN/
 - [ ] Create: Asana or Linear project board
 - [ ] Setup: GitHub Actions for CI/CD
 - [ ] Create: `tests/contract/` test skeleton
-- [ ] Create: `docs/decisions/01_architecture_decisions.md` (record decisions)
+- [ ] Create: `../decisions/01_architecture_decisions.md` (record decisions)
 
 ### Weeks 1–2: Phase 1 Implementation
 - [ ] Write: 12 JSON Schema files (6 core + 6 supporting)
