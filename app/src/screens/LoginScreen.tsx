@@ -8,11 +8,13 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { APP_STRINGS, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 
 export const LoginScreen: React.FC = () => {
   const { signIn } = useAuth();
+  const router = useRouter();
   const [email, setEmail] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -37,6 +39,13 @@ export const LoginScreen: React.FC = () => {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.card}>
+        <TouchableOpacity
+          onPress={() => router.replace('/')}
+          accessibilityRole="link"
+          accessibilityLabel={APP_STRINGS.loginBackToHome}
+        >
+          <Text style={styles.backLink}>{APP_STRINGS.loginBackToHome}</Text>
+        </TouchableOpacity>
         <Text style={styles.title}>{APP_STRINGS.appTitle}</Text>
         <Text style={styles.subtitle}>{APP_STRINGS.loginPrompt}</Text>
 
@@ -91,6 +100,11 @@ const styles = StyleSheet.create({
     borderTopColor: '#BA0C2F',
     padding: Spacing.four,
     gap: Spacing.three,
+  },
+  backLink: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#5A5A5A',
   },
   title: {
     fontSize: 28,

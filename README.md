@@ -8,7 +8,7 @@ built or executed.
 ## Architecture (local dev)
 
 ```
-Browser (localhost:8081)
+Browser (localhost:3001)
    │ HTTP
    ▼
 Web app (Expo, app/) ──► API (FastAPI, api/, :8000) ──► Postgres (:5432, Docker)
@@ -34,7 +34,7 @@ Postgres, which the app renders.
 This starts everything: Postgres (a native server if `psql` can reach one,
 otherwise the `twain-pg` Docker container — created on first run, with Colima
 started automatically on macOS), the API on :8000 (auth disabled for dev), the
-runner (with real execution enabled), and the web app on :8081. First run also
+runner (with real execution enabled), and the web app on :3001. First run also
 applies DB migrations and installs API/app/pixi dependencies. Ctrl-C stops
 everything together.
 
@@ -54,7 +54,7 @@ Prerequisites:
   `CLIENT_SECRET`) and the WUSTL VPN — the runner needs both to reach the LLM
   gateway
 
-Then open <http://localhost:8081>, describe a simulation, wait ~30 s for the
+Then open <http://localhost:3001>, describe a simulation, wait ~30 s for the
 proposed execution plan, and hit **Approve & run**. If a conversation seems
 idle, check whether it is waiting on your approval before re-prompting — every
 prompt starts a new run, and the runner processes them one at a time.
@@ -85,10 +85,10 @@ export DB_HOST=localhost DB_PORT=5432 DB_NAME=twaindb DB_USER=postgres DB_PASSWO
 TWAIN_EXECUTE_LOCALLY=1 pixi run python -m runner.runner
 ```
 
-**Terminal 3 — web app** (port 8081):
+**Terminal 3 — web app** (port 3001):
 
 ```bash
-cd app && npm run start
+cd app && npm run web
 ```
 
 ## Configuration flags

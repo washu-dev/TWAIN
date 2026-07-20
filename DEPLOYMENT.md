@@ -59,7 +59,7 @@ creds. Everything below is copy-paste.
 cp .env.example .env          # fill API_KEY / CLIENT_ID / CLIENT_SECRET
 ./dev.sh                      # DB + API + runner + app on localhost
 ```
-Open http://localhost:8081, start a simulation, approve the plan, see it run.
+Open http://localhost:3001, start a simulation, approve the plan, see it run.
 This exercises the exact same code that runs in cloud. `make preflight` verifies
 local config.
 

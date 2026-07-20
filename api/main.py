@@ -52,8 +52,8 @@ app = FastAPI(title="TWAIN API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8081",
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://localhost:3002",
         "https://d1z5umg4xc2bl8.cloudfront.net",
     ],

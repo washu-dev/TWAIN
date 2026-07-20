@@ -13,7 +13,7 @@ import { APP_STRINGS, Spacing } from '@/constants/theme';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
 
-export const HomeScreen: React.FC = () => {
+export const DashboardScreen: React.FC = () => {
   const router = useRouter();
   const { signOut } = useAuth();
   const [loading, setLoading] = useState(false);

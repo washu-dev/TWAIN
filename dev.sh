@@ -157,7 +157,7 @@ fi
 
 # ── 7. Web app ────────────────────────────────────────────────────────────────
 if [ "$RUN_APP" = 1 ]; then
-  info "Web app    → http://localhost:8081"
+  info "Web app    → http://localhost:3001"
   # EXPO_PUBLIC_AUTH_DISABLED mirrors the API's AUTH_DISABLED so local dev skips
   # the interim login screen (the API injects a dev user regardless).
   ( cd app && EXPO_PUBLIC_API_BASE_URL="http://localhost:$API_PORT" \

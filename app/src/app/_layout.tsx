@@ -17,10 +17,16 @@ function RootNavigator() {
         },
       }}
     >
-      {/* Authenticated app routes. Expo Router removes these from the navigator
-          when the guard is false and redirects to the only remaining screen. */}
+      {/* Always-present anchor. Expo Router redirects to it whenever a guarded
+          screen is removed, so it is where both auth states land: index renders
+          the public landing page when signed out and redirects to /dashboard
+          when signed in (see app/index.tsx). */}
+      <Stack.Screen name="index" options={{ title: 'TWAIN' }} />
+
+      {/* Authenticated app routes. Removed from the navigator when the guard is
+          false, so none of the app is reachable until the user signs in. */}
       <Stack.Protected guard={isAuthenticated}>
-        <Stack.Screen name="index" options={{ title: 'TWAIN' }} />
+        <Stack.Screen name="dashboard" options={{ title: 'TWAIN' }} />
         <Stack.Screen name="chat" options={{ title: 'TWAIN Chat' }} />
         <Stack.Screen name="browse" options={{ title: 'Simulations' }} />
         <Stack.Screen name="report" options={{ title: 'Report' }} />

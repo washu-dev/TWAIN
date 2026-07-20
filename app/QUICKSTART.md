@@ -33,7 +33,7 @@ interim email login and expects the API to have `INTERIM_JWT_SECRET` configured.
 ## Running
 
 ```bash
-npm run web        # http://localhost:8081
+npm run web        # http://localhost:3001
 npm run ios        # iOS simulator (macOS)
 npm run android    # Android emulator
 npm start          # interactive picker
@@ -54,8 +54,8 @@ S3/CloudFront on push to `master`.
 ```
 app/
 ├── src/
-│   ├── app/            # Expo Router routes (_layout, index, login, chat, browse, report)
-│   ├── screens/        # HomeScreen, LoginScreen, ChatScreen, BrowseScreen, ReportScreen
+│   ├── app/            # Expo Router routes (_layout, index, login, dashboard, chat, browse, report)
+│   ├── screens/        # LandingScreen, LoginScreen, DashboardScreen, ChatScreen, BrowseScreen, ReportScreen
 │   ├── components/     # Header, Footer, TileButton, MessageModal, WashUShield
 │   ├── api/            # client.ts (axios) + storage.ts (token persistence)
 │   ├── hooks/          # useAuth (auth context), useColorScheme
@@ -66,8 +66,12 @@ app/
 
 ## Features
 
+- **Home** (`/`) — public landing page describing TWAIN; the only way forward is
+  to sign in. Redirects to `/dashboard` once authenticated.
 - **Auth guard** — Expo Router `Stack.Protected` gates the app behind interim
-  email login (`useAuth`); a 401 from the API signs the user out.
+  email login (`useAuth`); the app routes (`/dashboard`, `/chat`, `/browse`,
+  `/report`) are unreachable until sign-in, and a 401 from the API signs the
+  user out.
 - **Chat** (`/chat`) — the conversational simulation flow with a live state
   stepper, clarification replies, and inline plan approve/reject.
 - **Browse** (`/browse`) — past/active runs; **Report** (`/report`) — run summary
