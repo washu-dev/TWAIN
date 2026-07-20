@@ -1,8 +1,6 @@
 import json
 import logging
 import re
-import subprocess
-import sys
 import uuid
 from datetime import datetime, timezone
 from enum import Enum, auto
@@ -14,6 +12,8 @@ import twain_paths
 
 logger = logging.getLogger(__name__)
 
+from intake.intent_spec import IntentSpec
+from result_interpreter.result_package import ResultPackage
 from states import State, Context, GuardsBroken, InvalidTransition
 from crash_recovery import DataStorage
 from AgentInterface import AgentInterface
@@ -248,13 +248,13 @@ class StateMachine:
 
         ``agent`` may be a plain ``prompt -> str`` callable (what the orchestrator
         and tests inject) or an ``AgentInterface``-style object whose
-        ``call_agent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
+        ``callAgent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
         ``call_kwargs`` (e.g. ``max_tokens``) are forwarded only to the
-        ``call_agent`` form; a plain callable is invoked with just the prompt.
+        ``callAgent`` form; a plain callable is invoked with just the prompt.
         """
         agent = self.agent
-        if hasattr(agent, "call_agent"):
-            resp = agent.call_agent(prompt, **call_kwargs)
+        if hasattr(agent, "callAgent"):
+            resp = agent.callAgent(prompt, **call_kwargs)
         else:
             resp = agent(prompt)
         if isinstance(resp, str):
@@ -276,23 +276,6 @@ class StateMachine:
         if start != -1 and end != -1 and end > start:
             return text[start:end + 1]
         return text
-
-    @staticmethod
-    def _system_kind(intent: dict) -> str:
-        """The target system's representation: 'crystal', 'surface', or 'molecule'.
-
-        Reads the IntentSpec's explicit ``kind`` discriminator when present, else
-        infers it from which sub-object the spec carries (periodic solids under
-        ``crystal``, discrete molecules under ``molecule``). Defaults to
-        'molecule' so a spec with neither behaves as it did before.
-        """
-        sysd = intent.get("system_descriptors") or {}
-        kind = str(sysd.get("kind") or "").lower()
-        if kind in ("molecule", "crystal", "surface"):
-            return kind
-        if isinstance(sysd.get("crystal"), dict) and sysd.get("crystal"):
-            return "crystal"
-        return "molecule"
 
     def _is_confident(self, intent: dict) -> bool:
         """True when every *relevant* confidence score meets the threshold.
@@ -427,7 +410,7 @@ class StateMachine:
         default budget -- too small a budget truncates the JSON mid-object.
         """
         schema = str(twain_paths.SCHEMAS_DIR / "goal_graph.schema.json")
-        prompt = self.prompt_generator.goal_graph_prompt(
+        prompt = self.promptGenerator.goalGraphPrompt(
             schema, json.dumps(intent), self.run_id
         )
         self._last_decomposition_raw = self._agent_text(prompt, max_tokens=4096)

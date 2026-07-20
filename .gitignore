@@ -82,11 +82,6 @@ app.yaml.bak
 # StateMachine.intake() scratch output
 ExampleFileTest.txt
 
-# ── DFTB+ Slater-Koster parameter files (fetched by runner/fetch_slako.sh) ─────
-# CC-BY-SA data, not committed; DFTB_PREFIX points here. Regenerate with
-# `pixi run fetch-slako`.
-/slako/
-
 # ── DFTB+ / calculator run scratch output (from generated-bundle runs) ─────────
 Si.out
 dftb_in.hsd

@@ -94,19 +94,14 @@ class PromptGenerator:
         prompt += intent_spec
         return prompt
 
-    def goal_graph_prompt(self, schema, intent_spec, source_intent_id):
+    def goalGraphPrompt(self, schema, intent_spec, source_intent_id):
         prompt = (
             "You are decomposing a computational-chemistry research request into an "
             "executable goal graph: a directed acyclic graph (DAG) of sub-goals connected "
             "by dependency edges. Break the work into the smallest set of ordered sub-goals "
             "the request actually needs (e.g. discover a method, prepare inputs, run it, "
             "validate against the acceptance metrics, review). Tailor the goals to THIS "
-            "request rather than emitting a fixed template. When the property requires it, "
-            "include explicit sub-goals for validating the built structure (correct "
-            "stoichiometry and physically reasonable geometry), relaxing the geometry to "
-            "equilibrium, and converging the numerical settings before the property is "
-            "computed -- a rigorous result depends on these, not just on running the tool "
-            "once. Every edge's source and target "
+            "request rather than emitting a fixed template. Every edge's source and target "
             "MUST reference goal ids you define, and the graph MUST be acyclic. Fold the "
             "request's acceptance metrics into the validation goal's acceptance_criteria. "
             f"Use '{source_intent_id}' as metadata.source_intent_id. "
