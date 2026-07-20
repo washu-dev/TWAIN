@@ -1,8 +1,7 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
-  TextInput,
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
@@ -13,28 +12,10 @@ import { APP_STRINGS, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 
 export const LoginScreen: React.FC = () => {
-  const { signIn } = useAuth();
+  const { signIn, isSigningIn, canSignIn, authConfigured, error } = useAuth();
   const router = useRouter();
-  const [email, setEmail] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async () => {
-    const value = email.trim();
-    if (!value || loading) return;
-    setError(null);
-    setLoading(true);
-    try {
-      await signIn(value);
-      // On success the auth guard swaps the navigator to the app routes.
-    } catch (e) {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data
-        ?.detail;
-      setError(typeof detail === 'string' ? detail : APP_STRINGS.loginErrorGeneric);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const disabled = isSigningIn || !canSignIn;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -49,35 +30,33 @@ export const LoginScreen: React.FC = () => {
         <Text style={styles.title}>{APP_STRINGS.appTitle}</Text>
         <Text style={styles.subtitle}>{APP_STRINGS.loginPrompt}</Text>
 
-        <TextInput
-          style={styles.input}
-          value={email}
-          onChangeText={setEmail}
-          placeholder={APP_STRINGS.emailPlaceholder}
-          placeholderTextColor="#999999"
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="email-address"
-          inputMode="email"
-          onSubmitEditing={handleSubmit}
-          accessibilityLabel={APP_STRINGS.emailPlaceholder}
-        />
+        {authConfigured ? (
+          <>
+            <TouchableOpacity
+              style={[styles.button, disabled && styles.buttonDisabled]}
+              onPress={signIn}
+              disabled={disabled}
+              accessibilityRole="button"
+              accessibilityLabel={APP_STRINGS.ssoButton}
+            >
+              {isSigningIn ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <Text style={styles.buttonText}>{APP_STRINGS.ssoButton}</Text>
+              )}
+            </TouchableOpacity>
+
+            {!canSignIn && !isSigningIn ? (
+              <Text style={styles.hint}>{APP_STRINGS.ssoPreparing}</Text>
+            ) : null}
+          </>
+        ) : (
+          <Text style={styles.error}>{APP_STRINGS.ssoNotConfigured}</Text>
+        )}
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
-        <TouchableOpacity
-          style={[styles.button, (!email.trim() || loading) && styles.buttonDisabled]}
-          onPress={handleSubmit}
-          disabled={!email.trim() || loading}
-          accessibilityRole="button"
-          accessibilityLabel={APP_STRINGS.signInButton}
-        >
-          {loading ? (
-            <ActivityIndicator color="#FFFFFF" />
-          ) : (
-            <Text style={styles.buttonText}>{APP_STRINGS.signInButton}</Text>
-          )}
-        </TouchableOpacity>
+        <Text style={styles.footnote}>{APP_STRINGS.ssoFootnote}</Text>
       </View>
     </SafeAreaView>
   );
@@ -116,19 +95,14 @@ const styles = StyleSheet.create({
     color: '#5A5A5A',
     lineHeight: 20,
   },
-  input: {
-    borderWidth: 1,
-    borderColor: '#CCCCCC',
-    borderRadius: 4,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    fontSize: 16,
-    color: '#000000',
-    backgroundColor: '#FFFFFF',
-  },
   error: {
     color: '#BA0C2F',
     fontSize: 14,
+    lineHeight: 20,
+  },
+  hint: {
+    color: '#5A5A5A',
+    fontSize: 13,
   },
   button: {
     backgroundColor: '#BA0C2F',
@@ -143,5 +117,10 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
+  },
+  footnote: {
+    fontSize: 12,
+    color: '#999999',
+    lineHeight: 17,
   },
 });

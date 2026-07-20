@@ -82,11 +82,6 @@ export interface AuthUser {
   role: 'user' | 'admin';
 }
 
-export interface LoginResponse {
-  token: string;
-  user: AuthUser;
-}
-
 class APIClient {
   private client: AxiosInstance;
   private token: string | null = null;
@@ -98,8 +93,8 @@ class APIClient {
       timeout: API_CONFIG.timeout,
       headers: { 'Content-Type': 'application/json' },
     });
-    // Attach the interim/Entra bearer token when one is set. In AUTH_DISABLED dev
-    // the API ignores it, so this stays harmless when the app runs without login.
+    // Attach the Entra access token when one is set. In AUTH_DISABLED dev the API
+    // ignores it, so this stays harmless when the app runs without login.
     this.client.interceptors.request.use((config) => {
       if (this.token) {
         config.headers.Authorization = `Bearer ${this.token}`;
@@ -135,9 +130,12 @@ class APIClient {
     return response.data;
   }
 
-  // ── Auth (interim email login; pre-SSO) ─────────────────────────────────────
-  async login(email: string): Promise<LoginResponse> {
-    const response = await this.client.post('/api/auth/login', { email });
+  // ── Auth ────────────────────────────────────────────────────────────────────
+  // The Entra access token is attached by the request interceptor; this returns
+  // the authenticated user the API resolved from it (identity + role). Doubles as
+  // the token-validity check on app start.
+  async me(): Promise<AuthUser> {
+    const response = await this.client.get('/api/me');
     return response.data.data;
   }
 

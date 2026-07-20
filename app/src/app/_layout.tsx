@@ -1,4 +1,5 @@
 import { Stack } from 'expo-router';
+import { ActivityIndicator, View } from 'react-native';
 import { useColorScheme } from '@/hooks/useColorScheme';
 import { Colors } from '@/constants/theme';
 import { AuthProvider, useAuth } from '@/hooks/useAuth';
@@ -6,7 +7,24 @@ import { AuthProvider, useAuth } from '@/hooks/useAuth';
 function RootNavigator() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme === 'dark' ? 'dark' : 'light'];
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+
+  // Hold on a splash while we validate any stored session, so an already
+  // signed-in user isn't flashed the landing/login screen on load.
+  if (isLoading) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: colors.background,
+        }}
+      >
+        <ActivityIndicator size="large" color={colors.washuRed} accessibilityLabel="Loading" />
+      </View>
+    );
+  }
 
   return (
     <Stack

@@ -73,16 +73,45 @@ export const API_CONFIG = {
   timeout: 10000,
 };
 
+/**
+ * Microsoft Entra ID (Azure AD) SSO config for the OIDC auth-code + PKCE flow.
+ * Values come from EXPO_PUBLIC_* env vars (inlined by Expo at build time); see
+ * app/.env.example. The tenant defaults to WashU's, so only the SPA client id and
+ * API scope normally need setting. `isEntraConfigured` gates whether the app can
+ * offer SSO — when false (and auth isn't disabled) the login screen says so
+ * instead of launching a broken flow.
+ */
+const ENTRA_TENANT_ID =
+  process.env.EXPO_PUBLIC_ENTRA_TENANT_ID || '4ccca3b5-71cd-4e6d-974b-4d9beb96c6d6';
+
+export const ENTRA_CONFIG = {
+  tenantId: ENTRA_TENANT_ID,
+  // Application (client) ID of the "twain-web" SPA app registration (public/PKCE).
+  clientId: process.env.EXPO_PUBLIC_ENTRA_CLIENT_ID || '',
+  // The API scope to request so the access token's audience matches the API,
+  // e.g. "api://twain-api/access_as_user".
+  apiScope: process.env.EXPO_PUBLIC_ENTRA_API_SCOPE || '',
+  // OIDC issuer / authority for the tenant; discovery hangs off this.
+  authority: `https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0`,
+} as const;
+
+export const isEntraConfigured = (): boolean =>
+  Boolean(ENTRA_CONFIG.clientId && ENTRA_CONFIG.apiScope);
+
 export const APP_STRINGS = {
   appTitle: 'TWAIN',
   appSubtitle: 'The WashU AI-Assisted Platform for Simulation From Narration',
   loginButton: 'Login',
   signOutButton: 'Sign out',
-  loginPrompt: 'Sign in with your WashU email to continue.',
+  loginPrompt: 'Sign in with your WUSTL Key to continue.',
   loginBackToHome: '← Back to home',
-  emailPlaceholder: 'you@wustl.edu',
-  signInButton: 'Sign in',
-  loginErrorGeneric: 'Sign in failed. Please try again.',
+  // Entra ID single sign-on
+  ssoButton: 'Sign in with your WUSTL Key',
+  ssoPreparing: 'Preparing secure sign-in…',
+  ssoNotConfigured:
+    'Single sign-on is not configured for this deployment. Set the EXPO_PUBLIC_ENTRA_* variables to enable it.',
+  ssoFootnote:
+    'You will be redirected to the Washington University login to authenticate. TWAIN never sees your password.',
   testButton: 'Test',
   startSimulation: 'Start Simulation',
   resumeWorkflow: 'Resume Workflow',
