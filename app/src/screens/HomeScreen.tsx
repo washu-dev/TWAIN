@@ -14,6 +14,7 @@ import { apiClient } from '@/api/client';
 import { useAuth } from '@/auth/AuthProvider';
 
 export const HomeScreen: React.FC = () => {
+  const router = useRouter();
   const { isAuthenticated, account, login, logout } = useAuth();
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
