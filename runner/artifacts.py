@@ -10,8 +10,13 @@ runner's filesystem.
 """
 import json
 import os
+from pathlib import Path
 
 MAX_BYTES = 512 * 1024  # generated files are small; cap defensively
+
+# Single-file JSON specs a later stage reads as its input. On a re-run (a fresh
+# process) these must be restored to disk from the DB before the pipeline drives.
+SPEC_ARTIFACTS = ("intent_spec", "goal_graph", "discovery", "execution_plan")
 
 _KIND_BY_EXT = {
     ".json": "json",
@@ -39,6 +44,41 @@ def _safe_read(path: str) -> str | None:
     if len(data) > MAX_BYTES:
         data = data[:MAX_BYTES] + "\n… [truncated]"
     return data
+
+
+def rematerialize_inputs(db, session_id: str, orch) -> int:
+    """Restore the surviving upstream spec artifacts to disk for a re-run. Returns count.
+
+    A re-run runs in a fresh process whose local filesystem no longer holds the
+    original run's artifact files, but the pipeline's stage handlers read their
+    inputs from ``context.artifacts`` paths on disk. After a rewind, only the
+    stages *before* the rewind target still reference their specs; for each such
+    single-file spec, fetch its content from the ``artifacts`` table and rewrite
+    it under this run's artifacts dir, repointing ``context.artifacts`` at the
+    fresh path. Best-effort: a spec not in the DB is left untouched (in local dev
+    the original file is usually still on disk anyway).
+    """
+    sm = getattr(orch, "sm", None)
+    context = getattr(sm, "context", None)
+    if context is None:
+        return 0
+    art_dir = Path(getattr(sm, "artifacts_dir", "."))
+    art_dir.mkdir(parents=True, exist_ok=True)
+    restored = 0
+    for name in list(getattr(context, "artifacts", {}) or {}):
+        if name not in SPEC_ARTIFACTS:
+            continue
+        row = db.get_artifact(session_id, name)
+        if not row or row.get("content") is None:
+            continue
+        path = art_dir / f"{name}_{session_id}.json"
+        try:
+            path.write_text(row["content"], encoding="utf-8")
+        except OSError:
+            continue
+        context.artifacts[name] = str(path)
+        restored += 1
+    return restored
 
 
 def capture_artifacts(db, session_id: str, orch) -> int:

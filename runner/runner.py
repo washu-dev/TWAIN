@@ -12,7 +12,7 @@ Usage::
 import argparse
 import time
 
-from runner.artifacts import capture_artifacts
+from runner.artifacts import capture_artifacts, rematerialize_inputs
 from runner.bridges import DbAsk, PgEventSink, request_plan_approval
 from runner.db import RunnerDB
 from runner.engine import _env_flag, default_engine
@@ -70,11 +70,15 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
     # Approval gate: normally show the plan and block for the user's decision.
     # In unattended mode (TWAIN_AUTO_RUN) skip it and run straight through --
     # combined with execution being on, TWAIN runs the calculation automatically.
+    # Either way, the run only proceeds past BUILD once the plan is *explicitly*
+    # approved: engine.approve_plan sets the plan_approved guard flag, so the
+    # BUILD->REPAIR / REPAIR->EXECUTE guards (not just this block) enforce it.
     if _env_flag("TWAIN_AUTO_RUN"):
         db.add_assistant_message(
             session_id, "Plan auto-approved (unattended mode). Building and executing…",
             kind="chat", state="BUILD",
         )
+        engine.approve_plan(orch)
     else:
         decision = request_plan_approval(db, session_id, plan)
         if decision != "approve":
@@ -82,15 +86,19 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
             db.add_assistant_message(
                 session_id,
                 "Plan rejected — nothing was built or executed. "
-                "Start a new run, or (soon) rerun from an earlier step with changes.",
+                "Start a new run, or re-run this one from an earlier step "
+                "(e.g. Discover or Plan) to try a different approach.",
                 kind="chat",
             )
             return
+        engine.approve_plan(orch)
         db.add_assistant_message(
             session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
         )
 
     # Leg 2: build → execute → interpret → validate → accept → terminate.
+    # Without the approval above, plan_approved is False and this run() would halt
+    # at the BUILD->REPAIR guard (GuardsBroken) — nothing is built or executed.
     status = orch.run()
     if status == "completed":
         db.add_assistant_message(
@@ -103,16 +111,9 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
         )
 
 
-def process_job(job: dict, db: RunnerDB, engine=None) -> None:
-    """Drive a single job's run, then capture its artifacts for the report."""
-    engine = engine or default_engine()
-    session_id = job["session_id"]
-    kind = job.get("kind", "start")
-    if kind != "start":
-        raise NotImplementedError(f"job kind '{kind}' is not supported yet (Phase 3)")
-
-    params = job.get("params") or {}
-    orch = engine.build_orchestrator(
+def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict):
+    """Wire an orchestrator for this session with the chat/event/store bridges."""
+    return engine.build_orchestrator(
         session_id=session_id,
         researcher_id=params.get("researcher_id", ""),
         request=params.get("request"),
@@ -122,6 +123,39 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         # Per-run budget override (falls back to the deployment default in engine).
         max_cost=params.get("max_cost"),
     )
+
+
+def process_job(job: dict, db: RunnerDB, engine=None) -> None:
+    """Drive a single job's run, then capture its artifacts for the report.
+
+    ``start`` runs a fresh pipeline. ``rerun`` resumes an existing run, rewinds it
+    to the requested pipeline stage (discarding that stage's and every later
+    stage's output while keeping the earlier work), restores the upstream inputs
+    to disk, and drives it forward again through the same approval gate.
+    """
+    engine = engine or default_engine()
+    session_id = job["session_id"]
+    kind = job.get("kind", "start")
+    params = job.get("params") or {}
+
+    if kind == "start":
+        orch = _build_orchestrator(engine, db, session_id, params)
+    elif kind == "rerun":
+        target = params.get("target_state")
+        if not target:
+            raise ValueError("a 'rerun' job requires a 'target_state' param")
+        # Resumes the existing run from the store, then rewinds it to `target`.
+        orch = _build_orchestrator(engine, db, session_id, params)
+        engine.rewind(orch, target)
+        # A fresh process has none of the original run's artifact files on disk;
+        # restore the surviving upstream specs so the re-run's stages find inputs.
+        rematerialize_inputs(db, session_id, orch)
+        db.add_assistant_message(
+            session_id, f"↩︎ Re-running from {target}…", kind="chat", state=target,
+        )
+    else:
+        raise NotImplementedError(f"job kind '{kind}' is not supported")
+
     try:
         _drive_run(db, session_id, orch, engine)
     finally:

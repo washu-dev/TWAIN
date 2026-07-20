@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 
 import auth
 import conversations as convo
+import migrate
 from auth import AdminUser, CurrentUser
 from database import list_users, set_user_role, upsert_user
 
@@ -17,7 +19,35 @@ from database import list_users, set_user_role, upsert_user
 SSE_POLL_SECONDS = float(os.getenv("SSE_POLL_SECONDS", "1.0"))
 SSE_MAX_SECONDS = float(os.getenv("SSE_MAX_SECONDS", "1800"))
 
-app = FastAPI(title="TWAIN API", version="0.1.0")
+
+def _flag(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    return default if v is None else v.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Apply idempotent DB migrations on boot so a deploy needs no manual step.
+
+    Disable with ``RUN_MIGRATIONS_ON_STARTUP=false`` (e.g. when migrations run as
+    a separate one-off task). A failure here intentionally stops the API from
+    serving on an unmigrated schema — the right signal for a bad deploy — rather
+    than coming up "healthy" but broken.
+    """
+    if _flag("RUN_MIGRATIONS_ON_STARTUP", default=True):
+        try:
+            applied = migrate.apply_migrations()
+            print(
+                f"[startup] migrations applied: {', '.join(applied)}"
+                if applied else "[startup] database schema already up to date"
+            )
+        except Exception as exc:  # noqa: BLE001 - surface loudly, then fail fast
+            print(f"[startup] FATAL: database migration failed: {exc}")
+            raise
+    yield
+
+
+app = FastAPI(title="TWAIN API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -110,6 +140,12 @@ class SendApproval(BaseModel):
     decision: Literal["approve", "reject"]
 
 
+class RerunConversation(BaseModel):
+    # Pipeline stage to restart from (e.g. "CLARIFY"). Validated against
+    # convo.RERUNNABLE_STATES in the handler.
+    state: str
+
+
 def _require_own_conversation(conversation_id: str, user: dict) -> dict:
     conversation = convo.get_conversation(conversation_id, user["id"])
     if conversation is None:
@@ -166,6 +202,29 @@ async def post_approval(conversation_id: str, body: SendApproval, user: CurrentU
     """Answer a plan-approval gate ('approve' resumes the run, 'reject' stops it)."""
     _require_own_conversation(conversation_id, user)
     return {"data": convo.add_approval_response(conversation_id, body.decision)}
+
+
+@app.post("/api/conversations/{conversation_id}/rerun")
+async def rerun_conversation(conversation_id: str, body: RerunConversation, user: CurrentUser):
+    """Re-run a finished conversation from an earlier pipeline stage.
+
+    Resets that stage and everything after it and drives the run again; the
+    stages before it are kept as input. Only allowed on a finished run.
+    """
+    _require_own_conversation(conversation_id, user)
+    state = body.state.strip().upper()
+    if state not in convo.RERUNNABLE_STATES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"state must be one of: {', '.join(convo.RERUNNABLE_STATES)}",
+        )
+    try:
+        conversation = convo.rerun_conversation(conversation_id, user["id"], state)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"data": conversation}
 
 
 def _sse_event_stream(conversation_id: str):

@@ -6,18 +6,24 @@ pixi environment. The engine is wired exactly as the orchestrator expects:
 ``request`` + ``agent`` (the live WashU LLM) + ``ask`` (chat bridge) + ``store``
 (:class:`PgStore`) + an event sink.
 
-The guard inputs that the stub INTERPRET/VALIDATE/EXECUTE handlers don't set
-themselves are seeded so a happy-path run can reach TERMINATE; ``plan_approved``
-is seeded too, but the runner still pauses at BUILD and only continues on real
-user approval — so nothing is built or executed without it.
+The guard inputs that the stub INTERPRET/VALIDATE handlers don't set themselves
+are seeded so a happy-path run can reach TERMINATE. ``plan_approved`` is
+deliberately NOT seeded: it is the approval gate, so it stays False until the
+researcher actually approves (the runner calls :meth:`engine.approve_plan` after
+a real approval). That makes the guarded ``BUILD->REPAIR`` / ``REPAIR->EXECUTE``
+transitions a genuine safety net -- a run cannot build or execute without an
+explicit approval, not merely because the runner happens to block for one.
 """
 import json
 import os
 import pathlib
 import sys
 
+# Guard inputs for stages whose handlers are still stubs (INTERPRET/VALIDATE) and
+# for EXECUTE when execution is disabled (planning-only runs). ``plan_approved``
+# is intentionally absent -- see the module docstring; it is set only by a real
+# approval so execution truly requires one.
 SEED_CONTEXT = {
-    "plan_approved": True,
     "execution_status": True,
     "validation_result": "accepted",
 }
@@ -121,6 +127,25 @@ class _RealEngine:
             verify_codegen=_env_flag("TWAIN_VERIFY_CODEGEN", default=execute),
             auto_approve=auto,
         )
+
+    def rewind(self, orch, target_state: str) -> None:
+        """Rewind a resumed orchestrator to ``target_state`` so it re-runs from there.
+
+        ``target_state`` is a pipeline state name (e.g. ``"CLARIFY"``). The guard
+        seed is re-applied (see ``SEED_CONTEXT``) so the stubbed happy path still
+        flows past the INTERPRET/VALIDATE guards after the rewind, exactly as a
+        fresh run does; the human gates (plan approval, heavy-calc confirmation)
+        are re-enforced structurally by the runner and the EXECUTE stage.
+        """
+        try:
+            target = self._State[target_state]
+        except KeyError as exc:
+            raise ValueError(f"unknown rewind target state: {target_state!r}") from exc
+        orch.rewind_to(target, reseed=dict(SEED_CONTEXT))
+
+    def approve_plan(self, orch) -> None:
+        """Record a real plan approval so the run may proceed past the BUILD gate."""
+        orch.approve_plan()
 
     def read_execution_plan(self, orch) -> dict | None:
         path = orch.sm.context.artifacts.get("execution_plan")

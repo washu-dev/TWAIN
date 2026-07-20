@@ -177,6 +177,13 @@ class APIClient {
     return response.data.data;
   }
 
+  // Re-run a finished conversation from an earlier pipeline stage. Resets that
+  // stage and everything after it; returns the conversation back in `running`.
+  async rerunConversation(id: string, state: string): Promise<Conversation> {
+    const response = await this.client.post(`/api/conversations/${id}/rerun`, { state });
+    return response.data.data;
+  }
+
   async getReport(id: string): Promise<Report> {
     const response = await this.client.get(`/api/conversations/${id}/report`);
     return response.data.data;

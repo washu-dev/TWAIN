@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  Modal,
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -22,6 +23,19 @@ const PIPELINE_STATES = [
   'BUILD', 'EXECUTE', 'INTERPRET', 'VALIDATE', 'ACCEPT', 'TERMINATE',
 ];
 
+// Stages a finished run can be restarted from, with plain-language descriptions
+// of what re-running each one redoes. A re-run resets the chosen stage and every
+// stage after it, keeping the earlier work as input.
+const RERUN_STAGES: { state: string; label: string; desc: string }[] = [
+  { state: 'INTAKE', label: 'Intake', desc: 'Re-read your request from scratch' },
+  { state: 'CLARIFY', label: 'Clarify', desc: 'Re-ask the clarifying questions' },
+  { state: 'DECOMPOSE', label: 'Decompose', desc: 'Rebuild the goal breakdown' },
+  { state: 'DISCOVER', label: 'Discover', desc: 'Re-pick the candidate tools' },
+  { state: 'PLAN', label: 'Plan', desc: 'Re-synthesize the execution plan' },
+  { state: 'BUILD', label: 'Build', desc: 'Regenerate the run code' },
+  { state: 'EXECUTE', label: 'Execute', desc: 'Re-run the calculation' },
+];
+
 const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_approval'];
 const TERMINAL_STATUSES = ['completed', 'error', 'rejected'];
 const POLL_MS = 1500;
@@ -34,6 +48,7 @@ export const ChatScreen: React.FC = () => {
   const [budget, setBudget] = useState('');  // per-run cost cap (USD); blank => default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rerunOpen, setRerunOpen] = useState(false);  // "Re-run from…" picker
   const scrollRef = useRef<ScrollView>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -128,8 +143,27 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
+  const handleRerun = async (state: string) => {
+    if (!conversationId || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiClient.rerunConversation(conversationId, state);
+      setRerunOpen(false);
+      // Reload the full conversation (now `running` at `state`, with the marker
+      // message); the poll effect restarts automatically once it's active again.
+      await refresh(conversationId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to re-run from that step');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const messages = conversation?.messages ?? [];
   const awaitingApproval = status === 'awaiting_approval';
+  // The stages this run reached (so the picker only offers steps that ran).
+  const reachedIndex = conversation ? PIPELINE_STATES.indexOf(conversation.current_state) : -1;
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
@@ -194,17 +228,27 @@ export const ChatScreen: React.FC = () => {
       ) : isTerminal ? (
         <View style={styles.terminalBar}>
           <Text style={styles.terminalText}>{terminalMessage}</Text>
-          <TouchableOpacity
-            style={styles.reportBtn}
-            onPress={() =>
-              router.push({ pathname: '/report', params: { id: conversationId as string } })
-            }
-            accessibilityRole="button"
-          >
-            <Text style={styles.reportText}>
-              {status === 'completed' ? 'View results' : 'View report'}
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.terminalButtons}>
+            <TouchableOpacity
+              style={[styles.rerunBtn, busy && styles.disabled]}
+              onPress={() => setRerunOpen(true)}
+              disabled={busy}
+              accessibilityRole="button"
+            >
+              <Text style={styles.rerunText}>↩︎ Re-run from…</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.reportBtn}
+              onPress={() =>
+                router.push({ pathname: '/report', params: { id: conversationId as string } })
+              }
+              accessibilityRole="button"
+            >
+              <Text style={styles.reportText}>
+                {status === 'completed' ? 'View results' : 'View report'}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       ) : (
         <View style={styles.composer}>
@@ -244,6 +288,54 @@ export const ChatScreen: React.FC = () => {
           </View>
         </View>
       )}
+
+      <Modal
+        visible={rerunOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => (busy ? undefined : setRerunOpen(false))}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Re-run from a step</Text>
+            <Text style={styles.modalHint}>
+              Pick a step to restart from. That step and everything after it run again; the
+              earlier steps are kept.
+            </Text>
+            <ScrollView style={styles.stageList}>
+              {RERUN_STAGES.map((stage) => {
+                const stageIndex = PIPELINE_STATES.indexOf(stage.state);
+                // Offer only steps the run actually reached.
+                const enabled = reachedIndex >= 0 && stageIndex <= reachedIndex;
+                return (
+                  <TouchableOpacity
+                    key={stage.state}
+                    style={[styles.stageRow, (!enabled || busy) && styles.disabled]}
+                    onPress={() => handleRerun(stage.state)}
+                    disabled={!enabled || busy}
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: !enabled || busy }}
+                  >
+                    <View style={styles.stageMain}>
+                      <Text style={styles.stageLabel}>{stage.label}</Text>
+                      <Text style={styles.stageDesc}>{stage.desc}</Text>
+                    </View>
+                    <Text style={styles.stageChevron}>›</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <TouchableOpacity
+              style={styles.modalCancel}
+              onPress={() => setRerunOpen(false)}
+              disabled={busy}
+              accessibilityRole="button"
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -536,21 +628,75 @@ const styles = StyleSheet.create({
   },
   rejectText: { color: C.washuRed, fontWeight: '700', fontSize: 15 },
   terminalBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
     gap: Spacing.two,
     padding: Spacing.three,
     borderTopWidth: 1,
     borderTopColor: C.backgroundElement,
   },
-  terminalText: { flex: 1, fontSize: 14, color: C.textSecondary },
+  terminalText: { fontSize: 14, color: C.textSecondary },
+  terminalButtons: { flexDirection: 'row', gap: Spacing.two },
+  rerunBtn: {
+    flex: 1,
+    backgroundColor: C.washuWhite,
+    borderWidth: 1,
+    borderColor: C.washuRed,
+    borderRadius: 10,
+    paddingVertical: Spacing.three,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rerunText: { color: C.washuRed, fontWeight: '700', fontSize: 15 },
   reportBtn: {
+    flex: 1,
     backgroundColor: C.washuGreen,
     borderRadius: 10,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   reportText: { color: '#FFFFFF', fontWeight: '700', fontSize: 15 },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: Spacing.four,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 380,
+    maxHeight: '80%',
+    backgroundColor: C.washuWhite,
+    borderRadius: 12,
+    padding: Spacing.four,
+    gap: Spacing.two,
+  },
+  modalTitle: { fontSize: 17, fontWeight: '700', color: C.text },
+  modalHint: { fontSize: 13, color: C.textSecondary, lineHeight: 18 },
+  stageList: { flexGrow: 0, marginVertical: Spacing.one },
+  stageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    borderRadius: 10,
+    backgroundColor: C.backgroundElement,
+    marginBottom: Spacing.two,
+  },
+  stageMain: { flex: 1, gap: 2 },
+  stageLabel: { fontSize: 15, fontWeight: '700', color: C.text },
+  stageDesc: { fontSize: 12, color: C.textSecondary },
+  stageChevron: { fontSize: 22, color: C.washuRed, fontWeight: '400' },
+  modalCancel: {
+    alignSelf: 'flex-end',
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#DDDDDD',
+  },
+  modalCancelText: { fontSize: 15, fontWeight: '600', color: C.text },
   disabled: { opacity: 0.5 },
 });

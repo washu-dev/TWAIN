@@ -4,9 +4,10 @@ approval gate, and the chat/event bridges end to end in-process.
 """
 import json
 import types
+from pathlib import Path
 
 from runner import runner
-from runner.artifacts import capture_artifacts
+from runner.artifacts import capture_artifacts, rematerialize_inputs
 from runner.bridges import DbAsk, PgEventSink, request_plan_approval
 from runner.pg_store import PgStore
 
@@ -52,6 +53,12 @@ class FakeDB:
 
     def upsert_artifact(self, sid, name, content, kind):
         self.artifacts.append({"name": name, "content": content, "kind": kind})
+
+    def get_artifact(self, sid, name):
+        for a in self.artifacts:
+            if a["name"] == name:
+                return a
+        return None
 
     # jobs
     def claim_job(self):
@@ -106,6 +113,8 @@ class FakeEngine:
     def __init__(self, plan=None):
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
         self.built_with = None  # records build_orchestrator kwargs for assertions
+        self.rewound_to = None  # records the rewind target for rerun assertions
+        self.approved = False   # set when approve_plan() is called
 
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store, max_cost=None,
@@ -115,6 +124,16 @@ class FakeEngine:
             "request": request, "max_cost": max_cost,
         }
         return FakeOrchestrator(ask, sink, max_cost=max_cost if max_cost is not None else 1.0)
+
+    def rewind(self, orch, target_state):
+        # A real rewind resets the run to `target_state`; the fake just records it
+        # (the fresh FakeOrchestrator already starts at leg 0, i.e. the top).
+        self.rewound_to = target_state
+
+    def approve_plan(self, orch):
+        # A real approve_plan flips the plan_approved guard flag; the fake records
+        # that it happened so a test can assert the run was actually approved.
+        self.approved = True
 
     def read_execution_plan(self, orch):
         return self._plan
@@ -126,18 +145,22 @@ class FakeEngine:
 class TestProcessJob:
     def test_approved_run_completes(self):
         db = FakeDB(approval="approve")
-        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
+        engine = FakeEngine()
+        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, engine)
         kinds = [m["kind"] for m in db.messages]
         assert "clarification" in kinds
         assert "approval_request" in kinds
+        assert engine.approved is True          # plan_approved guard flag was set
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
         assert db.messages[-1]["content"] == "Run complete."
 
     def test_rejected_run_stops_before_build(self):
         db = FakeDB(approval="reject")
-        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
+        engine = FakeEngine()
+        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, engine)
         assert db.status == "rejected"
+        assert engine.approved is False         # never approved -> guard stays closed
         # no completion event because leg 2 never ran
         assert not any(e["event_type"] == "run.completed" for e in db.events)
         assert "rejected" in db.messages[-1]["content"].lower()
@@ -162,6 +185,29 @@ class TestProcessJob:
             runner.process_job({"session_id": SESSION, "kind": "resume", "params": {}}, db, FakeEngine())
             raise AssertionError("expected NotImplementedError")
         except NotImplementedError:
+            pass
+
+    def test_rerun_rewinds_then_drives_the_run(self):
+        # A 'rerun' job rewinds the run to the requested stage, posts a marker
+        # message, and drives it forward again through the approval gate.
+        db = FakeDB(approval="approve")
+        engine = FakeEngine()
+        runner.process_job(
+            {"session_id": SESSION, "kind": "rerun",
+             "params": {"target_state": "CLARIFY", "researcher_id": "u", "request": "r"}},
+            db, engine,
+        )
+        assert engine.rewound_to == "CLARIFY"
+        assert any("CLARIFY" in m["content"] for m in db.messages)  # marker message
+        assert "approval_request" in [m["kind"] for m in db.messages]
+        assert db.status == "completed"
+
+    def test_rerun_requires_target_state(self):
+        db = FakeDB()
+        try:
+            runner.process_job({"session_id": SESSION, "kind": "rerun", "params": {}}, db, FakeEngine())
+            raise AssertionError("expected ValueError")
+        except ValueError:
             pass
 
     def test_max_cost_forwarded_from_params(self):
@@ -297,3 +343,37 @@ class TestCaptureArtifacts:
         assert "script" not in names
         assert kinds["run_bundle/main.py"] == "python"
         assert kinds["execution_plan"] == "json"
+
+
+class TestRematerializeInputs:
+    def test_restores_surviving_upstream_specs_to_disk(self, tmp_path):
+        # A re-run runs in a fresh process: the original artifact files are gone,
+        # so the surviving upstream specs must be rewritten to disk from the DB and
+        # context.artifacts repointed at the fresh paths.
+        db = FakeDB()
+        db.upsert_artifact("s1", "intent_spec", '{"objective": "x"}', "json")
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                artifacts_dir=str(tmp_path),
+                context=types.SimpleNamespace(
+                    artifacts={"intent_spec": "/gone/intent_spec.json"}
+                ),
+            )
+        )
+        restored = rematerialize_inputs(db, "s1", orch)
+        assert restored == 1
+        new_path = orch.sm.context.artifacts["intent_spec"]
+        assert Path(new_path).is_file()
+        assert "objective" in Path(new_path).read_text(encoding="utf-8")
+
+    def test_skips_specs_absent_from_db(self, tmp_path):
+        # A spec that was trimmed (or never captured) is left untouched.
+        db = FakeDB()  # no artifacts stored
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                artifacts_dir=str(tmp_path),
+                context=types.SimpleNamespace(artifacts={"intent_spec": "/gone.json"}),
+            )
+        )
+        assert rematerialize_inputs(db, "s1", orch) == 0
+        assert orch.sm.context.artifacts["intent_spec"] == "/gone.json"  # unchanged
