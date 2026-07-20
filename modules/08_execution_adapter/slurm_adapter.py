@@ -291,6 +291,14 @@ class SlurmAdapter:
             modules += [m for m in self.profile.gpu_modules if m not in modules]
         if modules:
             lines.append(f"ml load {' '.join(modules)}")
+        # Use every allocated core: scientific Python parallelizes through
+        # OpenMP/BLAS threading, but those libraries default to 1 thread (or to
+        # the node's full core count, oversubscribing a shared node) unless told
+        # otherwise. Job-specific env can still override any of these.
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            if var not in job.env:
+                lines.append(f'export {var}="${{SLURM_CPUS_PER_TASK:-1}}"')
         for key, value in job.env.items():
             lines.append(f"export {key}={shlex.quote(str(value))}")
         if job.workdir:

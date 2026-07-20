@@ -124,6 +124,22 @@ def test_render_sbatch_cpu_job():
     assert "ml load ris slurm" in script
     assert "cd /storage2/fs1/me/run" in script
     assert script.rstrip().endswith("python main.py")
+    # Threading env pins OpenMP/BLAS to the allocated cores so the payload
+    # actually uses every requested CPU (GPAW etc. default to 1 thread).
+    assert 'export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"' in script
+    assert 'export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"' in script
+
+
+def test_render_sbatch_job_env_overrides_threading_defaults():
+    adapter = SlurmAdapter(_profile())
+    job = JobSpec(job_name="solub", command="python main.py",
+                  env={"OMP_NUM_THREADS": "2"})
+    req = SlurmRequest(cpu_count=8, gpu_count=0, max_time=45, ram=16000)
+    script = adapter.render_sbatch(job, req)
+    assert "export OMP_NUM_THREADS=2" in script
+    assert 'export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"' not in script
+    # Untouched vars still default to the allocation.
+    assert 'export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"' in script
 
 
 def test_render_sbatch_gpu_job_adds_gres_and_modules():

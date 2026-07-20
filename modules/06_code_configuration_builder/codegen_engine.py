@@ -772,6 +772,9 @@ class CodegenEngine:
             main_filename="main.py",
             output_filename="results.csv",
             run_smoke=True,
+            # A load-only smoke (heavy calculator) constructs the calculator and
+            # exits without computing, so no results file is owed.
+            require_output=bool(brief.get("smoke_compute")),
         )
         # A calculator run executes in the heavy sim env; a library-only run runs on
         # the default interpreter (where its library is installed) -- record that so

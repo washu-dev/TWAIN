@@ -35,6 +35,11 @@ DEFAULT_RAM = 16          # GB
 MIN_RAM_GB = 4            # floor applied in synthesize()
 DEFAULT_WALL_MINUTES = 10.0
 MIN_WALL_MINUTES = 10.0
+# Default wall for a heavy calculator (full DFT etc.): the generic 10-minute
+# default lands on the short partition (30-min cap) and real runs get killed
+# mid-SCF. Four hours clears the short partition and remains editable on the
+# approval card.
+HEAVY_WALL_MINUTES = 240.0
 
 
 def version_to_number(version: str) -> float:

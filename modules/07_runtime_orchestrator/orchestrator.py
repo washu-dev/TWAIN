@@ -311,6 +311,15 @@ class Orchestrator:
         and repeated failures trip the breaker before we burn the budget.
         """
         timeout = timeout_for(state.name) if self.step_timeouts else None
+        # A Slurm-routed EXECUTE legitimately outlives the default 2h stage
+        # budget (the plan's wall time can be 4h+): stretch the stage timeout to
+        # the machine's own wait budget so the stage isn't killed mid-poll.
+        if (timeout is not None and state == State.EXECUTE
+                and getattr(self.sm, "execute_slurm", False)):
+            try:
+                timeout = max(timeout, self.sm.slurm_wait_budget() + 5 * 60)
+            except Exception:  # noqa: BLE001 - keep the default budget
+                pass
 
         def _step():
             run_agent(

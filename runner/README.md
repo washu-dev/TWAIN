@@ -192,14 +192,25 @@ curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
 # relative ones. The nompi GPAW build avoids openmpi (TWAIN runs plain python).
 export MAMBA_ROOT_PREFIX=/storage2/fs1/mdan/Active/dtrc2026-workshop/.micromamba
 ROOT=/storage2/fs1/mdan/Active/dtrc2026-workshop
-# conda-forge ships prebuilt linux-64 GPAW with libxc included
+# conda-forge ships prebuilt linux-64 GPAW with libxc included. Include
+# pymatgen + spglib: crystal plans pair GPAW with them and the job's smoke
+# test fails on any import the env is missing.
 ./bin/micromamba create -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
-  python=3.11 "gpaw=*=nompi*" ase numpy pandas pyyaml
+  python=3.11 "gpaw=*=nompi*" ase pymatgen spglib numpy pandas pyyaml
 # optional shared fallback env for everything else
 ./bin/micromamba create -y -p "$ROOT/twain-envs/default" -c conda-forge \
-  python=3.11 ase pymatgen xtb-python numpy pandas pyyaml
+  python=3.11 ase pymatgen spglib xtb-python numpy pandas pyyaml
 # verify exactly the way the Slurm job invokes it (no activation):
-"$ROOT/twain-envs/gpaw/bin/python" -c "import gpaw, ase; print(gpaw.__version__)"
+"$ROOT/twain-envs/gpaw/bin/python" \
+  -c "import gpaw, ase, pymatgen, spglib; print(gpaw.__version__)"
+```
+
+To add packages to an existing env later (e.g. a new plan needs something
+the env lacks — the smoke test will name the missing imports in the job log):
+
+```bash
+./bin/micromamba install -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
+  pymatgen spglib
 ```
 
 Env names are matched case-insensitively against the plan's calculator /

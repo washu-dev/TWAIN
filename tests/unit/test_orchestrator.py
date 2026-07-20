@@ -415,7 +415,9 @@ class TestAgentRunner:
             run_agent(lambda _s: {"x": 1}, {}, timeout=None, validator=lambda o: "y" in o)
 
     def test_timeout_table_matches_criteria(self):
-        assert agent_runner.timeout_for("EXECUTE") == 20 * 60
+        # EXECUTE was raised from the criteria's 20 min to 2 h: real runs
+        # (local DFT, bounded Slurm polling) routinely exceed 20 minutes.
+        assert agent_runner.timeout_for("EXECUTE") == 2 * 60 * 60
         assert agent_runner.timeout_for("CLARIFY") == 5 * 60
 
 
