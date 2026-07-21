@@ -16,6 +16,8 @@ import os
 import pathlib
 import sys
 
+from runner.suspend import SuspendRun
+
 SEED_CONTEXT = {
     "plan_approved": True,
     "execution_status": True,
@@ -80,7 +82,16 @@ class _RealEngine:
             # run so API errors are caught; default on whenever we execute.
             verify_codegen=_env_flag("TWAIN_VERIFY_CODEGEN", default=execute),
             auto_approve=auto,
+            # Let the pipeline pause (rather than block or error) when the ask
+            # bridge needs the user: DbAsk raises SuspendRun, orchestrator.run()
+            # catches it, checkpoints PAUSED, and returns so the runner releases
+            # the process. A ``resume`` job continues the run when the user replies.
+            suspend_exc=SuspendRun,
         )
+
+    def current_state_name(self, orch) -> str:
+        """The pipeline state the orchestrator is parked in (e.g. 'CLARIFY', 'BUILD')."""
+        return orch.sm.current_state.name
 
     def read_execution_plan(self, orch) -> dict | None:
         path = orch.sm.context.artifacts.get("execution_plan")

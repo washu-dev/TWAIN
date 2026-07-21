@@ -7,19 +7,47 @@ API reads. See `docs/architecture/web_ui_plan.md` §4.
 
 Why a separate service (not the API): the pipeline needs the heavy pixi
 environment (`pymatgen`, `ase`, …), the WashU LLM credentials, and runs for
-minutes — and it **blocks** on the user during CLARIFY and at the plan-approval
-gate. One job == one run; run several runner processes for more concurrency.
+minutes. When it needs the researcher it **suspends** rather than blocks — the
+run is checkpointed and the process is released — so one runner serves many runs
+and nothing spins waiting on a human.
 
-## How a run flows
+## How a run flows (async suspend/resume)
+A *job* is one slice of a run, not a whole run. A run advances until it needs the
+user, then releases the process; a `resume` job continues it when the user
+responds. No thread is ever pinned to a waiting run.
+
 1. API `POST /api/conversations` inserts a conversation + first message + a
    `start` job.
 2. The runner claims the job and runs `orchestrator.run(until=BUILD)` — intake,
-   clarify (blocking on the user via `messages`), decompose, discover, plan.
-3. It pauses at BUILD (plan generated, nothing built), posts the plan as an
-   `approval_request`, and blocks for the user's `POST /approval`.
-4. On **approve** it runs to completion; on **reject** it stops before building.
+   clarify, decompose, discover, plan.
+3. If CLARIFY needs an answer, the `ask` bridge posts the question, marks the run
+   `awaiting_input`, **suspends** (raises `SuspendRun`), and the runner returns.
+   The user's `POST /messages` reply enqueues a `resume` job that re-drives the
+   run — the same `ask` now returns the answer and the pipeline continues.
+4. At BUILD (plan generated, nothing built) it posts the plan as an
+   `approval_request`, marks the run `awaiting_approval`, and releases. The
+   user's `POST /approval` enqueues a `resume`: **approve** crosses the gate and
+   runs to completion; **reject** stops before building. (The heavy-calc "run it
+   now?" confirmation during EXECUTE suspends/resumes the same way.)
 5. Throughout, an event sink writes `run_events` (tailed by the SSE endpoint)
    and mirrors `current_state` / `status` onto the conversation.
+
+**Waking the runner** — instead of polling every second, the runner `LISTEN`s on
+the `twain_jobs` channel; a trigger (`api/migrations/003_job_notify.sql`)
+`NOTIFY`s it the instant a job is queued, so a released runner wakes immediately.
+A generous fallback poll (`--poll`, default 30s) covers any missed notification.
+
+**Notifications** — on each suspend the run reaches out so the user can return
+when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or `sns`/`ses`);
+see `runner/notifications.py`. `TWAIN_APP_URL` adds a deep link back to the run.
+
+**Resume durability (important)** — a run's state + context resume from the
+Postgres session store, but stage artifacts (intent_spec, the run bundle, …) are
+files under `logs/` written by the state machine. Resuming on a *different* box
+therefore needs those files reachable: run a single runner, or put `logs/` on
+shared storage (e.g. EFS). Making mid-run artifacts fully DB-backed is a
+follow-up. Concurrency is safe regardless — `claim_job` serializes jobs per
+session and a redundant `resume` is a no-op.
 
 ## Run locally
 Requires a reachable Postgres with the schema from `api/migrations/001_web_ui.sql`

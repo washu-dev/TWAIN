@@ -530,3 +530,50 @@ class TestLocalExecutionWiring:
 
         orch_mod.Orchestrator.demo(session_id="d", execute_locally=False)
         assert captured.get("execute_locally") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Suspend / resume: an injected ``ask`` can pause a run for user input without
+# erroring, and without tripping the circuit breaker (the runner's async model).
+# ═══════════════════════════════════════════════════════════════════════════════
+class TestSuspend:
+    def _suspending_sm(self, tmp_path, SuspendRun):
+        def suspending_clarify():
+            raise SuspendRun(reason="input")
+
+        sm = make_sm(tmp_path, context=dict(HAPPY, clarified=False),
+                     clarify=suspending_clarify)
+        sm.current_state = State.CLARIFY
+        return sm
+
+    def test_suspend_pauses_run_and_stays_in_state(self, env, tmp_path):
+        from runner.suspend import SuspendRun
+
+        sm = self._suspending_sm(tmp_path, SuspendRun)
+        orch = build(env, "susp", sm=sm, suspend_exc=SuspendRun, provenance=False)
+        status = orch.run()
+        assert status == RunStatus.PAUSED
+        assert sm.current_state == State.CLARIFY  # handler aborted; no transition
+        assert orch.run_session.get_status() == RunStatus.PAUSED
+        assert "run.suspended" in env["bus"].types()
+
+    def test_repeated_suspends_do_not_trip_the_circuit_breaker(self, env, tmp_path):
+        # A pause for input must not count as a stage failure — otherwise a handful
+        # of clarify rounds would open the breaker and abort the run.
+        from runner.suspend import SuspendRun
+
+        sm = self._suspending_sm(tmp_path, SuspendRun)
+        orch = build(env, "susp-loop", sm=sm, suspend_exc=SuspendRun, provenance=False)
+        rounds = orch.resilient_caller.circuit_breaker.max_errors + 3
+        for _ in range(rounds):
+            assert orch.run() == RunStatus.PAUSED
+        assert not orch.resilient_caller.circuit_breaker.failures
+
+    def test_without_suspend_exc_a_raise_is_still_an_error(self, env, tmp_path):
+        # Back-compat: with no suspend_exc wired (CLI/demo), the same exception is
+        # handled as a normal error, exactly as before.
+        from runner.suspend import SuspendRun
+
+        sm = self._suspending_sm(tmp_path, SuspendRun)
+        orch = build(env, "no-susp", sm=sm, provenance=False)  # suspend_exc unset
+        assert orch.run() == RunStatus.ERROR

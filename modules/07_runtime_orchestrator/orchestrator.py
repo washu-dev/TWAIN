@@ -122,11 +122,18 @@ class Orchestrator:
         execute_install_deps: bool = False,
         verify_codegen: bool = False,
         auto_approve: bool = False,
+        suspend_exc: Optional[type] = None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
         self.store = store
         self.notifier = notifier
+        # Exception type the injected ``ask`` raises to pause a run for user input
+        # (see runner.suspend.SuspendRun). When set, run() catches it and returns
+        # PAUSED instead of erroring, so the caller can release the process and a
+        # later ``resume`` re-enters the same state. None (CLI/demo/tests) => no
+        # suspend path: an ask that blocks on stdin behaves exactly as before.
+        self._suspend_exc = suspend_exc
         self.step_timeouts = step_timeouts
         self.step_retries = step_retries
         self.max_replans = max_replans
@@ -304,17 +311,30 @@ class Orchestrator:
         and repeated failures trip the breaker before we burn the budget.
         """
         timeout = timeout_for(state.name) if self.step_timeouts else None
+        suspended: Dict[str, BaseException] = {}
 
         def _step():
-            run_agent(
-                lambda _spec: self.sm.run(),
-                {},
-                state_name=state.name,
-                timeout=timeout,
-                max_retries=0,
-            )
+            try:
+                run_agent(
+                    lambda _spec: self.sm.run(),
+                    {},
+                    state_name=state.name,
+                    timeout=timeout,
+                    max_retries=0,
+                )
+            except Exception as exc:  # noqa: BLE001 -- suspend re-raised past breaker
+                # Pausing for user input is progress, not a stage failure: capture
+                # the suspend and return so the circuit breaker records a success,
+                # then re-raise it below (outside the breaker). Otherwise a handful
+                # of clarify rounds would trip the breaker and abort the run.
+                if self._suspend_exc is not None and isinstance(exc, self._suspend_exc):
+                    suspended["exc"] = exc
+                    return
+                raise
 
         self.resilient_caller.execute(_step)
+        if suspended:
+            raise suspended["exc"]
 
     def _apply_loop_bounds(self, entered: State) -> None:
         """Bound replan/correct cycles, observed from the machine's transitions."""
@@ -350,6 +370,27 @@ class Orchestrator:
             priority=Priority.CRITICAL,
         )
         return RunStatus.ERROR
+
+    # --------------------------------------------------------------- suspend path
+    def _suspend(self, state: State, exc: Exception) -> RunStatus:
+        """Pause the run pending user input, checkpoint, and release the caller.
+
+        The state-machine handler aborted mid-step -- it asked the researcher a
+        question and no answer was waiting -- so :meth:`StateMachine.run` never
+        committed a transition and ``current_state`` is unchanged. The run is
+        checkpointed as PAUSED (a resumable status) and resumes by re-entering
+        this same state once the answer arrives, at which point the ask returns
+        it. Nothing is held open in the meantime.
+        """
+        self.run_session.set_status(RunStatus.PAUSED)
+        self.run_session.set_state(self.sm.current_state)
+        self.run_session.set_context(self.sm.context)
+        self._checkpoint()
+        self._publish(
+            "run.suspended",
+            {"state": self.sm.current_state.name, "reason": getattr(exc, "reason", "input")},
+        )
+        return RunStatus.PAUSED
 
     # ----------------------------------------------------------------------- run
     def run(self, until: Optional[State] = None) -> RunStatus:
@@ -403,6 +444,10 @@ class Orchestrator:
                     state,
                 )
             except Exception as exc:  # noqa: BLE001 -- classified & surfaced below
+                # A pause for user input unwinds the step as an exception; treat it
+                # as a clean suspension (checkpoint + release), not an error.
+                if self._suspend_exc is not None and isinstance(exc, self._suspend_exc):
+                    return self._suspend(state, exc)
                 return self._handle_error(exc, state)
 
             entered = self.sm.current_state

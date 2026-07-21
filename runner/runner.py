@@ -1,86 +1,137 @@
 """The runner service: claim queued jobs and drive the pipeline.
 
-One job == one run. The process blocks (polling the DB) while the state machine
-waits on the user — during CLARIFY (via :class:`DbAsk`) and at the plan-approval
-gate. Run several runner processes/tasks to handle more concurrent runs.
+One *job* is one slice of work on a run, not a whole run. A run advances until it
+needs the researcher — a CLARIFY question, the heavy-calc confirmation, or the
+plan-approval gate — at which point it is checkpointed to the shared session
+store and the process is **released** (the job is done). Nothing blocks waiting
+on a human. When the user replies, the API enqueues a ``resume`` job and a runner
+picks the run back up from its checkpoint. A ``start`` job runs the first slice;
+each ``resume`` runs the next.
+
+Because no process is pinned to a waiting run, one runner serves many runs, and
+any idle runner can resume any run — no work is wasted spinning on ``sleep``.
+
+Resume durability: the run's state + context resume from the Postgres session
+store, but stage artifacts (intent_spec, the run bundle, …) are files under
+``logs/`` written by the state machine. Resuming on a *different* box therefore
+requires those files to be reachable — run a single runner, or put ``logs/`` on
+shared storage (e.g. EFS). Making mid-run artifacts fully DB-backed is a
+follow-up.
 
 Usage::
 
-    pixi run python -m runner.runner            # loop forever
+    pixi run python -m runner.runner            # loop forever (LISTEN/NOTIFY)
     pixi run python -m runner.runner --once     # process at most one job (dev/CI)
 """
 import argparse
 import time
 
 from runner.artifacts import capture_artifacts
-from runner.bridges import DbAsk, PgEventSink, request_plan_approval
-from runner.db import RunnerDB
+from runner.bridges import DbAsk, PgEventSink, consume_approval, post_plan_for_approval
+from runner.db import JobNotifyWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
+from runner.notifications import default_notifier
 from runner.pg_store import PgStore
 
-DEFAULT_POLL_SECONDS = 2.0
+# Safety-net poll cadence for the loop. With LISTEN/NOTIFY the runner wakes the
+# instant a job is queued, so this only bounds how long a *missed* notification
+# could sit unclaimed — it no longer gates latency, so it can be generous.
+DEFAULT_POLL_SECONDS = 30.0
+
+SUPPORTED_JOB_KINDS = ("start", "resume")
 
 
-def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
-    """Run the two legs of the pipeline, gating on plan approval at BUILD."""
-    # Leg 1: intake → clarify → decompose → discover → plan, pausing at BUILD.
-    status = orch.run(until=engine.STATE_BUILD)
-    if status == "error":
-        db.add_assistant_message(
-            session_id, "The run failed before planning — see the run log for details.",
-            kind="chat",
-        )
-        return
-    if status != "paused":
-        # Reached a terminal state without a plan (e.g. empty discovery); finish up.
+def _state_name(state_obj) -> str:
+    """Normalize a State enum (real engine) or bare string (tests) to its name."""
+    return getattr(state_obj, "name", state_obj)
+
+
+def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_notifier) -> None:
+    """Advance the run until it completes, errors, or suspends for the user.
+
+    Suspensions (CLARIFY input, heavy-calc confirmation) and the plan-approval
+    gate each *release the process*: the run is checkpointed and we return. A
+    ``resume`` job — enqueued by the API when the user responds — continues it.
+    The loop lets a single resume cross the approval gate straight into execution
+    (e.g. an already-approved plan, or unattended mode) without a second job.
+    """
+    build_state = _state_name(engine.STATE_BUILD)
+    while True:
+        state = engine.current_state_name(orch)
+
+        # ---- plan-approval gate (driver-level, at BUILD) ---------------------
+        if state == build_state:
+            if not _cross_approval_gate(db, session_id, orch, engine, notifier):
+                return  # awaiting the user's decision (or rejected); released
+            status = orch.run()  # leg 2: build → execute → … → terminate
+        else:
+            status = orch.run(until=engine.STATE_BUILD)  # leg 1 / continue to gate
+
+        state = engine.current_state_name(orch)
+        if status == "paused" and state == build_state:
+            continue  # reached the approval gate; handle it on the next iteration
+        if status == "paused":
+            return  # suspended for user input (clarify / heavy-calc); released
+        if status == "completed":
+            db.add_assistant_message(
+                session_id, engine.final_summary(orch), kind="chat", state="TERMINATE"
+            )
+            return
+        if status == "error":
+            db.add_assistant_message(
+                session_id, "The run failed — see the run log for details.", kind="chat"
+            )
+            return
+        # Reached a terminal state without pausing (e.g. empty discovery).
         db.add_assistant_message(session_id, engine.final_summary(orch), kind="chat")
         return
 
-    # Approval gate: normally show the plan and block for the user's decision.
-    # In unattended mode (TWAIN_AUTO_RUN) skip it and run straight through --
-    # combined with execution being on, TWAIN runs the calculation automatically.
+
+def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
+    """Handle the BUILD approval gate. True to proceed into execution, else release.
+
+    Unattended mode (TWAIN_AUTO_RUN) approves automatically. Otherwise: consume
+    the user's decision if it's in; if not, post the plan and release; a 'reject'
+    stops the run.
+    """
     if _env_flag("TWAIN_AUTO_RUN"):
         db.add_assistant_message(
             session_id, "Plan auto-approved (unattended mode). Building and executing…",
             kind="chat", state="BUILD",
         )
-    else:
-        decision = request_plan_approval(db, session_id, engine.read_execution_plan(orch))
-        if decision != "approve":
-            db.set_conversation_status(session_id, "rejected")
-            db.add_assistant_message(
-                session_id,
-                "Plan rejected — nothing was built or executed. "
-                "Start a new run, or (soon) rerun from an earlier step with changes.",
-                kind="chat",
-            )
-            return
-        db.add_assistant_message(
-            session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
-        )
+        return True
 
-    # Leg 2: build → execute → interpret → validate → accept → terminate.
-    status = orch.run()
-    if status == "completed":
+    decision = consume_approval(db, session_id)
+    if decision is None:
+        # No decision yet: show the plan (idempotently), mark awaiting, release.
+        post_plan_for_approval(db, session_id, engine.read_execution_plan(orch), notifier=notifier)
+        return False
+    if decision != "approve":
+        db.set_conversation_status(session_id, "rejected")
         db.add_assistant_message(
-            session_id, engine.final_summary(orch), kind="chat", state="TERMINATE"
-        )
-    elif status == "error":
-        db.add_assistant_message(
-            session_id, "The run failed during execution — see the run log for details.",
+            session_id,
+            "Plan rejected — nothing was built or executed. "
+            "Start a new run, or (soon) rerun from an earlier step with changes.",
             kind="chat",
         )
+        return False
+    db.add_assistant_message(
+        session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
+    )
+    return True
 
 
 def process_job(job: dict, db: RunnerDB, engine=None) -> None:
-    """Drive a single job's run, then capture its artifacts for the report."""
+    """Drive one slice of a run (start or resume), then capture its artifacts."""
     engine = engine or default_engine()
     session_id = job["session_id"]
     kind = job.get("kind", "start")
-    if kind != "start":
-        raise NotImplementedError(f"job kind '{kind}' is not supported yet (Phase 3)")
+    if kind not in SUPPORTED_JOB_KINDS:
+        raise NotImplementedError(f"job kind '{kind}' is not supported yet")
 
     params = job.get("params") or {}
+    # On resume the orchestrator rebuilds its state + context from the session
+    # store; request/researcher_id are only needed to *start* a run.
     orch = engine.build_orchestrator(
         session_id=session_id,
         researcher_id=params.get("researcher_id", ""),
@@ -92,7 +143,8 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     try:
         _drive_run(db, session_id, orch, engine)
     finally:
-        # Best-effort: persist the specs + generated code so the report can show them.
+        # Best-effort: persist the specs + generated code so the report can show
+        # them (also on a suspend, so partial artifacts are visible while waiting).
         try:
             capture_artifacts(db, session_id, orch)
         except Exception as exc:  # never fail the job over artifact capture
@@ -101,16 +153,25 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
 
 def run_loop(
     *, once: bool = False, poll: float = DEFAULT_POLL_SECONDS, db: RunnerDB | None = None,
-    engine_factory=default_engine, sleep=time.sleep,
+    engine_factory=default_engine, sleep=time.sleep, waiter=None,
 ) -> None:
-    """Claim and process jobs until interrupted (or one job when ``once``)."""
+    """Claim and process jobs until interrupted (or one job when ``once``).
+
+    When idle, the loop waits on ``waiter`` (Postgres LISTEN/NOTIFY) so a newly
+    queued job wakes it immediately; ``poll`` is only the fallback cadence. If no
+    ``waiter`` is given it falls back to ``sleep(poll)`` (used by ``--once`` and
+    the unit tests, which never idle).
+    """
     db = db or RunnerDB()
     while True:
         job = db.claim_job()
         if job is None:
             if once:
                 return
-            sleep(poll)
+            if waiter is not None:
+                waiter.wait(poll)
+            else:
+                sleep(poll)
             continue
         try:
             db.mark_job(job["id"], "running")
@@ -127,9 +188,16 @@ def run_loop(
 def main() -> None:
     parser = argparse.ArgumentParser(description="TWAIN pipeline runner")
     parser.add_argument("--once", action="store_true", help="process at most one job then exit")
-    parser.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS)
+    parser.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS,
+                        help="fallback poll cadence in seconds (LISTEN/NOTIFY handles latency)")
     args = parser.parse_args()
-    run_loop(once=args.once, poll=args.poll)
+    db = RunnerDB()
+    if args.once:
+        run_loop(once=True, poll=args.poll, db=db)
+        return
+    # Loop forever, waking on a NOTIFY the instant a job is queued.
+    with JobNotifyWaiter(db) as waiter:
+        run_loop(once=False, poll=args.poll, db=db, waiter=waiter)
 
 
 if __name__ == "__main__":

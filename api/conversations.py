@@ -61,6 +61,29 @@ def _default_title(request: str) -> str:
     return request[:60] + ("…" if len(request) > 60 else "")
 
 
+def _enqueue_resume(cursor, session_id: str) -> None:
+    """Queue a ``resume`` job so a runner continues the paused run.
+
+    This is how a user reply / approval *wakes* a run in the async model: the run
+    is checkpointed and idle until a job re-drives it. Guarded so a rapid double
+    reply doesn't pile up duplicate work — at most one queued resume per session
+    (the runner also serializes per session, and a duplicate resume is a safe
+    no-op). Runs in the caller's transaction; the jobs-insert trigger NOTIFYs the
+    runner (migration 003).
+    """
+    cursor.execute(
+        """
+        INSERT INTO jobs (session_id, kind, params)
+        SELECT %s, 'resume', '{}'::jsonb
+        WHERE NOT EXISTS (
+            SELECT 1 FROM jobs
+            WHERE session_id = %s AND kind = 'resume' AND status = 'queued'
+        );
+        """,
+        (session_id, session_id),
+    )
+
+
 def get_conversation(conversation_id: str, user_id: str) -> dict | None:
     """Fetch a conversation scoped to its owner; None if missing or not theirs."""
     conn = get_connection()
@@ -159,6 +182,8 @@ def add_message(conversation_id: str, content: str, *, kind: str = "chat") -> di
             "UPDATE conversations SET status = 'running', updated_at = now() WHERE id = %s;",
             (conversation_id,),
         )
+        # Wake the paused run so it consumes this reply (e.g. a clarification answer).
+        _enqueue_resume(cursor, conversation_id)
         conn.commit()
         cursor.close()
         return row
@@ -183,6 +208,8 @@ def add_approval_response(conversation_id: str, decision: str) -> dict:
             (conversation_id, decision),
         )
         row = cursor.fetchone()
+        # Wake the run parked at the approval gate to act on the decision.
+        _enqueue_resume(cursor, conversation_id)
         conn.commit()
         cursor.close()
         return row

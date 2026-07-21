@@ -1,46 +1,70 @@
-"""Unit tests for the runner — fakes stand in for the DB and the engine, so no
-Postgres or pixi environment is needed. These exercise the job loop, the
-approval gate, and the chat/event bridges end to end in-process.
+"""Unit tests for the async runner — fakes stand in for the DB and the engine, so
+no Postgres or pixi environment is needed. These exercise the suspend/resume
+model: a run advances until it needs the user, then *releases* the process (it
+never blocks polling), and a ``resume`` job picks it back up.
 """
 import json
 import types
 
+import pytest
+
 from runner import runner
 from runner.artifacts import capture_artifacts
-from runner.bridges import DbAsk, PgEventSink, request_plan_approval
+from runner.bridges import (
+    DbAsk,
+    PgEventSink,
+    consume_approval,
+    post_plan_for_approval,
+)
 from runner.pg_store import PgStore
+from runner.suspend import SuspendRun
 
 SESSION = "conv-1"
 
 
 class FakeDB:
-    """In-memory stand-in for RunnerDB."""
+    """In-memory stand-in for RunnerDB with a faithful message log."""
 
-    def __init__(self, approval="approve", clarify="25 degrees C", jobs=None):
-        self.messages = []
+    def __init__(self, jobs=None):
+        self.messages = []  # {id, role, content, kind, state}
         self.events = []
         self.status = None
         self.state = None
         self.jobs_done = []
-        self._approval = approval
-        self._clarify = clarify
         self._jobs = list(jobs or [])
         self.sessions = {}
         self.artifacts = []
+        self._next_id = 1
 
-    # messages / status / state
+    # -- message helpers --------------------------------------------------------
+    def _add(self, role, content, kind, state=None):
+        mid = self._next_id
+        self._next_id += 1
+        self.messages.append(
+            {"id": mid, "role": role, "content": content, "kind": kind, "state": state}
+        )
+        return mid
+
     def add_assistant_message(self, sid, content, *, kind="chat", state=None):
-        self.messages.append({"content": content, "kind": kind, "state": state})
-        return len(self.messages)
+        return self._add("assistant", content, kind, state)
+
+    def add_user(self, content, kind="chat"):  # test-only helper
+        return self._add("user", content, kind)
 
     def max_message_id(self, sid):
-        return len(self.messages)
+        return self.messages[-1]["id"] if self.messages else 0
+
+    def last_question_id(self, sid, kinds=("clarification",)):
+        ids = [m["id"] for m in self.messages if m["role"] == "assistant" and m["kind"] in kinds]
+        return max(ids) if ids else None
 
     def user_replies_after(self, sid, after_id, kind=None):
-        if kind == "approval_response":
-            return [{"content": self._approval, "kind": kind}]
-        return [{"content": self._clarify, "kind": "chat"}]
+        return [
+            m for m in self.messages
+            if m["role"] == "user" and m["id"] > after_id and (kind is None or m["kind"] == kind)
+        ]
 
+    # -- status / state / events ------------------------------------------------
     def set_conversation_status(self, sid, status):
         self.status = status
 
@@ -53,14 +77,14 @@ class FakeDB:
     def upsert_artifact(self, sid, name, content, kind):
         self.artifacts.append({"name": name, "content": content, "kind": kind})
 
-    # jobs
+    # -- jobs -------------------------------------------------------------------
     def claim_job(self):
         return self._jobs.pop(0) if self._jobs else None
 
     def mark_job(self, job_id, status):
         self.jobs_done.append((job_id, status))
 
-    # sessions (for PgStore tests)
+    # -- sessions ---------------------------------------------------------------
     def session_get(self, sid):
         return self.sessions.get(sid)
 
@@ -70,29 +94,67 @@ class FakeDB:
     def session_list(self, researcher_id=None):
         return list(self.sessions.values())
 
+    # -- convenience for assertions ---------------------------------------------
+    def kinds(self):
+        return [m["kind"] for m in self.messages if m["role"] == "assistant"]
+
 
 def _event(event_type, payload):
     return types.SimpleNamespace(event_type=event_type, payload=json.dumps(payload))
 
 
-class FakeOrchestrator:
-    """Two-leg run: leg 1 clarifies + pauses at BUILD, leg 2 completes."""
+class RecordingNotifier:
+    def __init__(self):
+        self.calls = []
 
-    def __init__(self, ask, sink):
+    def __call__(self, session_id, reason, message):
+        self.calls.append((session_id, reason, message))
+
+
+class FakeOrchestrator:
+    """Emulates the real orchestrator's suspend contract for driver tests.
+
+    Drives INTAKE → (CLARIFY) → pause at BUILD on leg 1, then → (EXECUTE heavy) →
+    TERMINATE on leg 2. Calls the injected ``ask`` at CLARIFY / heavy-calc; if it
+    raises :class:`SuspendRun` we stay in the current state and return "paused"
+    (exactly what ``Orchestrator.run`` does).
+    """
+
+    def __init__(self, ask, sink, *, clarifies=False, heavy=False):
         self.ask = ask
         self.sink = sink
         self.sm = types.SimpleNamespace(
             context=types.SimpleNamespace(artifacts={}),
-            current_state=types.SimpleNamespace(name="TERMINATE"),
+            current_state=types.SimpleNamespace(name="INTAKE"),
         )
-        self._leg = 0
+        self._clarified = not clarifies
+        self._heavy = heavy
+        self._heavy_done = False
+
+    def _set(self, name):
+        self.sm.current_state = types.SimpleNamespace(name=name)
 
     def run(self, until=None):
-        if self._leg == 0:
-            self._leg = 1
-            self.ask("What temperature?")  # exercises the clarify bridge
+        try:
+            return self._run(until)
+        except SuspendRun as s:
+            self.sink.publish(_event("run.suspended", {"state": self.sm.current_state.name, "reason": s.reason}))
+            return "paused"
+
+    def _run(self, until):
+        if not self._clarified:
+            self._set("CLARIFY")
+            self.ask("What temperature?")  # may raise SuspendRun (suspend) or return
+            self._clarified = True
+        if until is not None:  # leg 1 stops at the approval gate
+            self._set("BUILD")
             self.sink.publish(_event("stage.completed", {"from": "PLAN", "to": "BUILD"}))
             return "paused"
+        if self._heavy and not self._heavy_done:
+            self._set("EXECUTE")
+            self.ask("Run the heavy calc? [y/N]")  # may raise SuspendRun or return
+            self._heavy_done = True
+        self._set("TERMINATE")
         self.sink.publish(_event("run.completed", {"state": "TERMINATE"}))
         return "completed"
 
@@ -100,11 +162,16 @@ class FakeOrchestrator:
 class FakeEngine:
     STATE_BUILD = "BUILD"
 
-    def __init__(self, plan=None):
+    def __init__(self, plan=None, clarifies=False, heavy=False):
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
+        self._clarifies = clarifies
+        self._heavy = heavy
 
     def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store):
-        return FakeOrchestrator(ask, sink)
+        return FakeOrchestrator(ask, sink, clarifies=self._clarifies, heavy=self._heavy)
+
+    def current_state_name(self, orch):
+        return orch.sm.current_state.name
 
     def read_execution_plan(self, orch):
         return self._plan
@@ -113,46 +180,149 @@ class FakeEngine:
         return "Run complete."
 
 
+# ── DbAsk (the clarify / heavy-calc ask bridge) ───────────────────────────────
+class TestDbAsk:
+    def test_first_ask_posts_question_and_suspends(self):
+        db = FakeDB()
+        notifier = RecordingNotifier()
+        ask = DbAsk(db, SESSION, notifier=notifier)
+        with pytest.raises(SuspendRun):
+            ask("Which solvent?")
+        assert db.kinds() == ["clarification"]
+        assert db.status == "awaiting_input"
+        assert notifier.calls == [(SESSION, "input", "Which solvent?")]
+
+    def test_resume_returns_the_waiting_answer(self):
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "Which solvent?", kind="clarification", state="CLARIFY")
+        db.add_user("use water")
+        ask = DbAsk(db, SESSION)
+        assert ask("Which solvent?") == "use water"
+        assert db.status == "running"  # reset once the answer is consumed
+
+    def test_outstanding_question_is_not_reposted(self):
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "Which solvent?", kind="clarification", state="CLARIFY")
+        ask = DbAsk(db, SESSION)
+        with pytest.raises(SuspendRun):
+            ask("Which solvent?")
+        assert len(db.messages) == 1  # no duplicate question
+        assert db.status == "awaiting_input"
+
+    def test_consumed_answer_is_not_reused_for_a_new_round(self):
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "Q1", kind="clarification", state="CLARIFY")
+        db.add_user("A1")
+        ask = DbAsk(db, SESSION)
+        assert ask("Q1") == "A1"
+        with pytest.raises(SuspendRun):  # a second round posts a fresh question
+            ask("Q2")
+        assert [m["content"] for m in db.messages if m["kind"] == "clarification"] == ["Q1", "Q2"]
+
+    def test_stale_answer_ignored_once_a_newer_question_exists(self):
+        # CLARIFY was answered, then a newer (approval) question was posted: the
+        # old clarify answer must NOT be handed to a later heavy-calc ask.
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "Q1", kind="clarification", state="CLARIFY")
+        db.add_user("A1")
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        ask = DbAsk(db, SESSION)
+        with pytest.raises(SuspendRun):
+            ask("Run the heavy calc? [y/N]")
+        heavy_qs = [m for m in db.messages if m["kind"] == "clarification" and "heavy" in m["content"]]
+        assert len(heavy_qs) == 1  # a fresh question was posted, not the stale answer returned
+
+
+# ── plan-approval gate ────────────────────────────────────────────────────────
+class TestApprovalGate:
+    def test_post_then_consume(self):
+        db = FakeDB()
+        notifier = RecordingNotifier()
+        post_plan_for_approval(db, SESSION, {"cost": 1.0}, notifier=notifier)
+        assert db.status == "awaiting_approval"
+        assert db.kinds() == ["approval_request"]
+        assert notifier.calls and notifier.calls[0][1] == "approval"
+        assert consume_approval(db, SESSION) is None  # no decision yet
+        db.add_user("approve", kind="approval_response")
+        assert consume_approval(db, SESSION) == "approve"
+
+    def test_post_is_idempotent(self):
+        db = FakeDB()
+        post_plan_for_approval(db, SESSION, {"cost": 1.0})
+        post_plan_for_approval(db, SESSION, {"cost": 1.0})  # redundant resume
+        assert db.kinds().count("approval_request") == 1
+
+    def test_decision_normalized(self):
+        db = FakeDB()
+        post_plan_for_approval(db, SESSION, {"cost": 1.0})
+        db.add_user("APPROVE", kind="approval_response")
+        assert consume_approval(db, SESSION) == "approve"
+
+
+# ── process_job / the drive loop ──────────────────────────────────────────────
 class TestProcessJob:
+    def _job(self, kind="start"):
+        return {"session_id": SESSION, "kind": kind, "params": {}}
+
+    def test_clarify_suspends_and_releases(self):
+        db = FakeDB()
+        runner.process_job(self._job(), db, FakeEngine(clarifies=True))
+        assert "clarification" in db.kinds()
+        assert "approval_request" not in db.kinds()
+        assert db.status == "awaiting_input"
+        assert not any(e["event_type"] == "run.completed" for e in db.events)
+
+    def test_approval_gate_posts_plan_and_releases(self):
+        db = FakeDB()
+        runner.process_job(self._job(), db, FakeEngine())
+        assert "approval_request" in db.kinds()
+        assert db.status == "awaiting_approval"
+        assert not any(e["event_type"] == "run.completed" for e in db.events)
+
     def test_approved_run_completes(self):
-        db = FakeDB(approval="approve")
-        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
-        kinds = [m["kind"] for m in db.messages]
-        assert "clarification" in kinds
-        assert "approval_request" in kinds
+        # Decision already recorded (e.g. arrived before the runner reached BUILD,
+        # or this is the resume that carries it): the run crosses the gate + finishes.
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        db.add_user("approve", kind="approval_response")
+        runner.process_job(self._job(), db, FakeEngine())
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
         assert db.messages[-1]["content"] == "Run complete."
 
     def test_rejected_run_stops_before_build(self):
-        db = FakeDB(approval="reject")
-        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        db.add_user("reject", kind="approval_response")
+        runner.process_job(self._job(), db, FakeEngine())
         assert db.status == "rejected"
-        # no completion event because leg 2 never ran
         assert not any(e["event_type"] == "run.completed" for e in db.events)
         assert "rejected" in db.messages[-1]["content"].lower()
 
     def test_auto_run_skips_approval_gate(self, monkeypatch):
-        # Unattended mode (TWAIN_AUTO_RUN) runs to completion without the plan-
-        # approval gate. If the gate were reached it would raise (fail fast, no hang).
         monkeypatch.setenv("TWAIN_AUTO_RUN", "1")
-        monkeypatch.setattr(
-            runner, "request_plan_approval",
-            lambda *a, **k: (_ for _ in ()).throw(AssertionError("approval must be skipped")),
-        )
-        db = FakeDB()  # no approval reply provided
-        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
-        assert "approval_request" not in [m["kind"] for m in db.messages]
+        db = FakeDB()
+        runner.process_job(self._job(), db, FakeEngine())
+        assert "approval_request" not in db.kinds()
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
 
+    def test_resume_kind_is_supported(self):
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        db.add_user("approve", kind="approval_response")
+        runner.process_job(self._job(kind="resume"), db, FakeEngine())
+        assert db.status == "completed"
+
     def test_unsupported_kind_raises(self):
         db = FakeDB()
-        try:
-            runner.process_job({"session_id": SESSION, "kind": "resume", "params": {}}, db, FakeEngine())
-            raise AssertionError("expected NotImplementedError")
-        except NotImplementedError:
-            pass
+        with pytest.raises(NotImplementedError):
+            runner.process_job(self._job(kind="rerun"), db, FakeEngine())
+
+
+# ── run_loop ──────────────────────────────────────────────────────────────────
+class _StopLoop(Exception):
+    pass
 
 
 class TestRunLoop:
@@ -161,6 +331,13 @@ class TestRunLoop:
         runner.run_loop(once=True, db=db, engine_factory=FakeEngine, sleep=lambda _s: None)
         assert (7, "running") in db.jobs_done
         assert (7, "done") in db.jobs_done
+
+    def test_resume_job_is_processed(self):
+        db = FakeDB(jobs=[{"id": 8, "session_id": SESSION, "kind": "resume", "params": {}}])
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        db.add_user("approve", kind="approval_response")
+        runner.run_loop(once=True, db=db, engine_factory=FakeEngine, sleep=lambda _s: None)
+        assert (8, "done") in db.jobs_done
 
     def test_failing_job_is_marked_error(self):
         class Boom(FakeEngine):
@@ -172,22 +349,36 @@ class TestRunLoop:
         assert (9, "error") in db.jobs_done
         assert db.status == "error"
 
+    def test_idle_loop_waits_on_the_waiter_then_processes(self):
+        # No jobs initially: the loop must block on the waiter (not sleep-spin),
+        # wake when one is queued, process it, then wait again.
+        db = FakeDB()
+        job = {"id": 11, "session_id": SESSION, "kind": "start", "params": {}}
 
+        class WakeThenStop:
+            def __init__(self):
+                self.calls = 0
+
+            def wait(self, timeout):
+                self.calls += 1
+                if self.calls == 1:
+                    db._jobs.append(job)
+                    return True
+                raise _StopLoop()
+
+        waiter = WakeThenStop()
+
+        def boom_sleep(_s):
+            raise AssertionError("idle loop must use the waiter, not sleep")
+
+        with pytest.raises(_StopLoop):
+            runner.run_loop(db=db, engine_factory=FakeEngine, sleep=boom_sleep, waiter=waiter)
+        assert (11, "done") in db.jobs_done
+        assert waiter.calls == 2
+
+
+# ── PgEventSink ───────────────────────────────────────────────────────────────
 class TestBridges:
-    def test_db_ask_posts_question_and_returns_reply(self):
-        db = FakeDB(clarify="use water as solvent")
-        ask = DbAsk(db, SESSION, sleep=lambda _s: None)
-        answer = ask("Which solvent?")
-        assert answer == "use water as solvent"
-        assert db.messages[0]["kind"] == "clarification"
-        assert db.status == "running"  # reset after the reply
-
-    def test_request_plan_approval_returns_decision(self):
-        db = FakeDB(approval="APPROVE")
-        decision = request_plan_approval(db, SESSION, {"cost": 1.0}, sleep=lambda _s: None)
-        assert decision == "approve"  # normalized
-        assert db.messages[0]["kind"] == "approval_request"
-
     def test_event_sink_persists_and_mirrors_state(self):
         db = FakeDB()
         sink = PgEventSink(db, SESSION)
@@ -196,6 +387,14 @@ class TestBridges:
         assert db.state == "PLAN"
         assert db.status == "completed"
         assert [e["event_type"] for e in db.events] == ["stage.completed", "run.completed"]
+
+    def test_suspend_event_leaves_awaiting_status(self):
+        db = FakeDB()
+        db.set_conversation_status(SESSION, "awaiting_input")
+        sink = PgEventSink(db, SESSION)
+        sink.publish(_event("run.suspended", {"state": "CLARIFY", "reason": "input"}))
+        assert db.status == "awaiting_input"  # not flipped back to running
+        assert db.events[-1]["event_type"] == "run.suspended"
 
 
 class TestPgStore:
@@ -206,15 +405,11 @@ class TestPgStore:
 
     def test_save_requires_session_id(self):
         store = PgStore(FakeDB())
-        try:
+        with pytest.raises(ValueError):
             store.save_session({"status": "running"})
-            raise AssertionError("expected ValueError")
-        except ValueError:
-            pass
 
     def test_resume_only_when_resumable(self):
-        db = FakeDB()
-        store = PgStore(db)
+        store = PgStore(FakeDB())
         store.save_session({"session_id": "s1", "status": "completed"})
         assert store.resume_session("s1") is None
         store.save_session({"session_id": "s2", "status": "paused"})

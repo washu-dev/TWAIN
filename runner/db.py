@@ -8,8 +8,10 @@ vars, with the password resolved from AWS Secrets Manager in the cloud and from
 """
 import json
 import os
+import select
 
 import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import Json, RealDictCursor
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -18,6 +20,11 @@ DB_NAME = os.getenv("DB_NAME", "twaindb")
 DB_USER = os.getenv("DB_USER", "postgres")
 
 RESUMABLE_STATUSES = ("running", "paused", "error")
+
+# Postgres channel the jobs-insert trigger NOTIFYs (see migration 003). The runner
+# LISTENs on it so a newly queued job wakes it immediately instead of on the next
+# poll tick — no always-on 1s spin (Phase 2).
+JOBS_CHANNEL = "twain_jobs"
 
 
 def _resolve_db_password() -> str:
@@ -49,14 +56,27 @@ class RunnerDB:
 
     # ---- jobs -----------------------------------------------------------------
     def claim_job(self) -> dict | None:
-        """Atomically claim the oldest queued job (FOR UPDATE SKIP LOCKED)."""
+        """Atomically claim the oldest queued job (FOR UPDATE SKIP LOCKED).
+
+        Serialized per session: a job is skipped while another job for the *same*
+        session is already claimed/running, so at most one runner drives a session
+        at a time. That keeps a redundant ``resume`` (e.g. the user replied twice)
+        from racing a live run on the same checkpoint. A duplicate that does slip
+        through is a safe no-op — DbAsk finds no new answer and re-suspends.
+        """
         conn = self._connect()
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(
                 """
                 SELECT id, session_id, kind, params FROM jobs
-                WHERE status = 'queued' ORDER BY id
+                WHERE status = 'queued'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs active
+                      WHERE active.session_id = jobs.session_id
+                        AND active.status IN ('claimed', 'running')
+                  )
+                ORDER BY id
                 FOR UPDATE SKIP LOCKED LIMIT 1;
                 """
             )
@@ -115,6 +135,24 @@ class RunnerDB:
             (session_id,),
         )
         return row["m"] if row else 0
+
+    def last_question_id(
+        self, session_id: str, kinds: tuple[str, ...] = ("clarification",)
+    ) -> int | None:
+        """Id of the most recent assistant *question* of the given kind(s).
+
+        Used by the bridges to pair an answer with its question: the user's reply
+        to a question is a later user message; if none exists yet the run is still
+        awaiting input. Returns None when no such question has been asked.
+        """
+        placeholders = ", ".join(["%s"] * len(kinds))
+        row = self._query_one(
+            "SELECT MAX(id) AS m FROM messages "
+            "WHERE conversation_id = %s AND role = 'assistant' "
+            f"AND kind IN ({placeholders});",
+            (session_id, *kinds),
+        )
+        return row["m"] if row and row["m"] is not None else None
 
     def user_replies_after(self, session_id: str, after_id: int, kind: str | None = None) -> list:
         sql = (
@@ -218,3 +256,49 @@ class RunnerDB:
             return rows
         finally:
             conn.close()
+
+
+class JobNotifyWaiter:
+    """Blocks until a job is queued, using Postgres LISTEN/NOTIFY (Phase 2).
+
+    Holds one long-lived autocommit connection that ``LISTEN``s on
+    :data:`JOBS_CHANNEL`; the jobs-insert trigger (migration 003) ``NOTIFY``s it.
+    :meth:`wait` sleeps on the socket and returns the moment a job arrives —
+    replacing the old always-on ``sleep(poll)`` spin. The ``timeout`` is only a
+    safety-net poll cadence (so a missed NOTIFY still gets picked up eventually),
+    so it can be generous rather than 1s.
+
+    Use as a context manager so the dedicated connection is always closed::
+
+        with JobNotifyWaiter(db) as waiter:
+            waiter.wait(timeout=30.0)
+    """
+
+    def __init__(self, db: RunnerDB, channel: str = JOBS_CHANNEL):
+        self.db = db
+        self.channel = channel
+        self._conn = None
+
+    def __enter__(self) -> "JobNotifyWaiter":
+        self._conn = self.db._connect()
+        self._conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cur = self._conn.cursor()
+        cur.execute(f"LISTEN {self.channel};")
+        cur.close()
+        return self
+
+    def wait(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for a NOTIFY. True if one arrived."""
+        if self._conn is None:
+            raise RuntimeError("JobNotifyWaiter must be used as a context manager")
+        if select.select([self._conn], [], [], timeout) == ([], [], []):
+            return False  # timed out; caller re-polls as a safety net
+        self._conn.poll()
+        notified = bool(self._conn.notifies)
+        self._conn.notifies.clear()
+        return notified
+
+    def __exit__(self, *exc) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
