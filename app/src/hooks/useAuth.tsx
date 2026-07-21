@@ -21,8 +21,16 @@ WebBrowser.maybeCompleteAuthSession();
 const AUTH_DISABLED = process.env.EXPO_PUBLIC_AUTH_DISABLED === 'true';
 
 // OIDC scopes. openid/profile/email identify the user; offline_access asks for a
-// refresh token; the API scope makes the access token's audience the TWAIN API.
+// refresh token; the API scope (when set) makes the access token's audience the
+// TWAIN API.
 const BASE_SCOPES = ['openid', 'profile', 'email', 'offline_access'];
+
+// With no API scope configured we can't mint an access token audienced for the
+// TWAIN API, so the app runs in "ID-token mode": it sends the ID token (whose
+// audience is this SPA's client id — the API's ENTRA_API_AUDIENCE) as the bearer.
+// This needs no exposed API scope and no admin consent. With a scope set, the
+// access token is used instead (the standard resource-token flow).
+const USE_ID_TOKEN = !ENTRA_CONFIG.apiScope;
 
 interface AuthContextValue {
   isAuthenticated: boolean;
@@ -31,7 +39,7 @@ interface AuthContextValue {
   // An interactive sign-in / token exchange is in flight.
   isSigningIn: boolean;
   authDisabled: boolean;
-  // Whether SSO is configured (client id + API scope present).
+  // Whether SSO is configured (client id present).
   authConfigured: boolean;
   // Whether the sign-in request is built and ready to launch.
   canSignIn: boolean;
@@ -160,8 +168,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             discovery,
           );
           if (cancelled) return;
+          const bearer = USE_ID_TOKEN ? refreshed.idToken : refreshed.accessToken;
+          if (!bearer) {
+            throw new Error('Token refresh did not return the expected token.');
+          }
           await establishSession(
-            refreshed.accessToken,
+            bearer,
             refreshed.refreshToken ?? refreshToken,
           );
           if (!cancelled) setIsLoading(false);
@@ -206,7 +218,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             discovery,
           );
           if (cancelled) return;
-          await establishSession(token.accessToken, token.refreshToken ?? null);
+          const bearer = USE_ID_TOKEN ? token.idToken : token.accessToken;
+          if (!bearer) {
+            throw new Error('Sign in did not return the expected token.');
+          }
+          await establishSession(bearer, token.refreshToken ?? null);
         } catch (e) {
           if (!cancelled) {
             resetSession();

@@ -76,9 +76,10 @@ export const API_CONFIG = {
 /**
  * Microsoft Entra ID (Azure AD) SSO config for the OIDC auth-code + PKCE flow.
  * Values come from EXPO_PUBLIC_* env vars (inlined by Expo at build time); see
- * app/.env.example. The tenant defaults to WashU's, so only the SPA client id and
- * API scope normally need setting. `isEntraConfigured` gates whether the app can
- * offer SSO — when false (and auth isn't disabled) the login screen says so
+ * app/.env.example. The tenant defaults to WashU's, so only the SPA client id
+ * normally needs setting (the API scope is optional — see `apiScope` below).
+ * `isEntraConfigured` gates whether the app can offer SSO — when false (and auth
+ * isn't disabled) the login screen says so
  * instead of launching a broken flow.
  */
 const ENTRA_TENANT_ID =
@@ -88,15 +89,17 @@ export const ENTRA_CONFIG = {
   tenantId: ENTRA_TENANT_ID,
   // Application (client) ID of the "twain-web" SPA app registration (public/PKCE).
   clientId: process.env.EXPO_PUBLIC_ENTRA_CLIENT_ID || '',
-  // The API scope to request so the access token's audience matches the API,
-  // e.g. "api://twain-api/access_as_user".
+  // Optional API scope to request so the *access* token's audience matches the
+  // API, e.g. "api://twain-api/access_as_user". When empty, the app runs in
+  // ID-token mode (see useAuth.tsx): it requests only the standard OIDC scopes
+  // and sends the ID token — whose audience is this client id — as the API
+  // bearer, needing no exposed API scope or admin consent.
   apiScope: process.env.EXPO_PUBLIC_ENTRA_API_SCOPE || '',
   // OIDC issuer / authority for the tenant; discovery hangs off this.
   authority: `https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0`,
 } as const;
 
-export const isEntraConfigured = (): boolean =>
-  Boolean(ENTRA_CONFIG.clientId && ENTRA_CONFIG.apiScope);
+export const isEntraConfigured = (): boolean => Boolean(ENTRA_CONFIG.clientId);
 
 export const APP_STRINGS = {
   appTitle: 'TWAIN',
