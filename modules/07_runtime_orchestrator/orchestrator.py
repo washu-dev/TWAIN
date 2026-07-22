@@ -61,6 +61,15 @@ from retry_policy import (
 
 # Pipeline state -> provenance event_type (only the six the schema allows).
 # DECOMPOSE/DISCOVER/PLAN are all planning-phase work, so they log as "plan".
+class RunCancelled(RuntimeError):
+    """The researcher terminated the run (web UI Terminate button).
+
+    Raised out of :meth:`Orchestrator.run` (never converted to an error card)
+    so the driver -- the runner service -- can mark the conversation
+    'cancelled' instead of 'error'.
+    """
+
+
 _PROVENANCE_EVENT_TYPE = {
     State.INTAKE: "request",
     State.DECOMPOSE: "plan",
@@ -124,11 +133,17 @@ class Orchestrator:
         auto_approve: bool = False,
         execute_slurm: bool = False,
         slurm_cluster: Optional[str] = None,
+        cancel_check=None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
         self.store = store
         self.notifier = notifier
+        # Terminate seam (web UI's Terminate button): a zero-arg callable
+        # returning True once the researcher asked to stop. Checked between
+        # stages and before classifying any failure, so a cancelled run raises
+        # RunCancelled instead of producing an error card.
+        self.cancel_check = cancel_check
         self.step_timeouts = step_timeouts
         self.step_retries = step_retries
         self.max_replans = max_replans
@@ -201,6 +216,9 @@ class Orchestrator:
             # TWAIN_EXECUTE_SLURM / TWAIN_SLURM_CLUSTER).
             execute_slurm=execute_slurm,
             slurm_cluster=slurm_cluster,
+            # Terminate seam: lets a long EXECUTE (Slurm poll loop) notice the
+            # researcher's terminate request and scancel the cluster job.
+            should_abort=cancel_check,
         )
 
         if resuming:
@@ -351,7 +369,23 @@ class Orchestrator:
                 )
 
     # ----------------------------------------------------------------- error path
+    def _raise_if_cancelled(self) -> None:
+        """Raise :class:`RunCancelled` once the researcher asked to terminate."""
+        if self.cancel_check is not None and self.cancel_check():
+            self.run_session.set_status(RunStatus.PAUSED)
+            self._checkpoint()
+            self._publish("run.cancelled",
+                          {"state": self.sm.current_state.name},
+                          priority=Priority.CRITICAL)
+            raise RunCancelled(
+                f"run {self.session_id} terminated by the researcher"
+            )
+
     def _handle_error(self, exc: Exception, state: State) -> RunStatus:
+        # A failure while termination is pending is a consequence of the
+        # termination (aborted waits, cancelled Slurm job), not a run error:
+        # don't alarm the researcher with an error card for their own action.
+        self._raise_if_cancelled()
         classified = error_handler.classify(exc, state.name)
         self.last_error = classified
         self.run_session.error = classified.to_dict()
@@ -383,6 +417,7 @@ class Orchestrator:
         self._publish("run.started", {"state": self.sm.current_state.name})
 
         while True:
+            self._raise_if_cancelled()
             state = self.sm.current_state
 
             if state == State.TERMINATE:

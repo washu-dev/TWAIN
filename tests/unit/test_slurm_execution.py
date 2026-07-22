@@ -129,6 +129,33 @@ def test_wait_raises_when_budget_expires_without_cancelling():
     assert not any(argv[0] == "scancel" for argv in runner.calls)
 
 
+def test_wait_survives_transient_poll_failures():
+    # A VPN drop makes squeue-over-SSH fail; the loop must keep polling (the
+    # job is still running on the cluster) and pick up the terminal state once
+    # contact returns.
+    runner = ScriptedRunner()
+    runner.on(_is("squeue"), [CommandResult(0, "RUNNING\n"),
+                              CommandResult(255, "", "ssh: connect timed out"),
+                              CommandResult(255, "", "ssh: connect timed out"),
+                              CommandResult(0, "")])
+    runner.on(_sacct_state, CommandResult(0, "COMPLETED\n"))
+    adapter = SlurmAdapter(_profile(), runner=runner)
+
+    state = adapter.wait("42", poll_interval=10.0, sleep=lambda _s: None)
+    assert state == JobState.COMPLETED
+
+
+def test_wait_raises_lost_contact_after_tolerance_without_cancelling():
+    runner = ScriptedRunner()
+    runner.on(_is("squeue"), CommandResult(255, "", "ssh: connect timed out"))
+    adapter = SlurmAdapter(_profile(), runner=runner)
+    adapter.CONTACT_LOSS_TOLERANCE = 25.0  # ~2 failed polls at 10s
+
+    with pytest.raises(SlurmError, match="lost contact"):
+        adapter.wait("42", poll_interval=10.0, sleep=lambda _s: None)
+    assert not any(argv[0] == "scancel" for argv in runner.calls)
+
+
 def test_accounting_and_exit_code_parse_sacct():
     runner = ScriptedRunner()
     runner.on(_is("sacct"), CommandResult(0, "FAILED|2:0|00:01:23|123456K|general-cpu\n"))
@@ -298,7 +325,18 @@ def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
     assert '[ -x "$CAND" ]' in payload
     assert "python3 -m venv .venv" in payload      # fallback still present
     assert '"$PY" inline_tests.py' in payload
-    assert payload.rstrip().endswith('"$PY" main.py')
+    # main.py runs under mpirun when the env ships it (openmpi GPAW build) --
+    # one rank per allocated CPU, single-threaded -- else plain python.
+    # GPAW's parallel guard requires launching through its `gpaw python`
+    # equivalent (`-m gpaw python`) under MPI; other envs use the plain
+    # interpreter. -m avoids the entry script's (possibly broken) shebang.
+    assert 'if [ -x "$BIN/gpaw" ]; then LAUNCH="$PY -m gpaw python";' in payload
+    assert ('"$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"'
+            ' --map-by :OVERSUBSCRIBE --bind-to none $LAUNCH main.py') in payload
+    assert "export OMP_NUM_THREADS=1" in payload
+    # OpenMPI needs OPAL_PREFIX when invoked by path without env activation.
+    assert 'export OPAL_PREFIX="$(dirname "$BIN")"' in payload
+    assert '  "$PY" main.py' in payload            # serial fallback branch
 
 
 def test_env_payload_without_requirements_falls_back_to_system_python(tmp_path):
@@ -309,7 +347,7 @@ def test_env_payload_without_requirements_falls_back_to_system_python(tmp_path):
     payload = adapter._payload(bundle, install_deps=True, run_smoke=True)
     assert "venv" not in payload
     assert 'PY="python3"' in payload
-    assert payload.rstrip().endswith('"$PY" main.py')
+    assert '"$PY" main.py' in payload
 
 
 def test_execute_reads_job_log_as_stdout(tmp_path):
@@ -347,6 +385,22 @@ def test_execute_leaves_long_job_running_on_wait_expiry(tmp_path):
     assert "NOT cancelled" in result.message
     assert "44" in result.message
     assert not any(argv[0] == "scancel" for argv in cluster.calls)
+
+
+def test_execute_terminate_scancels_job_and_reports_cleanly(tmp_path):
+    # The researcher pressed Terminate mid-poll: the adapter must scancel the
+    # job and return a clean "terminated" result instead of polling on.
+    cluster = ScriptedRunner()
+    cluster.on(_is("sbatch"), CommandResult(0, "Submitted batch job 45\n"))
+    cluster.on(_is("squeue"), CommandResult(0, "RUNNING\n"))
+    cluster.on(_is("scancel"), CommandResult(0, ""))
+    adapter = _exec_adapter(tmp_path, cluster, should_abort=lambda: True)
+
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s")
+    assert result.status == ExecutionStatus.FAILED
+    assert "terminated by the researcher" in result.message
+    assert "45" in result.message
+    assert any(argv[0] == "scancel" for argv in cluster.calls)
 
 
 def test_execute_submit_failure_is_setup_failed(tmp_path):

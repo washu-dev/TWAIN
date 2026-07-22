@@ -118,6 +118,27 @@ class TestMessagesAndApproval:
         assert response.status_code == 422
 
 
+class TestTerminate:
+    @patch("conversations.request_termination", return_value={**MESSAGE, "kind": "terminate"})
+    @patch("conversations.get_conversation", return_value=CONVERSATION)
+    def test_terminate_records_request(self, _mock_conv, mock_term):
+        response = client.post("/api/conversations/conv-1/terminate")
+        assert response.status_code == 200
+        assert response.json()["data"]["kind"] == "terminate"
+        mock_term.assert_called_once_with("conv-1")
+
+    @patch("conversations.get_conversation",
+           return_value={**CONVERSATION, "status": "completed"})
+    def test_terminate_conflicts_when_already_finished(self, _mock_conv):
+        response = client.post("/api/conversations/conv-1/terminate")
+        assert response.status_code == 409
+
+    @patch("conversations.get_conversation", return_value=None)
+    def test_terminate_404_when_not_owner(self, _mock_conv):
+        response = client.post("/api/conversations/x/terminate")
+        assert response.status_code == 404
+
+
 class TestStream:
     @patch("conversations.get_conversation_status", return_value="completed")
     @patch("conversations.get_events", return_value=[

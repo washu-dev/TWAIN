@@ -23,6 +23,7 @@ DEFAULT_POLL_SECONDS = 2.0
 
 def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
     """Run the two legs of the pipeline, gating on plan approval at BUILD."""
+    cancel = _cancel_check(db, session_id)
     # Leg 1: intake → clarify → decompose → discover → plan, pausing at BUILD.
     status = orch.run(until=engine.STATE_BUILD)
     if status == "error":
@@ -49,6 +50,7 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
             db, session_id, engine.read_execution_plan(orch),
             compute_target=engine.compute_target_of(orch),
             slurm_cluster=engine.slurm_cluster_of(orch),
+            cancel=cancel,
         )
         if decision != "approve":
             db.set_conversation_status(session_id, "rejected")
@@ -85,6 +87,20 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine) -> None:
         )
 
 
+def _cancel_check(db: RunnerDB, session_id: str):
+    """Zero-arg callable: True once the user pressed Terminate for this run."""
+    return lambda: db.terminate_requested(session_id)
+
+
+def _finalize_cancelled(db: RunnerDB, session_id: str) -> None:
+    db.set_conversation_status(session_id, "cancelled")
+    db.add_assistant_message(
+        session_id,
+        "Run terminated by user. Nothing further will be built or executed.",
+        kind="chat",
+    )
+
+
 def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     """Drive a single job's run, then capture its artifacts for the report."""
     engine = engine or default_engine()
@@ -93,17 +109,20 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     if kind != "start":
         raise NotImplementedError(f"job kind '{kind}' is not supported yet (Phase 3)")
 
+    cancel = _cancel_check(db, session_id)
     params = job.get("params") or {}
     orch = engine.build_orchestrator(
         session_id=session_id,
         researcher_id=params.get("researcher_id", ""),
         request=params.get("request"),
-        ask=DbAsk(db, session_id),
+        ask=DbAsk(db, session_id, cancel=cancel),
         sink=PgEventSink(db, session_id),
         store=PgStore(db),
         # Per-run execution backend picked in the UI ('local' | 'slurm');
         # None falls back to the runner's env-configured default.
         compute_target=params.get("compute_target"),
+        # Terminate button: checked between stages and inside blocking waits.
+        cancel=cancel,
     )
     # Announce the backend early so the chat shows RIS vs local before planning.
     target = engine.compute_target_of(orch)
@@ -123,6 +142,18 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         )
     try:
         _drive_run(db, session_id, orch, engine)
+        if cancel():
+            # Terminate arrived too late to interrupt anything; still record it.
+            _finalize_cancelled(db, session_id)
+    except Exception as exc:  # noqa: BLE001 -- cancelled runs end via exceptions
+        # A terminate request aborts blocking waits / stages by raising
+        # (RunCancelled from the bridges or the orchestrator). Whatever the
+        # exception type, if the user asked to stop, this is a cancellation --
+        # not a run failure.
+        if not cancel():
+            raise
+        print(f"[runner] run {session_id} terminated by user ({exc})")
+        _finalize_cancelled(db, session_id)
     finally:
         # Best-effort: persist the specs + generated code so the report can show them.
         try:

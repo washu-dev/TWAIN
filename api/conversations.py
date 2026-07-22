@@ -13,7 +13,7 @@ from psycopg2.extras import RealDictCursor
 from database import get_connection
 
 # Conversation lifecycle statuses the UI understands.
-TERMINAL_STATUSES = ("completed", "error", "rejected")
+TERMINAL_STATUSES = ("completed", "error", "rejected", "cancelled")
 
 
 def create_conversation(
@@ -216,6 +216,39 @@ def add_approval_response(
     except Exception as e:
         conn.rollback()
         raise Exception(f"Failed to record approval: {e}") from e
+    finally:
+        conn.close()
+
+
+def request_termination(conversation_id: str) -> dict:
+    """Record the user's request to stop the run (Terminate button).
+
+    Inserts a 'terminate' control message (the runner polls for it between
+    stages and blocking waits) and flips the status to 'cancelling' so the UI
+    shows immediate feedback. The runner settles the final 'cancelled' status.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            INSERT INTO messages (conversation_id, role, content, kind)
+            VALUES (%s, 'user', 'terminate', 'terminate')
+            RETURNING id, role, content, kind, state, created_at;
+            """,
+            (conversation_id,),
+        )
+        row = cursor.fetchone()
+        cursor.execute(
+            "UPDATE conversations SET status = 'cancelling', updated_at = now() WHERE id = %s;",
+            (conversation_id,),
+        )
+        conn.commit()
+        cursor.close()
+        return row
+    except Exception as e:
+        conn.rollback()
+        raise Exception(f"Failed to request termination: {e}") from e
     finally:
         conn.close()
 

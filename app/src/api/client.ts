@@ -5,9 +5,11 @@ export type ConversationStatus =
   | 'running'
   | 'awaiting_input'
   | 'awaiting_approval'
+  | 'cancelling'
   | 'completed'
   | 'error'
-  | 'rejected';
+  | 'rejected'
+  | 'cancelled';
 
 // Where the run's EXECUTE stage happens: the runner host itself, or a job
 // submitted to the WashU RIS Slurm cluster. Omitted = the runner's default.
@@ -18,7 +20,8 @@ export type MessageKind =
   | 'chat'
   | 'clarification'
   | 'approval_request'
-  | 'approval_response';
+  | 'approval_response'
+  | 'terminate';
 
 export interface Message {
   id: number;
@@ -137,6 +140,11 @@ class APIClient {
       decision,
       ...(slurmRequest ? { slurm_request: slurmRequest } : {}),
     });
+    return response.data.data;
+  }
+
+  async terminateConversation(id: string): Promise<Message> {
+    const response = await this.client.post(`/api/conversations/${id}/terminate`);
     return response.data.data;
   }
 

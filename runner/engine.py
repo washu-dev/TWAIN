@@ -53,7 +53,7 @@ class _RealEngine:
 
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store,
-        compute_target=None,
+        compute_target=None, cancel=None,
     ):
         # Real execution is env-gated so the SAME image works everywhere: set
         # TWAIN_EXECUTE_LOCALLY=1 (local `docker run -e ...` or the ECS task
@@ -97,6 +97,10 @@ class _RealEngine:
             # run so API errors are caught; default on whenever we execute.
             verify_codegen=_env_flag("TWAIN_VERIFY_CODEGEN", default=execute),
             auto_approve=auto,
+            # Terminate button: True once the user asked to stop. The orchestrator
+            # checks it between stages (raising RunCancelled) and the Slurm poll
+            # loop checks it between squeue polls (scancelling the job).
+            cancel_check=cancel,
         )
 
     def compute_target_of(self, orch) -> str:

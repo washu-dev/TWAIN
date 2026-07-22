@@ -20,6 +20,12 @@ gate. One job == one run; run several runner processes for more concurrency.
 4. On **approve** it runs to completion; on **reject** it stops before building.
 5. Throughout, an event sink writes `run_events` (tailed by the SSE endpoint)
    and mirrors `current_state` / `status` onto the conversation.
+6. **Terminate** (the button in the chat header) posts
+   `POST /api/conversations/{id}/terminate`, which records a `terminate`
+   control message and flips the status to `cancelling`. The runner polls for
+   it between stages, inside the clarify/approval waits, and between Slurm
+   `squeue` polls (where it also `scancel`s the cluster job), then settles the
+   conversation as `cancelled` instead of `error`.
 
 ## Run locally
 Requires a reachable Postgres with the schema from `api/migrations/001_web_ui.sql`
@@ -189,20 +195,35 @@ cd /storage2/fs1/mdan/Active/dtrc2026-workshop
 curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
   | tar -xj bin/micromamba
 # micromamba needs ABSOLUTE prefixes (-p): package post-link scripts fail on
-# relative ones. The nompi GPAW build avoids openmpi (TWAIN runs plain python).
+# relative ones.
 export MAMBA_ROOT_PREFIX=/storage2/fs1/mdan/Active/dtrc2026-workshop/.micromamba
 ROOT=/storage2/fs1/mdan/Active/dtrc2026-workshop
-# conda-forge ships prebuilt linux-64 GPAW with libxc included. Include
+# conda-forge ships prebuilt linux-64 GPAW with libxc included. Use the
+# openmpi build: the Slurm payload auto-detects the env's mpirun and runs
+# main.py with one MPI rank per allocated CPU (GPAW parallelizes over
+# k-points via MPI — far better scaling than OpenMP threads). Include
 # pymatgen + spglib: crystal plans pair GPAW with them and the job's smoke
 # test fails on any import the env is missing.
 ./bin/micromamba create -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
-  python=3.11 "gpaw=*=nompi*" ase pymatgen spglib numpy pandas pyyaml
+  python=3.11 "gpaw=*=*mpi_openmpi*" openmpi ase pymatgen spglib numpy pandas pyyaml
 # optional shared fallback env for everything else
 ./bin/micromamba create -y -p "$ROOT/twain-envs/default" -c conda-forge \
   python=3.11 ase pymatgen spglib xtb-python numpy pandas pyyaml
-# verify exactly the way the Slurm job invokes it (no activation):
+# verify exactly the way the Slurm job invokes it (no activation).
+# OPAL_PREFIX tells OpenMPI where its runtime data lives when the env is not
+# activated (the Slurm payload sets it too); always use the ABSOLUTE path --
+# a relative mpirun path breaks OpenMPI's prefix auto-detection.
 "$ROOT/twain-envs/gpaw/bin/python" \
   -c "import gpaw, ase, pymatgen, spglib; print(gpaw.__version__)"
+OPAL_PREFIX="$ROOT/twain-envs/gpaw" \
+  "$ROOT/twain-envs/gpaw/bin/mpirun" --version | head -1
+```
+
+If you already created the env with the `nompi` build, switch it in place:
+
+```bash
+./bin/micromamba install -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
+  "gpaw=*=*mpi_openmpi*" openmpi
 ```
 
 To add packages to an existing env later (e.g. a new plan needs something

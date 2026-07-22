@@ -22,8 +22,8 @@ const PIPELINE_STATES = [
   'BUILD', 'EXECUTE', 'INTERPRET', 'VALIDATE', 'ACCEPT', 'TERMINATE',
 ];
 
-const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_approval'];
-const TERMINAL_STATUSES = ['completed', 'error', 'rejected'];
+const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_approval', 'cancelling'];
+const TERMINAL_STATUSES = ['completed', 'error', 'rejected', 'cancelled'];
 const POLL_MS = 1500;
 const MIN_RAM_GB = 4;
 
@@ -99,7 +99,10 @@ export const ChatScreen: React.FC = () => {
       ? 'Run complete.'
       : status === 'rejected'
         ? 'Plan rejected — nothing was executed.'
-        : 'The run ended with an error.';
+        : status === 'cancelled'
+          ? 'Run terminated.'
+          : 'The run ended with an error.';
+  const cancelling = status === 'cancelling';
 
   const messages = conversation?.messages ?? [];
   const awaitingApproval = status === 'awaiting_approval';
@@ -188,6 +191,17 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
+  const handleTerminate = async () => {
+    if (!conversation || cancelling) return;
+    setError(null);
+    try {
+      await apiClient.terminateConversation(conversation.id);
+      await refresh(conversation.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to terminate the run');
+    }
+  };
+
   const handleApproval = async (decision: 'approve' | 'reject') => {
     if (!conversation || busy) return;
     setBusy(true);
@@ -226,7 +240,20 @@ export const ChatScreen: React.FC = () => {
         <Text style={styles.title} numberOfLines={1}>
           {conversation?.title ?? 'New simulation'}
         </Text>
-        <View style={{ width: 48 }} />
+        {conversation && isActive ? (
+          <TouchableOpacity
+            style={[styles.terminateBtn, cancelling && styles.disabled]}
+            onPress={handleTerminate}
+            disabled={cancelling}
+            accessibilityRole="button"
+          >
+            <Text style={styles.terminateText}>
+              {cancelling ? 'Terminating…' : 'Terminate'}
+            </Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 48 }} />
+        )}
       </View>
 
       {(conversation || computeTarget) && (
@@ -262,7 +289,11 @@ export const ChatScreen: React.FC = () => {
           <View style={styles.working}>
             <ActivityIndicator color={C.washuRed} />
             <Text style={styles.workingText}>
-              {status === 'awaiting_input' ? 'Waiting for your answer…' : 'Working…'}
+              {cancelling
+                ? 'Terminating the run…'
+                : status === 'awaiting_input'
+                  ? 'Waiting for your answer…'
+                  : 'Working…'}
             </Text>
           </View>
         )}
@@ -449,6 +480,9 @@ const StateStepper: React.FC<{ current: string; status?: string }> = ({ current,
 
 const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   const isUser = message.role === 'user';
+  if (message.kind === 'terminate') {
+    return <Text style={styles.terminateNote}>You asked to terminate this run.</Text>;
+  }
   if (message.kind === 'approval_request') {
     const plan = parsePlanSummary(message.content);
     if (plan) {
@@ -520,6 +554,21 @@ const styles = StyleSheet.create({
   },
   back: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', width: 48 },
   title: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
+  terminateBtn: {
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
+    borderRadius: 6,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 4,
+  },
+  terminateText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  terminateNote: {
+    alignSelf: 'center',
+    color: C.textSecondary,
+    fontSize: 12,
+    fontStyle: 'italic',
+    marginVertical: Spacing.one,
+  },
   targetBadgeRow: {
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.one,

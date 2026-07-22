@@ -7,7 +7,7 @@ import types
 
 from runner import runner
 from runner.artifacts import capture_artifacts
-from runner.bridges import DbAsk, PgEventSink, request_plan_approval
+from runner.bridges import DbAsk, PgEventSink, RunCancelled, request_plan_approval
 from runner.pg_store import PgStore
 
 SESSION = "conv-1"
@@ -16,7 +16,8 @@ SESSION = "conv-1"
 class FakeDB:
     """In-memory stand-in for RunnerDB."""
 
-    def __init__(self, approval="approve", clarify="25 degrees C", jobs=None):
+    def __init__(self, approval="approve", clarify="25 degrees C", jobs=None,
+                 terminate=False):
         self.messages = []
         self.events = []
         self.status = None
@@ -27,6 +28,7 @@ class FakeDB:
         self._jobs = list(jobs or [])
         self.sessions = {}
         self.artifacts = []
+        self.terminate = terminate
 
     # messages / status / state
     def add_assistant_message(self, sid, content, *, kind="chat", state=None):
@@ -43,6 +45,9 @@ class FakeDB:
 
     def set_conversation_status(self, sid, status):
         self.status = status
+
+    def terminate_requested(self, sid):
+        return self.terminate
 
     def set_conversation_state(self, sid, state):
         self.state = state
@@ -108,7 +113,7 @@ class FakeEngine:
         self.applied_overrides = []
 
     def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store,
-                           compute_target=None):
+                           compute_target=None, cancel=None):
         self.compute_targets.append(compute_target)
         if compute_target is not None:
             self._compute_target = compute_target
@@ -191,6 +196,26 @@ class TestProcessJob:
         ]
         assert any("updated Slurm settings" in m["content"] for m in db.messages)
 
+    def test_terminate_during_approval_wait_cancels_run(self):
+        # The user pressed Terminate while the run sat at the approval gate:
+        # the wait must abort, the conversation settle as 'cancelled' (not
+        # 'error'), and the job finish normally.
+        class TerminatedDB(FakeDB):
+            def user_replies_after(self, sid, after_id, kind=None):
+                if kind == "approval_response":
+                    # Instead of answering the approval card, the user presses
+                    # Terminate; the next cancel check aborts the wait.
+                    self.terminate = True
+                    return []
+                return super().user_replies_after(sid, after_id, kind)
+
+        db = TerminatedDB()
+        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
+        assert db.status == "cancelled"
+        assert "terminated by user" in db.messages[-1]["content"].lower()
+        # leg 2 never ran
+        assert not any(e["event_type"] == "run.completed" for e in db.events)
+
     def test_unsupported_kind_raises(self):
         db = FakeDB()
         try:
@@ -255,6 +280,17 @@ class TestBridges:
         summary = json.loads(db.messages[0]["content"])
         assert summary["compute_target"] == "slurm"
         assert summary["slurm_cluster"] == "compute2"
+
+    def test_wait_aborts_with_run_cancelled_when_terminate_requested(self):
+        db = FakeDB(terminate=True)
+        db.user_replies_after = lambda sid, after_id, kind=None: []
+        ask = DbAsk(db, SESSION, sleep=lambda _s: None,
+                    cancel=lambda: db.terminate_requested(SESSION))
+        try:
+            ask("Which solvent?")
+            raise AssertionError("expected RunCancelled")
+        except RunCancelled:
+            pass
 
     def test_event_sink_persists_and_mirrors_state(self):
         db = FakeDB()

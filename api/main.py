@@ -160,6 +160,20 @@ async def post_approval(conversation_id: str, body: SendApproval, user: CurrentU
     }
 
 
+@app.post("/api/conversations/{conversation_id}/terminate")
+async def post_terminate(conversation_id: str, user: CurrentUser):
+    """Ask the runner to stop this run at the next opportunity.
+
+    Records a 'terminate' control message and flips the conversation to
+    'cancelling'; the runner notices between stages / polls, cancels any
+    in-flight Slurm job, and settles the conversation as 'cancelled'.
+    """
+    conversation = _require_own_conversation(conversation_id, user)
+    if conversation["status"] in convo.TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="Run already finished.")
+    return {"data": convo.request_termination(conversation_id)}
+
+
 def _sse_event_stream(conversation_id: str):
     """Yield run_events as Server-Sent Events until the run reaches a terminal state."""
     last_id = 0

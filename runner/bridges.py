@@ -25,12 +25,19 @@ class ReplyTimeout(TimeoutError):
     """Raised when the user does not reply within the wait window."""
 
 
+class RunCancelled(RuntimeError):
+    """Raised when the user pressed Terminate while the run was blocked."""
+
+
 def _wait_for_reply(
     db: RunnerDB, session_id: str, after_id: int, kind: str | None,
     poll: float, timeout: float, sleep=time.sleep, monotonic=time.monotonic,
+    cancel=None,
 ) -> str:
     deadline = monotonic() + timeout
     while True:
+        if cancel is not None and cancel():
+            raise RunCancelled(f"run {session_id} terminated by the user")
         replies = db.user_replies_after(session_id, after_id, kind=kind)
         if replies:
             return replies[0]["content"]
@@ -45,13 +52,14 @@ class DbAsk:
     def __init__(
         self, db: RunnerDB, session_id: str,
         poll: float = DEFAULT_POLL_SECONDS, timeout: float = DEFAULT_WAIT_TIMEOUT,
-        sleep=time.sleep,
+        sleep=time.sleep, cancel=None,
     ):
         self.db = db
         self.session_id = session_id
         self.poll = poll
         self.timeout = timeout
         self._sleep = sleep
+        self._cancel = cancel
 
     def __call__(self, message: str) -> str:
         baseline = self.db.max_message_id(self.session_id)
@@ -62,6 +70,7 @@ class DbAsk:
         answer = _wait_for_reply(
             self.db, self.session_id, baseline, kind=None,
             poll=self.poll, timeout=self.timeout, sleep=self._sleep,
+            cancel=self._cancel,
         )
         self.db.set_conversation_status(self.session_id, "running")
         return answer
@@ -73,7 +82,7 @@ def request_plan_approval(
     compute_target: str | None = None,
     slurm_cluster: str | None = None,
     poll: float = DEFAULT_POLL_SECONDS, timeout: float = DEFAULT_WAIT_TIMEOUT,
-    sleep=time.sleep,
+    sleep=time.sleep, cancel=None,
 ) -> tuple[str, dict | None]:
     """Post the plan for approval and block for the user's decision.
 
@@ -93,7 +102,7 @@ def request_plan_approval(
     db.set_conversation_status(session_id, "awaiting_approval")
     raw = _wait_for_reply(
         db, session_id, baseline, kind="approval_response",
-        poll=poll, timeout=timeout, sleep=sleep,
+        poll=poll, timeout=timeout, sleep=sleep, cancel=cancel,
     )
     return _parse_approval_reply(raw)
 

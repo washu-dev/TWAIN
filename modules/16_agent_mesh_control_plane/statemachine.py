@@ -102,7 +102,7 @@ class StateMachine:
                  execution_adapter=None, verify_codegen: bool = False,
                  script_doctor=None, library_available=None, sim_available=None,
                  auto_approve=False, execute_slurm: bool = False,
-                 slurm_cluster: str = None):
+                 slurm_cluster: str = None, should_abort=None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -142,6 +142,11 @@ class StateMachine:
         # run happens even though execute_locally may be off.
         self.execute_slurm = execute_slurm
         self.slurm_cluster = slurm_cluster or "compute2"
+        # Terminate seam: a zero-arg callable that returns True once the
+        # researcher asked to stop the run. The Slurm adapter polls it between
+        # squeue checks so a Terminate press scancels the cluster job instead
+        # of letting it burn its whole wall time.
+        self.should_abort = should_abort
         # When on, the REPAIR stage may call the LLM to repair the synthesized
         # calculator script and proactively scan it for latent bugs. Off by
         # default so offline/seeded/test runs make no network calls there; the
@@ -1365,6 +1370,8 @@ class StateMachine:
             # plus queue headroom -- otherwise a 4-hour DFT run outlives the
             # adapter's default 2-hour wait and EXECUTE reports a bogus timeout.
             max_wait=self.slurm_wait_budget(),
+            # Terminate button: checked between polls; scancels the job.
+            should_abort=self.should_abort,
         )
 
     # Extra polling headroom on top of the job's wall time: covers time spent
