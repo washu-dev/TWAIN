@@ -108,6 +108,85 @@ if __name__ == "__main__":
 """
 
 
+class TestStaleAseFilterImportGate:
+    def test_expcellfilter_from_constraints_is_an_error(self):
+        # The fingerprint of Slurm job 2337355: a lazy `from ase.constraints
+        # import ExpCellFilter` inside a function the smoke run never calls,
+        # exploding with ImportError only in the real run (ASE >= 3.23 moved
+        # cell filters to ase.filters).
+        script = (
+            "import matgl\n"
+            "def relax():\n"
+            "    from ase.constraints import ExpCellFilter\n"
+            "if __name__ == '__main__':\n"
+            "    relax()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "ase-filters" and "ase.filters" in d.message
+                   for d in diags)
+
+    def test_import_from_ase_filters_is_clean(self):
+        script = (
+            "import matgl\n"
+            "def relax():\n"
+            "    from ase.filters import ExpCellFilter\n"
+            "if __name__ == '__main__':\n"
+            "    relax()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "ase-filters" for d in diags)
+
+    def test_other_constraints_imports_are_clean(self):
+        # FixAtoms & friends still legitimately live in ase.constraints.
+        script = (
+            "import matgl\n"
+            "from ase.constraints import FixAtoms\n"
+            "if __name__ == '__main__':\n"
+            "    FixAtoms(indices=[0])\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "ase-filters" for d in diags)
+
+
+class TestGpawFixedOccupationsGate:
+    def test_fixed_without_numbers_is_an_error(self):
+        # Fingerprint of Slurm job 2337668: occupations={"name": "fixed"} with
+        # no numbers array raises TypeError at calculator init, after the
+        # ground-state SCF was already paid for.
+        script = (
+            "import matgl\n"
+            "def bands():\n"
+            "    return {'occupations': {'name': 'fixed'}, 'symmetry': 'off'}\n"
+            "if __name__ == '__main__':\n"
+            "    bands()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "gpaw-occupations" and "fixed-uniform" in d.message
+                   for d in diags)
+
+    def test_fixed_uniform_is_clean(self):
+        script = (
+            "import matgl\n"
+            "def bands():\n"
+            "    return {'occupations': {'name': 'fixed-uniform'}}\n"
+            "if __name__ == '__main__':\n"
+            "    bands()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "gpaw-occupations" for d in diags)
+
+    def test_fixed_with_numbers_is_clean(self):
+        script = (
+            "import matgl\n"
+            "def bands():\n"
+            "    return {'occupations': {'name': 'fixed', 'numbers': [2, 2, 0]}}\n"
+            "if __name__ == '__main__':\n"
+            "    bands()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "gpaw-occupations" for d in diags)
+
+
 class TestPrimitiveCellGate:
     def test_primitive_cell_false_is_an_error(self):
         diags = ScriptDoctor(brief=_brief()).static_diagnostics(

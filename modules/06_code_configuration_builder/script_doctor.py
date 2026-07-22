@@ -372,6 +372,20 @@ class ScriptDoctor:
             diags.append(Diagnostic(
                 "placeholder", "warning",
                 f"unfilled template placeholder {token} left in the script."))
+        for name, line in _stale_ase_filter_imports(source):
+            diags.append(Diagnostic(
+                "ase-filters", "error",
+                f"imports {name} from `ase.constraints`, but in ASE >= 3.23 cell "
+                f"filters live in `ase.filters` (use `from ase.filters import "
+                f"{name}`); the old path raises ImportError at runtime.", line))
+        for line in _fixed_occupations_without_numbers(source):
+            diags.append(Diagnostic(
+                "gpaw-occupations", "error",
+                'uses occupations={"name": "fixed"} without a `numbers` array: '
+                'GPAW\'s "fixed" mode requires explicit per-band occupation '
+                'numbers and raises TypeError at calculator init. For a '
+                'frozen-occupations band-structure pass use '
+                '{"name": "fixed-uniform"} instead.', line))
         diags.extend(self._primitive_cell_diagnostics(source))
         return diags
 
@@ -612,6 +626,57 @@ _EXPLICIT_CELL_WORDS = (
     "surface", "slab", "interface", "grain",
     "defect", "vacancy", "interstitial", "dopant", "doped", "adsor",
 )
+
+
+# Cell filters that moved from ase.constraints to ase.filters in ASE 3.23.
+# Importing them from the old path raises ImportError on the cluster env --
+# and typically from INSIDE a function the smoke run never calls, so only a
+# static check catches it before the expensive run.
+_MOVED_ASE_FILTERS = frozenset({
+    "ExpCellFilter", "FrechetCellFilter", "UnitCellFilter", "StrainFilter",
+})
+
+
+def _stale_ase_filter_imports(source: str) -> List[Tuple[str, int]]:
+    """(name, line) pairs importing a moved cell filter from ``ase.constraints``."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    found: List[Tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "ase.constraints":
+            for alias in node.names:
+                if alias.name in _MOVED_ASE_FILTERS:
+                    found.append((alias.name, node.lineno))
+    return found
+
+
+def _fixed_occupations_without_numbers(source: str) -> List[int]:
+    """Lines passing GPAW ``occupations={"name": "fixed"}`` with no ``numbers``.
+
+    GPAW's ``"fixed"`` mode means explicit per-band occupation numbers and
+    requires a ``numbers`` array; the frozen-occupations band-structure mode
+    the scripts actually want is ``"fixed-uniform"``. The wrong name raises
+    TypeError only when the calculator initializes -- after the ground-state
+    SCF was already paid for.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+        vals = {k.value: v for k, v in zip(node.keys, node.values)
+                if isinstance(k, ast.Constant)}
+        name = vals.get("name")
+        if (isinstance(name, ast.Constant) and name.value == "fixed"
+                and "numbers" not in keys):
+            lines.append(node.lineno)
+    return lines
 
 
 def _conventional_cell_calls(source: str) -> List[int]:
