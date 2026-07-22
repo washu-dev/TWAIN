@@ -1,0 +1,18 @@
+# ── Secret material — NEVER commit ────────────────────────────────────────────
+secrets.json
+*.tfvars
+!*.tfvars.example
+
+# ── Terraform state (contains secret values in plaintext) ─────────────────────
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored — commit it to pin
+# provider versions across the team.

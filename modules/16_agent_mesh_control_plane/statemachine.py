@@ -15,6 +15,8 @@ import twain_paths
 
 logger = logging.getLogger(__name__)
 
+from intake.intent_spec import IntentSpec
+from result_interpreter.result_package import ResultPackage
 from states import State, Context, GuardsBroken, InvalidTransition
 from crash_recovery import DataStorage
 from AgentInterface import AgentInterface
@@ -261,13 +263,13 @@ class StateMachine:
 
         ``agent`` may be a plain ``prompt -> str`` callable (what the orchestrator
         and tests inject) or an ``AgentInterface``-style object whose
-        ``call_agent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
+        ``callAgent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
         ``call_kwargs`` (e.g. ``max_tokens``) are forwarded only to the
-        ``call_agent`` form; a plain callable is invoked with just the prompt.
+        ``callAgent`` form; a plain callable is invoked with just the prompt.
         """
         agent = self.agent
-        if hasattr(agent, "call_agent"):
-            resp = agent.call_agent(prompt, **call_kwargs)
+        if hasattr(agent, "callAgent"):
+            resp = agent.callAgent(prompt, **call_kwargs)
         else:
             resp = agent(prompt)
         if isinstance(resp, str):

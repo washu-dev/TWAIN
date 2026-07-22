@@ -15,7 +15,7 @@ env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: twain-ecr
   ECS_CLUSTER: twain-cluster
-  ECS_SERVICE: twain-api
+  ECS_SERVICE: twain-washu
   ECS_TASK_DEFINITION: twain-api
   PYTHON_VERSION: '3.12'
 
@@ -48,7 +48,11 @@ jobs:
 
       - name: Vulnerability scan — pip-audit
         working-directory: api
-        run: pip-audit -r requirements.txt --format markdown
+        # PYSEC-2025-183 (CVE-2025-45768): disputed by PyJWT maintainers, has no
+        # fixed version, and concerns weak key length when *issuing* tokens — we
+        # only verify Entra RS256 tokens, so it does not apply. Ignore so the gate
+        # stays meaningful. Revisit if a fixed version ever ships.
+        run: pip-audit -r requirements.txt --format markdown --ignore-vuln PYSEC-2025-183
 
       - name: Unit tests
         working-directory: api
