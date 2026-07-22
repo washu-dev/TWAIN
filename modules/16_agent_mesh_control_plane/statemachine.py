@@ -263,13 +263,13 @@ class StateMachine:
 
         ``agent`` may be a plain ``prompt -> str`` callable (what the orchestrator
         and tests inject) or an ``AgentInterface``-style object whose
-        ``callAgent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
+        ``call_agent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
         ``call_kwargs`` (e.g. ``max_tokens``) are forwarded only to the
-        ``callAgent`` form; a plain callable is invoked with just the prompt.
+        ``call_agent`` form; a plain callable is invoked with just the prompt.
         """
         agent = self.agent
-        if hasattr(agent, "callAgent"):
-            resp = agent.callAgent(prompt, **call_kwargs)
+        if hasattr(agent, "call_agent"):
+            resp = agent.call_agent(prompt, **call_kwargs)
         else:
             resp = agent(prompt)
         if isinstance(resp, str):
@@ -1160,6 +1160,10 @@ class StateMachine:
             "material_desc": CodegenEngine._material_desc(material),
             "acceptance": plan.get("acceptance_metrics") or [],
             "output_file": "results.csv",
+            # The researcher's own words: lets checks that enforce fast defaults
+            # (e.g. primitive cell) stand down when the researcher explicitly
+            # asked for the expensive variant (conventional cell, supercell, ...).
+            "objective": (intent or {}).get("objective") or plan.get("objective") or "",
         }
 
     def _log_repair(self, report) -> None:

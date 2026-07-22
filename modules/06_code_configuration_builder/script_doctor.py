@@ -372,7 +372,40 @@ class ScriptDoctor:
             diags.append(Diagnostic(
                 "placeholder", "warning",
                 f"unfilled template placeholder {token} left in the script."))
+        diags.extend(self._primitive_cell_diagnostics(source))
         return diags
+
+    def _primitive_cell_diagnostics(self, source: str) -> List[Diagnostic]:
+        """Flag conventional-cell builds the researcher never asked for.
+
+        Plane-wave DFT cost grows ~cubically with the atom count, so a
+        ``crystal(...)`` call with ``primitive_cell=False`` (or omitted -- ASE
+        defaults to the conventional cell) turns a minutes-long bulk-property
+        run into hours (a 24-atom conventional CaPt2 EOS vs the 6-atom
+        primitive cell). The codegen prompt already demands the primitive
+        cell; this makes the rule mechanical. It stands down whenever the
+        researcher's own request/material mentions the conventional cell or a
+        genuinely bigger system (supercell, surface, defect, ...): an explicit
+        instruction always beats the fast default.
+        """
+        asked = " ".join(
+            str(self.brief.get(k) or "")
+            for k in ("objective", "property", "material_desc")
+        ).lower()
+        if any(word in asked for word in _EXPLICIT_CELL_WORDS):
+            return []
+        return [
+            Diagnostic(
+                "primitive-cell", "error",
+                "builds the CONVENTIONAL cell: this `crystal(...)` call must pass "
+                "`primitive_cell=True` for a bulk property (the researcher did not "
+                "ask for a conventional cell or supercell). Run the calculation on "
+                "the primitive cell and convert any conventional-cell quantity "
+                "(e.g. a cubic lattice parameter) from the primitive result in "
+                "code; update any atom-count self-checks/assertions to the "
+                "primitive count.", line)
+            for line in _conventional_cell_calls(source)
+        ]
 
     def smoke(self, source: str) -> SmokeOutcome:
         """Run ``source`` with ``--smoke`` in the sim env and classify the result.
@@ -569,6 +602,43 @@ def _loads_array(text: str):
         except (ValueError, TypeError):
             return None
     return None
+
+
+# Words in the researcher's own request/material that mean the conventional
+# cell (or a bigger system) was asked for deliberately -- the primitive-cell
+# gate must stand down. Substring-matched, lowercase.
+_EXPLICIT_CELL_WORDS = (
+    "conventional", "supercell", "super-cell", "super cell",
+    "surface", "slab", "interface", "grain",
+    "defect", "vacancy", "interstitial", "dopant", "doped", "adsor",
+)
+
+
+def _conventional_cell_calls(source: str) -> List[int]:
+    """Line numbers of ``crystal(...)`` calls that build the conventional cell.
+
+    A call counts when ``primitive_cell`` is ``False`` or omitted (ASE's
+    default is the conventional cell). Only bare ``crystal(...)`` /
+    ``*.crystal(...)`` calls are considered -- the ``ase.spacegroup`` builder
+    the synthesized scripts use.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name != "crystal":
+            continue
+        kw = next((k for k in node.keywords if k.arg == "primitive_cell"), None)
+        if kw is None or (isinstance(kw.value, ast.Constant) and kw.value.value is False):
+            lines.append(node.lineno)
+    return lines
 
 
 def _undefined_names(source: str) -> List[Tuple[str, int]]:

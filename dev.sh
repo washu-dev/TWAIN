@@ -17,7 +17,7 @@
 #
 # Config via env (sensible local defaults):
 #   DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD API_PORT AUTH_DISABLED
-#   PG_CONTAINER TWAIN_EXECUTE_LOCALLY
+#   PG_CONTAINER TWAIN_EXECUTE_LOCALLY TWAIN_DB_FROM_ENV
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +33,10 @@ PG_CONTAINER="${PG_CONTAINER:-twain-pg}"
 # plan-approval gate in the UI still applies). --no-execute or
 # TWAIN_EXECUTE_LOCALLY=0 keeps the pipeline planning-only.
 TWAIN_EXECUTE_LOCALLY="${TWAIN_EXECUTE_LOCALLY:-1}"
+# The API resolves DB credentials from AWS Secrets Manager by default (the
+# cloud path); local dev has no AWS credentials, so read the DB_* env vars
+# exported below instead (api/database.py's offline escape hatch).
+TWAIN_DB_FROM_ENV="${TWAIN_DB_FROM_ENV:-true}"
 
 RUN_RUNNER=1
 RUN_APP=1
@@ -92,7 +96,7 @@ else
     sleep 1
   done
 fi
-export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD AUTH_DISABLED TWAIN_EXECUTE_LOCALLY
+export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD AUTH_DISABLED TWAIN_EXECUTE_LOCALLY TWAIN_DB_FROM_ENV
 
 # psql against the dev DB, transparently local or via the container.
 run_psql() {
@@ -157,7 +161,7 @@ fi
 
 # ── 7. Web app ────────────────────────────────────────────────────────────────
 if [ "$RUN_APP" = 1 ]; then
-  info "Web app    → http://localhost:8081"
+  info "Web app    → http://localhost:3001"
   ( cd app && EXPO_PUBLIC_API_BASE_URL="http://localhost:$API_PORT" exec npm run web ) &
 fi
 
