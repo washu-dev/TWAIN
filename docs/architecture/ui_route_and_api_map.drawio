@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" modified="2026-07-08" version="25.0" type="device">
+  <diagram id="twain-ui-api" name="TWAIN UI Route + API Map">
+    <mxGraphModel dx="1600" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1250" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="TWAIN — Web UI Route Map &amp; API Endpoints" style="text;html=1;fontSize=22;fontStyle=1;align=center;" parent="1" vertex="1">
+          <mxGeometry x="40" y="20" width="700" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Multi-tenant SPA (React/TS) · chat spine + run dashboard · FastAPI backend · REST + SSE stream" style="text;html=1;fontSize=13;fontStyle=2;align=center;fontColor=#555555;" parent="1" vertex="1">
+          <mxGeometry x="40" y="58" width="760" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="legend" value="Legend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontStyle=1;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="1560" y="90" width="300" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="lg1" value="UI Route / Screen" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;" parent="1" vertex="1">
+          <mxGeometry x="1575" y="120" width="130" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="lg2" value="REST endpoint" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;" parent="1" vertex="1">
+          <mxGeometry x="1575" y="152" width="130" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3" value="SSE / stream" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5f4e6;strokeColor=#82b366;" parent="1" vertex="1">
+          <mxGeometry x="1720" y="120" width="125" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="lg4" value="Backend module" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" parent="1" vertex="1">
+          <mxGeometry x="1720" y="152" width="125" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="lg5" value="Data store" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" parent="1" vertex="1">
+          <mxGeometry x="1575" y="188" width="90" height="46" as="geometry" />
+        </mxCell>
+
+        <!-- ============ COLUMN 1: UI ROUTES ============ -->
+        <mxCell id="ui_hdr" value="UI ROUTES (React Router)" style="text;html=1;fontSize=14;fontStyle=1;align=center;fillColor=#f5f0ff;rounded=1;" parent="1" vertex="1">
+          <mxGeometry x="40" y="100" width="340" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_login" value="/login&#10;SSO / OAuth (WashU SAML)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;" parent="1" vertex="1">
+          <mxGeometry x="40" y="150" width="340" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="r_home" value="/  (Home / New Request)&#10;NL request box + recent runs list" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;" parent="1" vertex="1">
+          <mxGeometry x="40" y="210" width="340" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="r_chat" value="/runs/:runId  (Conversation Shell)&#10;chat thread: clarification Q&amp;A,&#10;inline approval cards, self-correction turns" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="40" y="278" width="340" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="r_plan" value="/runs/:runId/plan  (Plan Review)&#10;ranked candidates + ExecutionPlan,&#10;cost/risk, Approve · Override · Replan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="40" y="366" width="340" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="r_live" value="/runs/:runId/live  (Live Run Panel)&#10;streaming logs, metrics, resource use,&#10;progress per stage — reconnectable" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="40" y="454" width="340" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="r_result" value="/runs/:runId/results  (Result &amp; Validation)&#10;metrics vs baseline, ValidationReport,&#10;accept/reject; artifact downloads" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="40" y="542" width="340" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="r_prov" value="/runs/:runId/provenance  (Audit / Replay)&#10;immutable event timeline, correction&#10;iterations, one-click deterministic replay" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="40" y="630" width="340" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="r_registry" value="/registry  (Tools / Methods Catalog)&#10;curated + discovered tools, trust tiers" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="40" y="718" width="340" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="r_admin" value="/settings  (Budgets / Policies / Keys)&#10;per-user token+iteration caps, allow-lists" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5ff;strokeColor=#9673a6;align=left;spacingLeft=8;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="40" y="786" width="340" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- route flow edges -->
+        <mxCell id="e_login_home" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#9673a6;" parent="1" source="r_login" target="r_home" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_home_chat" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#9673a6;" parent="1" source="r_home" target="r_chat" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_chat_plan" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#9673a6;" parent="1" source="r_chat" target="r_plan" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_plan_live" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#9673a6;" parent="1" source="r_plan" target="r_live" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_live_result" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#9673a6;" parent="1" source="r_live" target="r_result" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_result_prov" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#9673a6;" parent="1" source="r_result" target="r_prov" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e_result_correct" value="reject &#8594; correct loop" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;dashed=1;strokeColor=#b85450;fontColor=#b85450;" parent="1" source="r_result" target="r_chat" edge="1"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="18" y="577" /><mxPoint x="18" y="313" /></Array></mxGeometry></mxCell>
+
+        <!-- ============ COLUMN 2: API ENDPOINTS ============ -->
+        <mxCell id="api_hdr" value="FastAPI ENDPOINTS  (/api/v1)" style="text;html=1;fontSize=14;fontStyle=1;align=center;fillColor=#eaf3fb;rounded=1;" parent="1" vertex="1">
+          <mxGeometry x="560" y="100" width="620" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Auth group -->
+        <mxCell id="g_auth" value="Auth &amp; Session" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0f7fc;strokeColor=#6c8ebf;verticalAlign=top;fontStyle=1;spacingTop=6;dashed=1;" parent="1" vertex="1">
+          <mxGeometry x="560" y="150" width="620" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="a_login" value="POST /auth/login · GET /auth/callback (SAML/OAuth)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="178" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_me" value="GET /me — profile, roles, budget remaining" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="210" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_runs_list" value="GET /runs — list caller's runs (paginated, filter by status)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="240" width="590" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- Intake/Clarify group -->
+        <mxCell id="g_intake" value="Intake · Clarification  (Modules 01/02/13)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0f7fc;strokeColor=#6c8ebf;verticalAlign=top;fontStyle=1;spacingTop=6;dashed=1;" parent="1" vertex="1">
+          <mxGeometry x="560" y="286" width="620" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="a_create" value="POST /runs — submit NL request &#8594; creates run, returns runId + IntentSpec draft" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="314" width="590" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="a_msg" value="POST /runs/:id/messages — answer clarification question" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="350" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_msglist" value="GET /runs/:id/messages — full conversation thread" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="382" width="590" height="26" as="geometry" />
+        </mxCell>
+
+        <!-- Plan/Approve group -->
+        <mxCell id="g_plan" value="Discovery · Plan · Approval Gate  (Modules 03/04/05/13)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0f7fc;strokeColor=#6c8ebf;verticalAlign=top;fontStyle=1;spacingTop=6;dashed=1;" parent="1" vertex="1">
+          <mxGeometry x="560" y="442" width="620" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="a_plan" value="GET /runs/:id/plan — GoalGraph + candidates + ExecutionPlan (cost/risk)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="470" width="590" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="a_approve" value="POST /runs/:id/approvals — {gate, decision: approve|reject|override, note}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="504" width="590" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="a_replan" value="POST /runs/:id/replan — request alternative plan (feeds REPLAN loop)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="538" width="590" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- Execute/Stream group -->
+        <mxCell id="g_exec" value="Execute · Observe  (Modules 06/07/08/09)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0f7fc;strokeColor=#6c8ebf;verticalAlign=top;fontStyle=1;spacingTop=6;dashed=1;" parent="1" vertex="1">
+          <mxGeometry x="560" y="608" width="620" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="a_exec" value="POST /runs/:id/execute — kick off orchestrator run (async)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="636" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_stream" value="GET /runs/:id/stream  (SSE) — live events: stage, logs, metrics, approval-needed, done" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5f4e6;strokeColor=#82b366;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="668" width="590" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="a_cancel" value="POST /runs/:id/cancel — abort in-flight run" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="704" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_artifacts" value="GET /runs/:id/artifacts[/:name] — download RunBundle (code, config, results)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="732" width="590" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- Validate/Provenance group -->
+        <mxCell id="g_prov" value="Validate · Correct · Provenance  (Modules 10/11/12/14/15)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0f7fc;strokeColor=#6c8ebf;verticalAlign=top;fontStyle=1;spacingTop=6;dashed=1;" parent="1" vertex="1">
+          <mxGeometry x="560" y="774" width="620" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="a_results" value="GET /runs/:id/results — ResultPackage + ValidationReport (vs baseline)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="802" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_accept" value="POST /runs/:id/accept — final researcher acceptance (&#8594; ACCEPT)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="834" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_prov" value="GET /runs/:id/provenance — append-only event log (CorrectionPlan history)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="866" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_replay" value="POST /runs/:id/replay — deterministic re-run from provenance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="898" width="590" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="a_registry" value="GET /registry · GET/PUT /policies · GET /budget — catalog, allow-lists, caps" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d4e6f1;strokeColor=#6c8ebf;align=left;spacingLeft=6;" parent="1" vertex="1">
+          <mxGeometry x="575" y="924" width="590" height="26" as="geometry" />
+        </mxCell>
+
+        <!-- ============ COLUMN 3: BACKEND + STORES ============ -->
+        <mxCell id="be_hdr" value="BACKEND CORE" style="text;html=1;fontSize=14;fontStyle=1;align=center;fillColor=#fffae6;rounded=1;" parent="1" vertex="1">
+          <mxGeometry x="1300" y="286" width="240" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="be_orch" value="Orchestrator + State Machine&#10;(Modules 07 / 16)&#10;retry · budget · timeout · checkpoints" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="1300" y="330" width="240" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="be_bus" value="Event Bus + Progress Bus&#10;(pub/sub &#8594; SSE bridge)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="1300" y="426" width="240" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="be_agents" value="Agent Modules 01–15&#10;(intake, discovery, plan, codegen,&#10;execute, validate, correct)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;spacingTop=6;" parent="1" vertex="1">
+          <mxGeometry x="1300" y="502" width="240" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ds_sessions" value="Session Store&#10;(runs, state, checkpoints)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=middle;" parent="1" vertex="1">
+          <mxGeometry x="1310" y="620" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="ds_prov" value="Provenance Log&#10;(append-only, SQLite MVP)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=middle;" parent="1" vertex="1">
+          <mxGeometry x="1310" y="710" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="ds_artifacts" value="Artifact Store&#10;(RunBundles: code/config/results)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=middle;" parent="1" vertex="1">
+          <mxGeometry x="1310" y="800" width="220" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- key wiring edges UI->API -->
+        <mxCell id="w1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#6c8ebf;" parent="1" source="r_home" target="a_create" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#6c8ebf;" parent="1" source="r_chat" target="a_msg" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#6c8ebf;" parent="1" source="r_plan" target="a_approve" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#82b366;" parent="1" source="r_live" target="a_stream" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#6c8ebf;" parent="1" source="r_result" target="a_results" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="w6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#6c8ebf;" parent="1" source="r_prov" target="a_prov" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- API->backend -->
+        <mxCell id="b1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#d6b656;" parent="1" source="a_exec" target="be_orch" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#82b366;" parent="1" source="be_bus" target="a_stream" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#d6b656;" parent="1" source="be_orch" target="be_agents" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#d6b656;" parent="1" source="be_orch" target="be_bus" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#b85450;" parent="1" source="be_orch" target="ds_sessions" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#b85450;" parent="1" source="be_agents" target="ds_prov" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#b85450;" parent="1" source="be_agents" target="ds_artifacts" edge="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

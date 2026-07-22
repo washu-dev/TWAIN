@@ -6,6 +6,8 @@
   "author": "WashU Development Team",
   "license": "MIT",
   "dependencies": {
+    "@azure/msal-browser": "^5.17.1",
+    "@azure/msal-react": "^5.5.3",
     "@expo/ui": "~56.0.18",
     "axios": "^1.18.0",
     "expo": "~56.0.12",

@@ -5,7 +5,7 @@
   "cpu": "512",
   "memory": "1024",
   "executionRoleArn": "arn:aws:iam::730335203321:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::730335203321:role/ecsTaskRole",
+  "taskRoleArn": "arn:aws:iam::730335203321:role/TWAIN-secrets-reader",
   "containerDefinitions": [
     {
       "name": "twain-api",
@@ -17,12 +17,8 @@
         }
       ],
       "environment": [
-        { "name": "DB_HOST",   "value": "twain-app-database.cn8saqya88cd.us-east-1.rds.amazonaws.com" },
-        { "name": "DB_PORT",   "value": "5432" },
-        { "name": "DB_NAME",   "value": "twaindb" },
-        { "name": "DB_USER",   "value": "postgres" },
-        { "name": "AWS_REGION","value": "us-east-1" },
-        { "name": "AWS_SECRET_ARN", "value": "arn:aws:secretsmanager:us-east-1:730335203321:secret:DBPASSWORD-xfmLoq" }
+        { "name": "AWS_REGION",          "value": "us-east-1" },
+        { "name": "TWAIN_SECRET_PREFIX", "value": "TWAIN/database" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

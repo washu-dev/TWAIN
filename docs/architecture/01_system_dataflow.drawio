@@ -17,7 +17,7 @@
         </mxCell>
 
         <!-- PHASE 1: INTAKE & CLARIFICATION -->
-        <mxCell id="phase1" value="Phase 1: Intake & Clarification" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+        <mxCell id="phase1" value="Phase 1: Intake &amp; Clarification" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
           <mxGeometry x="190" y="40" width="200" height="20" as="geometry" />
         </mxCell>
 
@@ -52,7 +52,7 @@
         </mxCell>
 
         <!-- PHASE 3: CODE GENERATION & EXECUTION -->
-        <mxCell id="phase3" value="Phase 3: Code Gen & Execution" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+        <mxCell id="phase3" value="Phase 3: Code Gen &amp; Execution" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
           <mxGeometry x="800" y="40" width="220" height="20" as="geometry" />
         </mxCell>
 
@@ -60,7 +60,7 @@
           <mxGeometry x="800" y="65" width="90" height="60" as="geometry" />
         </mxCell>
 
-        <mxCell id="policy" value="15_Policy_Safety&#10;Check & Approve" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
+        <mxCell id="policy" value="15_Policy_Safety&amp;#10;Check &amp; Approve" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#1b5e20;strokeWidth=1.5;fontSize=10" vertex="1" parent="1">
           <mxGeometry x="905" y="65" width="85" height="60" as="geometry" />
         </mxCell>
 
@@ -69,7 +69,7 @@
         </mxCell>
 
         <!-- PHASE 4: VALIDATION & INTERPRETATION -->
-        <mxCell id="phase4" value="Phase 4: Validation & Interpretation" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+        <mxCell id="phase4" value="Phase 4: Validation &amp; Interpretation" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
           <mxGeometry x="50" y="160" width="250" height="20" as="geometry" />
         </mxCell>
 
@@ -86,7 +86,7 @@
         </mxCell>
 
         <!-- PHASE 5: CORRECTION & REVIEW -->
-        <mxCell id="phase5" value="Phase 5: Correction & Final Review" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+        <mxCell id="phase5" value="Phase 5: Correction &amp; Final Review" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
           <mxGeometry x="370" y="160" width="250" height="20" as="geometry" />
         </mxCell>
 
@@ -103,7 +103,7 @@
         </mxCell>
 
         <!-- PHASE 6: ARCHIVE & OUTPUT -->
-        <mxCell id="phase6" value="Phase 6: Archive & Output" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
+        <mxCell id="phase6" value="Phase 6: Archive &amp; Output" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=1;fontColor=#0d47a1" vertex="1" parent="1">
           <mxGeometry x="700" y="160" width="200" height="20" as="geometry" />
         </mxCell>
 
