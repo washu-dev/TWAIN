@@ -1,6 +1,9 @@
 import json
 import logging
+import os
 import re
+import subprocess
+import sys
 import uuid
 from datetime import datetime, timezone
 from enum import Enum, auto
@@ -12,8 +15,6 @@ import twain_paths
 
 logger = logging.getLogger(__name__)
 
-from intake.intent_spec import IntentSpec
-from result_interpreter.result_package import ResultPackage
 from states import State, Context, GuardsBroken, InvalidTransition
 from crash_recovery import DataStorage
 from AgentInterface import AgentInterface
@@ -71,6 +72,36 @@ def _intent_map() -> dict:
     return _INTENT_MAP_CACHE
 
 
+# The linear "spine" of the pipeline, in order. These are the states a run can
+# be rewound to (the loop-only states REPAIR/CORRECT/REPLAN are never rewind
+# targets -- a rewind lands on the stage a researcher recognizes, and the machine
+# re-derives the loop states from there). ``rewind_to`` uses this order to decide
+# which stages count as "downstream" of the target.
+REWINDABLE_STATES: list[State] = [
+    State.INTAKE, State.CLARIFY, State.DECOMPOSE, State.DISCOVER, State.PLAN,
+    State.BUILD, State.EXECUTE, State.INTERPRET, State.VALIDATE, State.ACCEPT,
+]
+
+# What each stage *produces*, so a rewind can discard exactly that stage's (and
+# every later stage's) output and let the re-run regenerate it from the surviving
+# upstream artifacts. ``artifacts`` are keys in ``Context.artifacts``; ``flags``
+# are the guard fields on ``Context`` the stage sets. REPAIR's ``repair_report``
+# is folded into BUILD (it is regenerated whenever the bundle is), and EXECUTE
+# owns ``execution_result`` + the ``execution_status`` guard it sets from the run.
+_STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
+    State.INTAKE:    {"artifacts": ["intent_spec"], "flags": []},
+    State.CLARIFY:   {"artifacts": [], "flags": ["clarified"]},
+    State.DECOMPOSE: {"artifacts": ["goal_graph", "goal_graph_error"], "flags": []},
+    State.DISCOVER:  {"artifacts": ["discovery"], "flags": []},
+    State.PLAN:      {"artifacts": ["execution_plan"], "flags": []},
+    State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report"], "flags": ["plan_approved"]},
+    State.EXECUTE:   {"artifacts": ["execution_result"], "flags": ["execution_status"]},
+    State.INTERPRET: {"artifacts": [], "flags": []},
+    State.VALIDATE:  {"artifacts": [], "flags": ["validation_result"]},
+    State.ACCEPT:    {"artifacts": [], "flags": []},
+}
+
+
 GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.INTAKE, State.CLARIFY): lambda c: True,
     (State.CLARIFY, State.DECOMPOSE): lambda c: c.clarified,
@@ -78,7 +109,15 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.DECOMPOSE, State.DISCOVER): lambda c: True,
     (State.DISCOVER, State.PLAN): lambda c: True,
     (State.DECOMPOSE,State.INTAKE): lambda c: True,
-    (State.PLAN, State.BUILD): lambda c: c.plan_approved,
+    # PLAN->BUILD is unguarded on purpose: crossing it only *reaches* BUILD, the
+    # state a run parks in with the plan generated and awaiting the researcher's
+    # approval -- no bundle is built and nothing is executed until BUILD's handler
+    # runs on the way OUT. The real approval gate is the next edge (BUILD->REPAIR):
+    # a run cannot build/execute until ``plan_approved`` is set by an explicit
+    # approval (see StateMachine.approve_plan / Orchestrator.approve_plan). Keeping
+    # this edge open lets the driver pause at BUILD to ask; the guarded edges below
+    # then enforce the decision.
+    (State.PLAN, State.BUILD): lambda c: True,
     (State.BUILD, State.REPAIR): lambda c: c.plan_approved,
     (State.REPAIR, State.EXECUTE): lambda c: c.plan_approved,
     (State.EXECUTE, State.INTERPRET): lambda c: c.execution_status,
@@ -100,7 +139,8 @@ class StateMachine:
                  execute_keep_artifacts: bool = True, execute_timeout=None,
                  execution_adapter=None, verify_codegen: bool = False,
                  script_doctor=None, library_available=None, sim_available=None,
-                 auto_approve=False):
+                 auto_approve=False, execute_slurm: bool = False,
+                 slurm_cluster: str = None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -134,6 +174,12 @@ class StateMachine:
         self.execute_keep_artifacts = execute_keep_artifacts
         self.execute_timeout = execute_timeout
         self._execution_adapter = execution_adapter
+        # HPC execution (Story 5.4): when on, EXECUTE submits the RunBundle to
+        # the Slurm cluster named by ``slurm_cluster`` (configs/clusters/<name>.json,
+        # default compute2) instead of running it locally/in Docker. Implies the
+        # run happens even though execute_locally may be off.
+        self.execute_slurm = execute_slurm
+        self.slurm_cluster = slurm_cluster or "compute2"
         # When on, the REPAIR stage may call the LLM to repair the synthesized
         # calculator script and proactively scan it for latent bugs. Off by
         # default so offline/seeded/test runs make no network calls there; the
@@ -213,6 +259,53 @@ class StateMachine:
         self.current_state = next_state
         self.storage.commit(self.current_state,self.context)
 
+    def rewind_to(self, target: State) -> None:
+        """Rewind the machine to an earlier pipeline stage so it can be re-run.
+
+        "Rerun from CLARIFY" means: go back to CLARIFY and re-do it and everything
+        after it, keeping the work of the stages *before* it as input. So this
+        discards exactly the artifacts and guard flags that ``target`` and every
+        later stage produced (per :data:`_STAGE_OUTPUTS`), leaving the upstream
+        artifacts intact, resets the clarify-round counter, and points the machine
+        at ``target``. The next :meth:`run` re-enters ``target`` and re-derives
+        everything downstream.
+
+        The reset guard flags fall back to their :class:`Context` defaults; a
+        driver that seeds guards for a stubbed happy path (e.g. the runner's
+        ``execution_status``/``validation_result`` seed) should re-apply that seed
+        after rewinding -- see ``Orchestrator.rewind_to``. ``target`` must be one
+        of :data:`REWINDABLE_STATES`.
+        """
+        if target not in REWINDABLE_STATES:
+            raise InvalidTransition(
+                f"cannot rewind to {getattr(target, 'name', target)}; "
+                f"valid targets: {[s.name for s in REWINDABLE_STATES]}"
+            )
+        cutoff = REWINDABLE_STATES.index(target)
+        defaults = Context()  # fresh guard-flag defaults to reset downstream flags to
+        for state in REWINDABLE_STATES[cutoff:]:
+            outputs = _STAGE_OUTPUTS.get(state, {})
+            for key in outputs.get("artifacts", []):
+                self.context.artifacts.pop(key, None)
+            for flag in outputs.get("flags", []):
+                setattr(self.context, flag, getattr(defaults, flag))
+        # A rewind restarts the CLARIFY loop from scratch.
+        self._clarify_rounds = 0
+        self.current_state = target
+        self.storage.commit(self.current_state, self.context)
+
+    def approve_plan(self, approved: bool = True) -> None:
+        """Record the researcher's plan-approval decision (the BUILD/EXECUTE gate).
+
+        Sets ``plan_approved`` and persists it, so the guarded ``BUILD->REPAIR`` /
+        ``REPAIR->EXECUTE`` transitions may proceed. Until this is called (or the
+        context is seeded), ``plan_approved`` is False and those guards hold the
+        run at the approval gate -- nothing is built or executed. This is the
+        engine-level enforcement point for "no execution without an approved plan".
+        """
+        self.context.plan_approved = approved
+        self.storage.commit(self.current_state, self.context)
+
     # ---- intake / clarify collaborators ----------------------------------
 
 
@@ -248,13 +341,13 @@ class StateMachine:
 
         ``agent`` may be a plain ``prompt -> str`` callable (what the orchestrator
         and tests inject) or an ``AgentInterface``-style object whose
-        ``callAgent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
+        ``call_agent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
         ``call_kwargs`` (e.g. ``max_tokens``) are forwarded only to the
-        ``callAgent`` form; a plain callable is invoked with just the prompt.
+        ``call_agent`` form; a plain callable is invoked with just the prompt.
         """
         agent = self.agent
-        if hasattr(agent, "callAgent"):
-            resp = agent.callAgent(prompt, **call_kwargs)
+        if hasattr(agent, "call_agent"):
+            resp = agent.call_agent(prompt, **call_kwargs)
         else:
             resp = agent(prompt)
         if isinstance(resp, str):
@@ -277,26 +370,71 @@ class StateMachine:
             return text[start:end + 1]
         return text
 
-    def _is_confident(self, intent: dict) -> bool:
-        """True when every *relevant* confidence score meets the threshold.
+    @staticmethod
+    def _system_kind(intent: dict) -> str:
+        """The target system's representation: 'crystal', 'surface', or 'molecule'.
 
-        Scores that don't apply to the chosen system representation are ignored,
-        so a crystal is never gated on a (meaningless) ``SMILES_confidence`` and a
-        molecule isn't gated on ``phase``/``structure`` confidence. Without this,
-        a solid-state request loops in CLARIFY forever asking for a SMILES it can
-        never sensibly provide.
+        Reads the IntentSpec's explicit ``kind`` discriminator when present, else
+        infers it from which sub-object the spec carries (periodic solids under
+        ``crystal``, discrete molecules under ``molecule``). Defaults to
+        'molecule' so a spec with neither behaves as it did before.
+        """
+        sysd = intent.get("system_descriptors") or {}
+        kind = str(sysd.get("kind") or "").lower()
+        if kind in ("molecule", "crystal", "surface"):
+            return kind
+        if isinstance(sysd.get("crystal"), dict) and sysd.get("crystal"):
+            return "crystal"
+        return "molecule"
+
+    def _relevant_scores(self, intent: dict) -> dict:
+        """Confidence scores that apply to the chosen system representation.
+
+        Scores that don't apply are dropped -- a crystal is never gated on a
+        (meaningless) ``SMILES_confidence`` and a molecule isn't gated on
+        ``phase``/``structure`` confidence -- so both the confidence gate and the
+        clarification questions ignore them. Without this, a solid-state request
+        loops in CLARIFY forever asking for a SMILES it can never sensibly provide.
         """
         scores = (intent.get("metadata") or {}).get("confidence_scores") or {}
-        if not scores:
-            return False
         if self._system_kind(intent) in ("crystal", "surface"):
             irrelevant = {"smiles_confidence", "name_confidence"}
         else:
             irrelevant = {"phase_confidence", "structure_confidence"}
-        relevant = {k: v for k, v in scores.items() if k.lower() not in irrelevant}
+        return {k: v for k, v in scores.items() if k.lower() not in irrelevant}
+
+    def _is_confident(self, intent: dict) -> bool:
+        """True when every *relevant* confidence score meets the threshold."""
+        relevant = self._relevant_scores(intent)
         if not relevant:
             return False
         return all(value >= self.confidence_threshold for value in relevant.values())
+
+    @staticmethod
+    def _score_field_name(score_key: str) -> str:
+        """Human-readable field a confidence score refers to.
+
+        ``SMILES_confidence`` -> ``SMILES``, ``phase_confidence`` -> ``phase``. The
+        trailing ``_confidence`` (schema convention) is stripped; anything else is
+        returned unchanged.
+        """
+        if score_key.lower().endswith("_confidence"):
+            return score_key[: -len("_confidence")]
+        return score_key
+
+    def _uncertain_fields(self, intent: dict) -> list:
+        """Relevant fields below the confidence threshold, most-uncertain first.
+
+        Exactly what CLARIFY should ask about: targeting only genuine gaps keeps
+        the questions few and stops clarify re-interrogating fields intake already
+        resolved. Returns the human-readable field names (see ``_score_field_name``).
+        """
+        relevant = self._relevant_scores(intent)
+        low = sorted(
+            (k for k, v in relevant.items() if v < self.confidence_threshold),
+            key=lambda k: relevant[k],
+        )
+        return [self._score_field_name(k) for k in low]
 
     def intake(self) -> State:
         schema = str(twain_paths.SCHEMAS_DIR / "intent_spec.schema.json")
@@ -328,9 +466,23 @@ class StateMachine:
             return State.DECOMPOSE
 
         text = json.dumps(intent)
-        questions = self._agent_text(self.prompt_generator.clarification_prompt(text))
+        # Target only the fields intake left genuinely uncertain, so the model asks
+        # about real gaps (and stays terse) instead of re-interrogating the request.
+        uncertain = self._uncertain_fields(intent)
+        questions = self._agent_text(
+            self.prompt_generator.clarification_prompt(text, uncertain_fields=uncertain)
+        ).strip()
+
+        # If the model finds nothing worth asking (or replies "No questions."), don't
+        # pester the researcher with an empty prompt -- proceed on the best-effort
+        # spec. The bounded loop below still caps genuine Q&A rounds.
+        if not questions or questions.lower().rstrip(".!") == "no questions":
+            logger.info("[clarify] no clarifying questions needed; proceeding.")
+            self.context.clarified = True
+            return State.DECOMPOSE
+
         answer = self._ask_user(
-            f"Answer the following questions about your request:\n{questions}\n> "
+            f"I need a little more detail before continuing:\n{questions}"
         )
         text = self._agent_text(self.prompt_generator.modify_json_schema(text, answer))
         intent = json.loads(text)
@@ -410,7 +562,7 @@ class StateMachine:
         default budget -- too small a budget truncates the JSON mid-object.
         """
         schema = str(twain_paths.SCHEMAS_DIR / "goal_graph.schema.json")
-        prompt = self.promptGenerator.goalGraphPrompt(
+        prompt = self.prompt_generator.goal_graph_prompt(
             schema, json.dumps(intent), self.run_id
         )
         self._last_decomposition_raw = self._agent_text(prompt, max_tokens=4096)
@@ -638,13 +790,61 @@ class StateMachine:
 
     def _primary_goal_id(self) -> str:
         """Resolve the goal id the plan targets (the execution goal), with fallback."""
-        graph = self._load_artifact("goal_graph")
-        if graph and graph.get("goals"):
-            for goal in graph["goals"]:
-                if goal.get("category") == "execution":
-                    return goal["id"]
-            return graph["goals"][0]["id"]
+        goal = self._primary_goal()
+        if goal is not None:
+            return goal["id"]
         return f"goal-{self.run_id}"
+
+    def _primary_goal(self) -> Optional[dict]:
+        """The goal the plan targets: the execution goal, else the first goal."""
+        graph = self._load_artifact("goal_graph")
+        if not graph or not graph.get("goals"):
+            return None
+        goals = graph["goals"]
+        return next((g for g in goals if g.get("category") == "execution"), goals[0])
+
+    @staticmethod
+    def _describe_system(sd: dict) -> str:
+        """Human label for the target material, e.g. 'Ag (Silver), fcc crystal'."""
+        if not sd:
+            return "the target system"
+        crystal = sd.get("crystal") or {}
+        formula = sd.get("formula") or crystal.get("formula")
+        name = crystal.get("name") or sd.get("name")
+        label = formula or name or "the target system"
+        if name and formula and name.lower() != formula.lower():
+            label = f"{formula} ({name})"
+        qualifiers = " ".join(x for x in [crystal.get("phase"), sd.get("kind")] if x)
+        if qualifiers and label != "the target system":
+            return f"{label}, {qualifiers}"
+        return label
+
+    def _compose_plan_summary(
+        self, intent: dict, requested_property: Optional[str],
+        libraries: list, calc_entry, recommendation,
+    ) -> str:
+        """Plain-language description of what this run will do (for the approval gate)."""
+        prop = requested_property
+        if not prop:
+            for metric in intent.get("acceptance_metrics", []) or []:
+                if isinstance(metric, dict) and metric.get("metric_name"):
+                    prop = metric["metric_name"]
+                    break
+        prop = prop or "the requested property"
+
+        system = self._describe_system(intent.get("system_descriptors") or {})
+        toolset = " + ".join(libraries) if libraries else "the selected tools"
+        calc = f" with the {calc_entry.name} calculator" if calc_entry is not None else ""
+
+        parts = [f"Compute {prop} for {system} using {toolset}{calc}."]
+        goal = self._primary_goal()
+        purpose = (goal or {}).get("purpose")
+        if purpose:
+            parts.append(f"Goal: {purpose}")
+        reasoning = getattr(recommendation, "reasoning", None) if recommendation is not None else None
+        if reasoning:
+            parts.append(f"Approach: {reasoning}")
+        return " ".join(parts)
 
     def decompose(self) -> State:
         """Turn the clarified IntentSpec into a validated GoalGraph artifact.
@@ -852,6 +1052,8 @@ class StateMachine:
                     f"(runner/README.md), and TWAIN will run it in the linux-64 container.")
         execution_plan.target_system = intent.get("system_descriptors") or None
         execution_plan.requested_property = requested_property
+        execution_plan.summary = self._compose_plan_summary(
+            intent, requested_property, libraries, calc_entry, recommendation)
 
         self.context.artifacts["execution_plan"] = self._write_artifact(
             "execution_plan", asdict(execution_plan))
@@ -1134,7 +1336,7 @@ class StateMachine:
         ``execution_status`` is set from the run so the EXECUTE->INTERPRET guard
         reflects what actually happened.
         """
-        if not self.execute_locally:
+        if not (self.execute_locally or self.execute_slurm):
             return State.INTERPRET
 
         bundle_dir = self.context.artifacts.get("run_bundle")
@@ -1160,6 +1362,20 @@ class StateMachine:
 
         adapter = self._execution_adapter
         docker_route = False
+        slurm_route = False
+        if adapter is None and self.execute_slurm:
+            # HPC route (Story 5.4): stage the bundle to the cluster, submit via
+            # sbatch with the plan's resource request, poll to completion, and
+            # fetch outputs back. Takes precedence over local/Docker -- the
+            # researcher explicitly opted into the cluster.
+            adapter = self._build_slurm_adapter()
+            if adapter is None:
+                return self._skip_execution(
+                    bundle_dir, status="skipped_missing_dependency",
+                    note=f"Not run on the cluster: no usable profile for "
+                         f"'{self.slurm_cluster}' (configs/clusters/). ",
+                    how_to=self._how_to_run(bundle_dir))
+            slurm_route = True
         if adapter is None:
             # Route non-native engines (no build for this host, e.g. GPAW on a
             # Mac) into the linux-64 runner container; everything else runs in the
@@ -1206,14 +1422,17 @@ class StateMachine:
         result = adapter.execute(
             bundle_dir,
             # The sim env / Docker image already ship the whole stack, so never
-            # pip-install into a venv there; that only applies to default-interpreter runs.
-            install_deps=self.execute_install_deps and run_python is None and not docker_route,
+            # pip-install into a venv there; that only applies to default-interpreter
+            # runs -- and to Slurm jobs, whose compute nodes have no TWAIN env at all
+            # (the job builds a venv from the bundle's requirements.txt).
+            install_deps=slurm_route or (self.execute_install_deps
+                                         and run_python is None and not docker_route),
             keep_artifacts=self.execute_keep_artifacts,
             run_smoke=True,
             timeout=self.execute_timeout,
-            # Docker fixes the interpreter via the image; native uses run_python
-            # (None => the adapter's default interpreter).
-            python_executable=None if docker_route else run_python,
+            # Docker/Slurm fix the interpreter via the image/job; native uses
+            # run_python (None => the adapter's default interpreter).
+            python_executable=None if (docker_route or slurm_route) else run_python,
             run_id=self.run_id,  # names the workdir exec_<session_id> for traceability
         )
         self.context.artifacts["execution_result"] = self._write_artifact(
@@ -1234,6 +1453,41 @@ class StateMachine:
             return None
         name = (plan.get("selected_method") or {}).get("calculator")
         return find_calculator(name)
+
+    def _build_slurm_adapter(self):
+        """A SlurmExecutionAdapter wired from the cluster profile + the plan.
+
+        Resources come from the plan's ``slurm_request`` (synthesized during
+        PLAN); connection details from the profile, overridable via
+        ``TWAIN_SLURM_HOST`` (empty string => run sbatch locally, i.e. the
+        process is already on a login node) and ``TWAIN_SLURM_USER``. Returns
+        None when the profile can't be loaded, so execute() can skip gracefully
+        with guidance instead of crashing.
+        """
+        from execution_adapter.cluster_profile import ClusterProfile
+        from execution_adapter.slurm_execution_adapter import SlurmExecutionAdapter
+        from plan_synthesizer.execution_plan import SlurmRequest
+        try:
+            profile = ClusterProfile.load(self.slurm_cluster)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"[execute] cluster profile '{self.slurm_cluster}' unusable: {exc}")
+            return None
+        request = None
+        plan = self._load_artifact("execution_plan") or {}
+        raw = plan.get("slurm_request")
+        if isinstance(raw, dict):
+            try:
+                request = SlurmRequest(**raw)
+            except (TypeError, ValueError):
+                request = None  # malformed plan request -> adapter default
+        host = os.environ.get("TWAIN_SLURM_HOST")  # None => profile login node
+        return SlurmExecutionAdapter(
+            profile,
+            request=request,
+            host=host,
+            user=os.environ.get("TWAIN_SLURM_USER"),
+            workspace_root=str(self.artifacts_dir),
+        )
 
     def _confirm_heavy_execution(self) -> bool:
         """Ask the researcher before running a heavy calculation; True to proceed.

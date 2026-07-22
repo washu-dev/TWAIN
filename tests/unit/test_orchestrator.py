@@ -352,6 +352,66 @@ class TestErrorHandling:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 3b. Cost budget: tracking, enforcement, and configurability
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CostingAgent:
+    """A ``prompt -> str`` agent (like ``fake_llm``) that also books a fixed cost
+    per call, so the orchestrator's cost sync + budget gate run end to end."""
+
+    def __init__(self, per_call=0.5):
+        self.per_call = per_call
+        self.total_cost = 0.0
+        self.call_count = 0
+        self.api_quota_prior = None
+        self.api_quota_remaining = None
+
+    def __call__(self, _prompt):
+        self.total_cost += self.per_call
+        self.call_count += 1
+        return _SPEC_JSON
+
+
+class TestBudget:
+    def test_run_max_cost_stops_the_run(self, env):
+        # A tiny budget with a costing agent: the first stage's LLM spend blows the
+        # cap, so the run stops with a POLICY (budget) error rather than completing.
+        # Proves cost is actually tracked AND the gate fires.
+        agent = CostingAgent(per_call=0.5)
+        o = build(env, "overbudget", agent=agent, run_max_cost=0.1)
+        assert o.run() == RunStatus.ERROR
+        assert o.last_error.category == ErrorCategory.POLICY
+        assert "budget" in json.dumps(o.run_session.error).lower()
+        assert o.run_budget.cost >= 0.5      # the agent's spend was synced in
+
+    def test_generous_budget_completes_and_tracks_cost(self, env):
+        # With headroom the run completes, the actual spend is tracked on the run
+        # budget (non-zero), and the budget.json artifact mirrors it exactly.
+        agent = CostingAgent(per_call=0.5)
+        o = build(env, "underbudget", agent=agent, run_max_cost=100.0)
+        assert o.run() == RunStatus.COMPLETED
+        assert o.run_budget.cost > 0
+        assert agent.call_count > 0
+        budget_path = o.sm.context.artifacts.get("budget")
+        assert budget_path and Path(budget_path).is_file()
+        snap = json.loads(Path(budget_path).read_text())
+        assert snap["run"]["cost"] == o.run_budget.cost
+        assert snap["run"]["max_cost"] == 100.0
+
+    def test_default_budget_when_unset(self, env):
+        # No run_max_cost passed => the orchestrator's documented $1.00 default,
+        # and the (per-run) global tracker ceiling matches it.
+        o = build(env, "defaultbudget")
+        assert o.run_budget.max_cost == 1.0
+        assert o.budget_tracker.global_budget == 1.0
+
+    def test_configured_budget_flows_to_tracker(self, env):
+        o = build(env, "configured", run_max_cost=7.5)
+        assert o.run_budget.max_cost == 7.5
+        assert o.budget_tracker.global_budget == 7.5
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 4. Agent/step runner: timeout / validation / retry
 # ═══════════════════════════════════════════════════════════════════════════════
 

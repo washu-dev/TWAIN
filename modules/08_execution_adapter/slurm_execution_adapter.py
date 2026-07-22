@@ -1,0 +1,337 @@
+"""Slurm execution adapter -- runs a RunBundle on an HPC cluster (Story 5.4).
+
+The HPC sibling of :class:`~execution_adapter.local_adapter.LocalExecutionAdapter`
+and :class:`~execution_adapter.docker_adapter.DockerExecutionAdapter`, exposing
+the same ``execute(bundle, ...) -> ExecutionResult`` interface so the state
+machine picks a backend without special-casing the call site.
+
+One ``execute()`` call performs the full lifecycle against the cluster in the
+:class:`~execution_adapter.cluster_profile.ClusterProfile`:
+
+  1. **stage**   -- rsync the bundle into ``<storage_root>/twain-runs/<run_id>/``
+     (:class:`~execution_adapter.staging.Stager`);
+  2. **render**  -- build the ``#SBATCH`` script from the plan's
+     :class:`~plan_synthesizer.execution_plan.SlurmRequest` (partition selection,
+     ``--gres``, walltime/memory formats -- :class:`SlurmAdapter`);
+  3. **submit**  -- ``sbatch`` on the login node (over SSH or locally);
+  4. **wait**    -- bounded ``squeue``/``sacct`` polling. If the budget expires
+     the job is LEFT RUNNING and the result says how to check on it -- a
+     multi-hour job must not be silently killed because the orchestrator's
+     EXECUTE budget is shorter;
+  5. **fetch**   -- rsync outputs (``results.csv``, the job log) back into the
+     local workspace and map ``sacct`` accounting (Elapsed/MaxRSS) onto the
+     result's resource fields.
+
+The job payload creates a venv from the bundle's ``requirements.txt`` when
+``install_deps`` is on (compute nodes have no TWAIN pixi env), or runs inside a
+pyxis container when ``container_image`` is set. All cluster interaction goes
+through injected runners (login-node commands + rsync/ssh transport), so the
+whole lifecycle is unit-testable offline; production needs the WashU VPN + an
+SSH key for the login node.
+"""
+from __future__ import annotations
+
+import re
+import shlex
+from pathlib import Path
+from typing import List, Optional, Union
+
+try:  # pragma: no cover - import shim (mirrors local_adapter)
+    from execution_adapter.cluster_profile import ClusterProfile
+    from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+    from execution_adapter.local_adapter import _DEP_ERROR_MARKERS, _safe_name
+    from execution_adapter.slurm_adapter import (
+        JobSpec,
+        JobState,
+        Runner,
+        SlurmAdapter,
+        SlurmError,
+        ssh_runner,
+        subprocess_runner,
+    )
+    from execution_adapter.staging import Stager, StagingError
+except ImportError:  # pragma: no cover
+    from cluster_profile import ClusterProfile
+    from execution_result import ExecutionResult, ExecutionStatus
+    from local_adapter import _DEP_ERROR_MARKERS, _safe_name
+    from slurm_adapter import (
+        JobSpec,
+        JobState,
+        Runner,
+        SlurmAdapter,
+        SlurmError,
+        ssh_runner,
+        subprocess_runner,
+    )
+    from staging import Stager, StagingError
+
+from plan_synthesizer.execution_plan import SlurmRequest
+
+# A generous default: DFT jobs routinely take an hour; beyond this the job is
+# left running on the cluster and the result reports how to check on it.
+DEFAULT_MAX_WAIT = 7200.0
+DEFAULT_POLL_INTERVAL = 30.0
+
+_STATE_TO_STATUS = {
+    JobState.COMPLETED: ExecutionStatus.SUCCESS,
+    JobState.TIMEOUT: ExecutionStatus.TIMEOUT,
+    JobState.FAILED: ExecutionStatus.FAILED,
+    JobState.CANCELLED: ExecutionStatus.FAILED,
+    JobState.UNKNOWN: ExecutionStatus.FAILED,
+}
+
+
+def _elapsed_seconds(text: str) -> float:
+    """``sacct`` Elapsed (``[D-]HH:MM:SS``) -> seconds (0.0 when unparseable)."""
+    match = re.match(r"(?:(\d+)-)?(\d+):(\d+):(\d+)$", (text or "").strip())
+    if not match:
+        return 0.0
+    days, hours, minutes, seconds = (int(g or 0) for g in match.groups())
+    return float(((days * 24 + hours) * 60 + minutes) * 60 + seconds)
+
+
+def _maxrss_mb(text: str) -> Optional[float]:
+    """``sacct`` MaxRSS (``123456K`` / ``1.5G`` / ``800M``) -> MB, or None."""
+    match = re.match(r"([\d.]+)([KMGT]?)$", (text or "").strip(), re.IGNORECASE)
+    if not match:
+        return None
+    value = float(match.group(1))
+    factor = {"": 1 / 1024, "K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 ** 2}
+    return round(value * factor[match.group(2).upper()], 3)
+
+
+class SlurmExecutionAdapter:
+    """Stage, submit, poll, and fetch one RunBundle as a Slurm job."""
+
+    def __init__(
+        self,
+        profile: Optional[ClusterProfile] = None,
+        *,
+        request: Optional[SlurmRequest] = None,
+        host: Optional[str] = None,
+        user: Optional[str] = None,
+        workspace_root: Optional[Union[str, Path]] = None,
+        container_image: Optional[str] = None,
+        partition: Optional[str] = None,
+        max_wait: float = DEFAULT_MAX_WAIT,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        cluster_runner: Optional[Runner] = None,
+        transfer_runner: Optional[Runner] = None,
+        sleep=None,
+    ):
+        """``cluster_runner`` executes sbatch/squeue/sacct (defaults to SSH to the
+        profile's first login node, or locally when ``host`` is falsy -- i.e. the
+        process already runs on a login node). ``transfer_runner`` executes the
+        rsync/ssh staging commands locally. Both are injectable for tests."""
+        self.profile = profile or ClusterProfile.load("compute2")
+        # Default resource ask when the plan carries none: a small CPU job.
+        self.request = request or SlurmRequest(
+            cpu_count=4, gpu_count=0, max_time=60, ram=8000)
+        self.host = host if host is not None else self.profile.login_nodes[0]
+        self.user = user
+        self.workspace_root = str(workspace_root) if workspace_root else None
+        self.container_image = container_image
+        self.partition = partition
+        self.max_wait = max_wait
+        self.poll_interval = poll_interval
+        self._sleep = sleep
+
+        if cluster_runner is None:
+            cluster_runner = ssh_runner(self.host, user=user) if self.host \
+                else subprocess_runner
+        self.slurm = SlurmAdapter(self.profile, runner=cluster_runner)
+        # host="" (already on a login node) degrades staging to local copies.
+        self.stager = Stager(self.profile, host=self.host, user=user,
+                             runner=transfer_runner)
+
+    # ---------------------------------------------------------------- execute
+    def execute(
+        self,
+        bundle,
+        *,
+        keep_artifacts: bool = True,
+        install_deps: bool = True,
+        run_smoke: bool = True,
+        python_executable: Optional[str] = None,  # ignored: env fixed by the job
+        timeout: Optional[float] = None,
+        env: Optional[dict] = None,
+        run_id: Optional[str] = None,
+    ) -> ExecutionResult:
+        """Run ``bundle`` on the cluster and return an :class:`ExecutionResult`.
+
+        ``bundle`` is a path to a bundle directory (or a RunBundle with
+        ``write(dir)`` -- materialized into the workspace first). ``timeout``
+        bounds the *polling wait*, not the job: an expired wait leaves the job
+        running and reports where to find it. ``install_deps`` builds a venv from
+        requirements.txt inside the job (compute nodes have no TWAIN env);
+        ``python_executable`` is accepted for interface parity but ignored.
+        """
+        run_id = run_id or "run"
+        job_name = f"twain-{_safe_name(run_id)}"[:60]
+        max_wait = timeout if timeout is not None else self.max_wait
+        tool_name = None
+
+        # 1) materialize + render (all local) -------------------------------------
+        try:
+            local_dir = self._materialize(bundle, run_id)
+        except (StagingError, OSError) as exc:
+            return ExecutionResult(
+                status=ExecutionStatus.SETUP_FAILED,
+                message=f"failed to prepare the bundle: {exc}",
+                tool_name=tool_name,
+            )
+        tool_name = getattr(bundle, "tool_name", None)
+        remote_dir = self.stager.remote_run_dir(run_id)
+        job = JobSpec(
+            job_name=job_name,
+            command=self._payload(local_dir, install_deps=install_deps,
+                                  run_smoke=run_smoke),
+            workdir=remote_dir,
+            output_path=f"{remote_dir}/{job_name}-%j.log",
+            partition=self.partition,
+            container_image=self.container_image,
+            container_mounts=[f"{remote_dir}:{remote_dir}"] if self.container_image else [],
+            env=dict(env or {}),
+        )
+
+        # 2) stage + submit --------------------------------------------------------
+        try:
+            script = self.slurm.render_sbatch(job, self.request)
+            (Path(local_dir) / "job.slurm").write_text(script, encoding="utf-8")
+            self.stager.push(local_dir, run_id)
+            job_id = self.slurm.submit(f"{remote_dir}/job.slurm")
+        except (SlurmError, StagingError, KeyError, OSError) as exc:
+            return ExecutionResult(
+                status=ExecutionStatus.SETUP_FAILED,
+                message=f"failed to submit the Slurm job: {exc}",
+                tool_name=tool_name,
+                artifacts_dir=local_dir if keep_artifacts else None,
+            )
+
+        # 3) wait (bounded) -----------------------------------------------------
+        try:
+            wait_kwargs = dict(poll_interval=self.poll_interval, max_wait=max_wait)
+            if self._sleep is not None:
+                wait_kwargs["sleep"] = self._sleep
+            state = self.slurm.wait(job_id, **wait_kwargs)
+        except SlurmError:
+            # Budget expired with the job still queued/running: leave it alone
+            # (a multi-hour DFT run must not die because our wait was shorter)
+            # and tell the researcher exactly how to follow up.
+            return ExecutionResult(
+                status=ExecutionStatus.TIMEOUT,
+                message=(
+                    f"the Slurm job is still running on {self.profile.name} "
+                    f"(job id {job_id}); it was NOT cancelled. Check it with "
+                    f"`squeue --job {job_id}` and fetch outputs from {remote_dir} "
+                    f"when it completes."
+                ),
+                tool_name=tool_name,
+                command=["sbatch", f"{remote_dir}/job.slurm"],
+                artifacts_dir=local_dir if keep_artifacts else None,
+            )
+
+        # 4) fetch results + accounting ------------------------------------------
+        try:
+            self.stager.pull(run_id, local_dir)
+        except StagingError as exc:
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                message=f"job finished ({state.value}) but fetching outputs failed: {exc}",
+                tool_name=tool_name,
+                artifacts_dir=local_dir if keep_artifacts else None,
+            )
+        stdout = self._read_log(local_dir, job_name, job_id)
+        accounting = self._safe_accounting(job_id)
+        exit_code = self.slurm.exit_code(job_id) if accounting else None
+
+        status, message = self._classify(state, exit_code, stdout, job_id)
+        return ExecutionResult(
+            status=status,
+            exit_code=exit_code,
+            stdout=stdout,
+            duration_seconds=_elapsed_seconds(accounting.get("Elapsed", "")),
+            peak_memory_mb=_maxrss_mb(accounting.get("MaxRSS", "")),
+            artifacts_dir=local_dir if keep_artifacts else None,
+            tool_name=tool_name,
+            command=["sbatch", f"{remote_dir}/job.slurm"],
+            message=message,
+            # Job identity + accounting for provenance / the budget tracker.
+            install_log={"job_id": job_id, "cluster": self.profile.name,
+                         "remote_dir": remote_dir, **accounting},
+        )
+
+    # ---------------------------------------------------------------- helpers
+    def _materialize(self, bundle, run_id) -> str:
+        """Ensure the bundle exists as a local directory; returns its path."""
+        if hasattr(bundle, "write") and callable(bundle.write):
+            import tempfile
+            root = Path(self.workspace_root) if self.workspace_root \
+                else Path(tempfile.gettempdir())
+            root.mkdir(parents=True, exist_ok=True)
+            local = root / f"slurm_{_safe_name(run_id)}"
+            local.mkdir(parents=True, exist_ok=True)
+            bundle.write(local)
+            return str(local)
+        path = Path(bundle)
+        if not path.is_dir():
+            raise StagingError(f"bundle path is not a directory: {path}")
+        return str(path)
+
+    def _payload(self, local_dir, *, install_deps: bool, run_smoke: bool) -> str:
+        """The shell payload the batch script runs inside the remote run dir.
+
+        Containers bring their own stack (pyxis mounts the run dir); otherwise a
+        venv from requirements.txt makes the job self-contained on compute nodes
+        that have no TWAIN environment. Smoke tests (inline_tests.py) run first
+        so a missing dependency fails in seconds, not after queueing the real run.
+        """
+        bundle = Path(local_dir)
+        steps: List[str] = []
+        if self.container_image:
+            python = "python3"
+        elif install_deps and (bundle / "requirements.txt").is_file():
+            steps.append("python3 -m venv .venv")
+            steps.append(".venv/bin/python -m pip install -q --upgrade pip")
+            steps.append(".venv/bin/python -m pip install -q -r requirements.txt")
+            python = ".venv/bin/python"
+        else:
+            python = "python3"
+        if run_smoke and (bundle / "inline_tests.py").is_file():
+            steps.append(f"{python} inline_tests.py")
+        steps.append(f"{python} main.py")
+        return " && ".join(steps)
+
+    def _read_log(self, local_dir, job_name: str, job_id: str) -> str:
+        path = Path(local_dir) / f"{job_name}-{job_id}.log"
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def _safe_accounting(self, job_id: str) -> dict:
+        try:
+            return self.slurm.accounting(job_id)
+        except SlurmError:
+            return {}
+
+    @staticmethod
+    def _classify(state: JobState, exit_code: Optional[int], stdout: str,
+                  job_id: str):
+        if state is JobState.COMPLETED and exit_code in (None, 0):
+            return ExecutionStatus.SUCCESS, f"Slurm job {job_id} completed successfully"
+        if state is JobState.TIMEOUT:
+            return (ExecutionStatus.TIMEOUT,
+                    f"Slurm job {job_id} hit its wall-clock limit and was killed")
+        if state is JobState.CANCELLED:
+            return ExecutionStatus.FAILED, f"Slurm job {job_id} was cancelled"
+        blob = (stdout or "").lower()
+        # The smoke script exits 2 on a missing dependency; the payload chain
+        # propagates it as the job's exit code.
+        if exit_code == 2 or any(marker in blob for marker in _DEP_ERROR_MARKERS):
+            return (ExecutionStatus.DEPENDENCY_ERROR,
+                    f"Slurm job {job_id} failed on a missing/broken dependency "
+                    f"(see the job log)")
+        return (ExecutionStatus.FAILED,
+                f"Slurm job {job_id} failed ({state.value}"
+                + (f", exit {exit_code}" if exit_code is not None else "") + ")")

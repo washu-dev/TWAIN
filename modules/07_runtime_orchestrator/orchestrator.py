@@ -122,6 +122,8 @@ class Orchestrator:
         execute_install_deps: bool = False,
         verify_codegen: bool = False,
         auto_approve: bool = False,
+        execute_slurm: bool = False,
+        slurm_cluster: Optional[str] = None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -143,7 +145,10 @@ class Orchestrator:
         )
 
         # ---- budget tracking ------------------------------------------------
-        self.budget_tracker = budget_tracker or BudgetTracker()
+        # A fresh tracker is scoped to this run, so its global ceiling is the run
+        # cost cap (keeps budget.json's "global" tier coherent with "run"); an
+        # injected tracker keeps whatever cross-run ceiling the caller set.
+        self.budget_tracker = budget_tracker or BudgetTracker(global_budget=run_max_cost)
         self.run_budget = RunBudget(
             max_cost=run_max_cost,
             max_iterations=run_max_iterations,
@@ -194,6 +199,11 @@ class Orchestrator:
             # run reaches completion without human input (see the runner's
             # TWAIN_AUTO_RUN). The plan-approval gate is enforced by the driver.
             auto_approve=auto_approve,
+            # HPC route (Story 5.4): submit the RunBundle to the Slurm cluster
+            # instead of running it locally/in Docker (see the runner's
+            # TWAIN_EXECUTE_SLURM / TWAIN_SLURM_CLUSTER).
+            execute_slurm=execute_slurm,
+            slurm_cluster=slurm_cluster,
         )
 
         if resuming:
@@ -433,6 +443,17 @@ class Orchestrator:
                 "budget": self.run_budget.to_dict(),
             })
 
+            # 4b) post-step budget gate. The pre-step gate (step 0) only sees the
+            #     cost *before* this stage ran; re-check now that this stage's LLM
+            #     spend has been synced so a run stops promptly once it hits the
+            #     cap, rather than overshooting by up to one stage. A run that just
+            #     reached TERMINATE is already done -- don't fail a finished run.
+            if entered != State.TERMINATE:
+                try:
+                    self._check_budget()
+                except (OverBudget, OverMaxIterations, OverMaxWallTime) as exc:
+                    return self._handle_error(exc, entered)
+
             # 5) hard safety net against runaway transition counts
             if self.run_session.transition_count > self.max_transitions:
                 return self._handle_error(
@@ -442,6 +463,48 @@ class Orchestrator:
                     ),
                     entered,
                 )
+
+    # --------------------------------------------------------------- rewind / rerun
+    def rewind_to(self, target: State, *, reseed: Optional[Dict] = None) -> None:
+        """Rewind this run to an earlier stage so :meth:`run` re-executes from it.
+
+        Delegates the state/artifact/flag reset to :meth:`StateMachine.rewind_to`,
+        then re-applies any guard ``reseed`` the driver relies on for the stubbed
+        happy path (the runner seeds ``execution_status``/``validation_result`` so
+        a planning-only run still reaches TERMINATE). It mirrors the machine's new
+        state + context into the :class:`RunSession`, clears any terminal error,
+        resets the loop counters, marks the run RUNNING, and checkpoints -- so the
+        store a fresh runner resumes from reflects the rewound run.
+        """
+        self.sm.rewind_to(target)
+        if reseed:
+            for key, value in reseed.items():
+                setattr(self.sm.context, key, value)
+        self.run_session.set_state(self.sm.current_state)
+        self.run_session.set_context(self.sm.context)
+        self.run_session.set_status(RunStatus.RUNNING)
+        self.run_session.error = None
+        self.run_session.transition_count = 0
+        self.run_session.replan_count = 0
+        self.run_session.correct_count = 0
+        self._checkpoint()
+        self._publish("run.rewound", {"state": self.sm.current_state.name})
+
+    def approve_plan(self, approved: bool = True) -> None:
+        """Record the researcher's plan approval so the run may build/execute.
+
+        Delegates to :meth:`StateMachine.approve_plan` (which sets + persists the
+        ``plan_approved`` guard flag), then mirrors it into the :class:`RunSession`
+        and checkpoints, so a run resumed in a fresh process still sees the
+        approval. This is the ONLY way (outside an explicit context seed) that the
+        guarded ``BUILD->REPAIR`` / ``REPAIR->EXECUTE`` transitions become allowed:
+        without it a driven run halts at the approval gate before anything is
+        built or executed.
+        """
+        self.sm.approve_plan(approved)
+        self.run_session.set_context(self.sm.context)
+        self._checkpoint()
+        self._publish("run.plan_approved", {"approved": approved})
 
     # ----------------------------------------------------------------- demo entry
     @classmethod
@@ -498,6 +561,16 @@ def _main(argv=None) -> int:
         help="build a venv and pip-install the bundle's requirements before running "
              "(needed when the selected tool isn't already importable)",
     )
+    parser.add_argument(
+        "--slurm", action="store_true",
+        help="submit the RunBundle to the Slurm cluster (configs/clusters/, default "
+             "compute2) instead of executing locally; needs VPN + SSH key, or run "
+             "on a login node with TWAIN_SLURM_HOST=''",
+    )
+    parser.add_argument(
+        "--cluster", default=None,
+        help="cluster profile name for --slurm (default: compute2)",
+    )
     args = parser.parse_args(argv)
 
     if args.session_id and Session.exists(args.session_id):
@@ -509,8 +582,10 @@ def _main(argv=None) -> int:
 
     orch = Orchestrator.demo(
         session_id=args.session_id,
-        execute_locally=not args.no_execute,
+        execute_locally=not args.no_execute and not args.slurm,
         execute_install_deps=args.install_deps,
+        execute_slurm=args.slurm,
+        slurm_cluster=args.cluster,
     )
     status = orch.run()
     rs = orch.run_session

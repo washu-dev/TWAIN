@@ -39,6 +39,26 @@ class TestStart:
         response = client.post("/api/conversations", json={"request": "   "})
         assert response.status_code == 422
 
+    @patch("conversations.create_conversation", return_value=CONVERSATION)
+    def test_start_forwards_max_cost(self, mock_create):
+        response = client.post(
+            "/api/conversations", json={"request": "predict solubility", "max_cost": 2.5}
+        )
+        assert response.status_code == 200
+        assert mock_create.call_args.kwargs["max_cost"] == 2.5
+
+    @patch("conversations.create_conversation", return_value=CONVERSATION)
+    def test_start_defaults_max_cost_to_none(self, mock_create):
+        response = client.post("/api/conversations", json={"request": "predict solubility"})
+        assert response.status_code == 200
+        assert mock_create.call_args.kwargs["max_cost"] is None
+
+    def test_start_rejects_nonpositive_max_cost(self):
+        response = client.post(
+            "/api/conversations", json={"request": "predict solubility", "max_cost": 0}
+        )
+        assert response.status_code == 422
+
 
 class TestListAndGet:
     @patch("conversations.list_conversations", return_value=[CONVERSATION])
@@ -89,6 +109,55 @@ class TestMessagesAndApproval:
     def test_post_approval_rejects_bad_decision(self, _mock_conv):
         response = client.post("/api/conversations/conv-1/approval", json={"decision": "maybe"})
         assert response.status_code == 422
+
+
+class TestRerun:
+    @patch("conversations.rerun_conversation",
+           return_value={**CONVERSATION, "status": "running", "current_state": "CLARIFY"})
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_rerun_enqueues_and_returns_running(self, _conv, mock_rerun):
+        response = client.post("/api/conversations/conv-1/rerun", json={"state": "CLARIFY"})
+        assert response.status_code == 200
+        assert response.json()["data"]["current_state"] == "CLARIFY"
+        mock_rerun.assert_called_once_with("conv-1", "user-1", "CLARIFY")
+
+    @patch("conversations.rerun_conversation",
+           return_value={**CONVERSATION, "current_state": "PLAN"})
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_rerun_normalizes_state_case(self, _conv, mock_rerun):
+        response = client.post("/api/conversations/conv-1/rerun", json={"state": "plan"})
+        assert response.status_code == 200
+        mock_rerun.assert_called_once_with("conv-1", "user-1", "PLAN")
+
+    @patch("conversations.get_conversation", return_value=CONVERSATION)
+    def test_rerun_rejects_unknown_state(self, _conv):
+        response = client.post("/api/conversations/conv-1/rerun", json={"state": "BOGUS"})
+        assert response.status_code == 422
+
+    @patch("conversations.get_conversation", return_value=None)
+    def test_rerun_404_when_not_owner(self, _conv):
+        response = client.post("/api/conversations/nope/rerun", json={"state": "CLARIFY"})
+        assert response.status_code == 404
+
+    @patch("conversations.rerun_conversation", side_effect=ValueError("still active"))
+    @patch("conversations.get_conversation", return_value=CONVERSATION)
+    def test_rerun_409_when_run_still_active(self, _conv, _rerun):
+        response = client.post("/api/conversations/conv-1/rerun", json={"state": "CLARIFY"})
+        assert response.status_code == 409
+
+
+class TestDelete:
+    @patch("conversations.delete_conversation", return_value=True)
+    def test_delete_ok(self, mock_del):
+        response = client.delete("/api/conversations/conv-1")
+        assert response.status_code == 200
+        assert response.json()["data"]["deleted"] is True
+        mock_del.assert_called_once_with("conv-1", "user-1")
+
+    @patch("conversations.delete_conversation", return_value=False)
+    def test_delete_404_when_not_owner(self, _mock):
+        response = client.delete("/api/conversations/nope")
+        assert response.status_code == 404
 
 
 class TestStream:
