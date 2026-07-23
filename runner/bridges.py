@@ -129,15 +129,25 @@ def _plan_summary(
     compute_target: str | None = None,
     slurm_cluster: str | None = None,
 ) -> dict:
-    """Trim an ExecutionPlan artifact to the fields worth showing for approval."""
+    """Trim an ExecutionPlan artifact to the fields worth showing for approval.
+
+    Reads the fields where they actually live (goal_id under ``metadata``,
+    ``cost_estimate`` / ``compute_estimate`` / ``safety_notes``), and leads with
+    the plan's plain-language ``summary`` of what the run will do.
+    """
     if not plan:
         return {
             "note": "No execution plan was produced.",
             "compute_target": compute_target or "local",
         }
     target = compute_target or "local"
+    metadata = plan.get("metadata") or {}
     summary = {
         "compute_target": target,
+        "summary": plan.get("summary"),
+        "goal_id": metadata.get("goal_id"),
+        "target_system": plan.get("target_system"),
+        "requested_property": plan.get("requested_property"),
         "selected_method": plan.get("selected_method"),
         "cost_estimate": plan.get("cost_estimate"),
         "compute_estimate": plan.get("compute_estimate"),

@@ -96,6 +96,10 @@
       "items": {
         "type": "string"
       }
+    },
+    "summary": {
+      "description": "Plain-language description of what the run will do (property, system, toolset, approach).",
+      "type": ["string", "null"]
     }
   }
 }

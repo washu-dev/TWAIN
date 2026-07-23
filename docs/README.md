@@ -40,6 +40,6 @@ Architecture decision records; one file per decision
 
 ## Service-level docs (outside `docs/`)
 
-- [`../runner/README.md`](../runner/README.md) — runner service: local runs, Docker offload, Slurm/Compute2, AWS deploy
+- [`../runner/README.md`](../runner/README.md) — runner service: local runs, Docker offload, AWS deploy
 - [`../api/QUICKSTART.md`](../api/QUICKSTART.md) — FastAPI backend
 - [`../app/QUICKSTART.md`](../app/QUICKSTART.md) — Expo web app

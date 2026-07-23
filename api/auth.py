@@ -15,8 +15,20 @@ Config comes from environment variables (values via Secrets Manager / ``.env``):
 * ``ENTRA_ISSUER``           Optional; derived from the tenant when unset.
 * ``AUTH_DISABLED``          "true" for local dev — injects a dev admin identity.
 * ``BOOTSTRAP_ADMIN_EMAILS`` Optional comma-separated seed admins on first login.
+
+Until Entra SSO is wired on the frontend, a lightweight **interim** email login
+(``POST /api/auth/login``) mints a short-lived HS256 session token so the app has
+real per-user identity. It is enabled only when a signing secret is configured
+(``INTERIM_JWT_SECRET``); both token types are accepted here, routed by algorithm.
+See ``docs/project/WEB_MVP_DELIVERY_PLAN.md`` (Phase 1). Interim config:
+
+* ``INTERIM_JWT_SECRET``     Enables interim login; the HS256 signing key.
+* ``INTERIM_ALLOWED_DOMAINS`` Comma-separated email domains allowed (default ``wustl.edu``).
+* ``INTERIM_ALLOWED_EMAILS`` Optional comma-separated individual emails allowed.
+* ``INTERIM_TOKEN_TTL_HOURS`` Session token lifetime (default ``12``).
 """
 import os
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import jwt
@@ -39,6 +51,22 @@ AUTH_DISABLED = os.getenv("AUTH_DISABLED", "").lower() in {"1", "true", "yes"}
 BOOTSTRAP_ADMIN_EMAILS = {
     e.strip().lower()
     for e in os.getenv("BOOTSTRAP_ADMIN_EMAILS", "").split(",")
+    if e.strip()
+}
+
+# ── Interim email login (pre-SSO) ─────────────────────────────────────────────
+INTERIM_JWT_SECRET = os.getenv("INTERIM_JWT_SECRET", "")
+INTERIM_ISSUER = "twain-interim"
+INTERIM_AUDIENCE = "twain-web"
+INTERIM_TOKEN_TTL_HOURS = float(os.getenv("INTERIM_TOKEN_TTL_HOURS", "12"))
+INTERIM_ALLOWED_DOMAINS = {
+    d.strip().lower().lstrip("@")
+    for d in os.getenv("INTERIM_ALLOWED_DOMAINS", "wustl.edu").split(",")
+    if d.strip()
+}
+INTERIM_ALLOWED_EMAILS = {
+    e.strip().lower()
+    for e in os.getenv("INTERIM_ALLOWED_EMAILS", "").split(",")
     if e.strip()
 }
 
@@ -91,6 +119,77 @@ def _identity_from_claims(claims: dict) -> tuple[str, str, str]:
     return subject, email, name
 
 
+def interim_auth_available() -> bool:
+    """True when interim email login is configured (a signing secret is set)."""
+    return bool(INTERIM_JWT_SECRET)
+
+
+def email_allowed(email: str) -> bool:
+    """Whether an email may use interim login (explicit allowlist or allowed domain)."""
+    email = email.strip().lower()
+    if not email or "@" not in email:
+        return False
+    if email in INTERIM_ALLOWED_EMAILS:
+        return True
+    return email.rsplit("@", 1)[-1] in INTERIM_ALLOWED_DOMAINS
+
+
+def mint_interim_token(user: dict) -> str:
+    """Issue a short-lived HS256 session token for an authenticated interim user."""
+    now = datetime.now(UTC)
+    claims = {
+        "sub": user["subject"],
+        "email": user.get("email", ""),
+        "role": user.get("role", "user"),
+        "iss": INTERIM_ISSUER,
+        "aud": INTERIM_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(hours=INTERIM_TOKEN_TTL_HOURS),
+    }
+    return jwt.encode(claims, INTERIM_JWT_SECRET, algorithm="HS256")
+
+
+def verify_interim_token(token: str) -> dict:
+    """Validate an interim session token and return its claims, or raise 401."""
+    if not INTERIM_JWT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Interim auth is not configured.",
+        )
+    try:
+        return jwt.decode(
+            token,
+            INTERIM_JWT_SECRET,
+            algorithms=["HS256"],
+            audience=INTERIM_AUDIENCE,
+            issuer=INTERIM_ISSUER,
+            options={"require": ["exp", "iss", "aud", "sub"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {exc}",
+        ) from exc
+
+
+def _decode_bearer(token: str) -> dict:
+    """Verify a bearer token, routing by algorithm: HS256 → interim, RS256 → Entra.
+
+    Each verifier pins its own algorithm, so an HS256 token can never be checked
+    against the Entra RSA public key (avoiding the classic alg-confusion attack).
+    """
+    try:
+        alg = jwt.get_unverified_header(token).get("alg")
+    except jwt.PyJWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {exc}",
+        ) from exc
+    if alg == "HS256":
+        return verify_interim_token(token)
+    return verify_token(token)
+
+
 async def get_current_user(
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> dict:
@@ -103,7 +202,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing bearer token.",
         )
-    subject, email, name = _identity_from_claims(verify_token(creds.credentials))
+    subject, email, name = _identity_from_claims(_decode_bearer(creds.credentials))
     if not subject:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

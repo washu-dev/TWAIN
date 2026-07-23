@@ -6,18 +6,24 @@ pixi environment. The engine is wired exactly as the orchestrator expects:
 ``request`` + ``agent`` (the live WashU LLM) + ``ask`` (chat bridge) + ``store``
 (:class:`PgStore`) + an event sink.
 
-The guard inputs that the stub INTERPRET/VALIDATE/EXECUTE handlers don't set
-themselves are seeded so a happy-path run can reach TERMINATE; ``plan_approved``
-is seeded too, but the runner still pauses at BUILD and only continues on real
-user approval — so nothing is built or executed without it.
+The guard inputs that the stub INTERPRET/VALIDATE handlers don't set themselves
+are seeded so a happy-path run can reach TERMINATE. ``plan_approved`` is
+deliberately NOT seeded: it is the approval gate, so it stays False until the
+researcher actually approves (the runner calls :meth:`engine.approve_plan` after
+a real approval). That makes the guarded ``BUILD->REPAIR`` / ``REPAIR->EXECUTE``
+transitions a genuine safety net -- a run cannot build or execute without an
+explicit approval, not merely because the runner happens to block for one.
 """
 import json
 import os
 import pathlib
 import sys
 
+# Guard inputs for stages whose handlers are still stubs (INTERPRET/VALIDATE) and
+# for EXECUTE when execution is disabled (planning-only runs). ``plan_approved``
+# is intentionally absent -- see the module docstring; it is set only by a real
+# approval so execution truly requires one.
 SEED_CONTEXT = {
-    "plan_approved": True,
     "execution_status": True,
     "validation_result": "accepted",
 }
@@ -27,6 +33,28 @@ def _env_flag(name: str, default: bool = False) -> bool:
     """Read a boolean env var (1/true/yes/on -> True); ``default`` when unset."""
     v = os.environ.get(name)
     return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var; ``default`` when unset or unparseable."""
+    v = os.environ.get(name)
+    if v is None or not v.strip():
+        return default
+    try:
+        return float(v)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var; ``default`` when unset or unparseable."""
+    v = os.environ.get(name)
+    if v is None or not v.strip():
+        return default
+    try:
+        return int(v)
+    except ValueError:
+        return default
 
 
 def _load():
@@ -53,7 +81,7 @@ class _RealEngine:
 
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store,
-        compute_target=None, cancel=None,
+        compute_target=None, cancel=None, max_cost=None,
     ):
         # Real execution is env-gated so the SAME image works everywhere: set
         # TWAIN_EXECUTE_LOCALLY=1 (local `docker run -e ...` or the ECS task
@@ -80,6 +108,11 @@ class _RealEngine:
         # An explicit UI choice always executes; otherwise env-gated as before.
         execute = auto or slurm or _env_flag("TWAIN_EXECUTE_LOCALLY") \
             or compute_target == "local"
+        # Budget caps: a per-run ``max_cost`` (from the user) overrides the
+        # deployment default (TWAIN_RUN_MAX_COST); iteration/wall-time rails are
+        # deployment-wide. Without this wiring the orchestrator silently fell back
+        # to its own $1.00 / 50-iter / 30-min defaults on every run.
+        run_max_cost = max_cost if max_cost is not None else _env_float("TWAIN_RUN_MAX_COST", 1.0)
         return self._Orchestrator(
             session_id=session_id,
             researcher_id=researcher_id,
@@ -89,6 +122,9 @@ class _RealEngine:
             event_bus=sink,
             store=store,
             context=dict(SEED_CONTEXT),
+            run_max_cost=run_max_cost,
+            run_max_iterations=_env_int("TWAIN_RUN_MAX_ITERATIONS", 50),
+            run_wall_time_minutes=_env_int("TWAIN_RUN_WALL_MINUTES", 30),
             provenance=False,  # run_events is the durable trail; skip local JSONL
             execute_locally=execute and not slurm,
             execute_slurm=slurm,
@@ -109,6 +145,25 @@ class _RealEngine:
 
     def slurm_cluster_of(self, orch) -> str | None:
         return getattr(orch.sm, "slurm_cluster", None)
+
+    def rewind(self, orch, target_state: str) -> None:
+        """Rewind a resumed orchestrator to ``target_state`` so it re-runs from there.
+
+        ``target_state`` is a pipeline state name (e.g. ``"CLARIFY"``). The guard
+        seed is re-applied (see ``SEED_CONTEXT``) so the stubbed happy path still
+        flows past the INTERPRET/VALIDATE guards after the rewind, exactly as a
+        fresh run does; the human gates (plan approval, heavy-calc confirmation)
+        are re-enforced structurally by the runner and the EXECUTE stage.
+        """
+        try:
+            target = self._State[target_state]
+        except KeyError as exc:
+            raise ValueError(f"unknown rewind target state: {target_state!r}") from exc
+        orch.rewind_to(target, reseed=dict(SEED_CONTEXT))
+
+    def approve_plan(self, orch) -> None:
+        """Record a real plan approval so the run may proceed past the BUILD gate."""
+        orch.approve_plan()
 
     def read_execution_plan(self, orch) -> dict | None:
         path = orch.sm.context.artifacts.get("execution_plan")

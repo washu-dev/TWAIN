@@ -4,9 +4,10 @@ approval gate, and the chat/event bridges end to end in-process.
 """
 import json
 import types
+from pathlib import Path
 
 from runner import runner
-from runner.artifacts import capture_artifacts
+from runner.artifacts import capture_artifacts, rematerialize_inputs
 from runner.bridges import DbAsk, PgEventSink, RunCancelled, request_plan_approval
 from runner.pg_store import PgStore
 
@@ -58,6 +59,12 @@ class FakeDB:
     def upsert_artifact(self, sid, name, content, kind):
         self.artifacts.append({"name": name, "content": content, "kind": kind})
 
+    def get_artifact(self, sid, name):
+        for a in self.artifacts:
+            if a["name"] == name:
+                return a
+        return None
+
     # jobs
     def claim_job(self):
         return self._jobs.pop(0) if self._jobs else None
@@ -83,13 +90,16 @@ def _event(event_type, payload):
 class FakeOrchestrator:
     """Two-leg run: leg 1 clarifies + pauses at BUILD, leg 2 completes."""
 
-    def __init__(self, ask, sink):
+    def __init__(self, ask, sink, max_cost=1.0):
         self.ask = ask
         self.sink = sink
         self.sm = types.SimpleNamespace(
             context=types.SimpleNamespace(artifacts={}),
             current_state=types.SimpleNamespace(name="TERMINATE"),
         )
+        # Mirror the real orchestrator's run_budget so the pre-flight budget
+        # warning in _drive_run has a cap to compare the plan estimate against.
+        self.run_budget = types.SimpleNamespace(max_cost=max_cost)
         self._leg = 0
 
     def run(self, until=None):
@@ -111,13 +121,32 @@ class FakeEngine:
         self._compute_target = compute_target
         self._slurm_cluster = slurm_cluster
         self.applied_overrides = []
+        self.built_with = None  # records build_orchestrator kwargs for assertions
+        self.rewound_to = None  # records the rewind target for rerun assertions
+        self.approved = False   # set when approve_plan() is called
 
-    def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store,
-                           compute_target=None, cancel=None):
+    def build_orchestrator(
+        self, *, session_id, researcher_id, request, ask, sink, store,
+        compute_target=None, cancel=None, max_cost=None,
+    ):
         self.compute_targets.append(compute_target)
         if compute_target is not None:
             self._compute_target = compute_target
-        return FakeOrchestrator(ask, sink)
+        self.built_with = {
+            "session_id": session_id, "researcher_id": researcher_id,
+            "request": request, "max_cost": max_cost,
+        }
+        return FakeOrchestrator(ask, sink, max_cost=max_cost if max_cost is not None else 1.0)
+
+    def rewind(self, orch, target_state):
+        # A real rewind resets the run to `target_state`; the fake just records it
+        # (the fresh FakeOrchestrator already starts at leg 0, i.e. the top).
+        self.rewound_to = target_state
+
+    def approve_plan(self, orch):
+        # A real approve_plan flips the plan_approved guard flag; the fake records
+        # that it happened so a test can assert the run was actually approved.
+        self.approved = True
 
     def compute_target_of(self, orch):
         return self._compute_target
@@ -138,18 +167,22 @@ class FakeEngine:
 class TestProcessJob:
     def test_approved_run_completes(self):
         db = FakeDB(approval="approve")
-        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
+        engine = FakeEngine()
+        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, engine)
         kinds = [m["kind"] for m in db.messages]
         assert "clarification" in kinds
         assert "approval_request" in kinds
+        assert engine.approved is True          # plan_approved guard flag was set
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
         assert db.messages[-1]["content"] == "Run complete."
 
     def test_rejected_run_stops_before_build(self):
         db = FakeDB(approval="reject")
-        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
+        engine = FakeEngine()
+        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, engine)
         assert db.status == "rejected"
+        assert engine.approved is False         # never approved -> guard stays closed
         # no completion event because leg 2 never ran
         assert not any(e["event_type"] == "run.completed" for e in db.events)
         assert "rejected" in db.messages[-1]["content"].lower()
@@ -223,6 +256,67 @@ class TestProcessJob:
             raise AssertionError("expected NotImplementedError")
         except NotImplementedError:
             pass
+
+    def test_rerun_rewinds_then_drives_the_run(self):
+        # A 'rerun' job rewinds the run to the requested stage, posts a marker
+        # message, and drives it forward again through the approval gate.
+        db = FakeDB(approval="approve")
+        engine = FakeEngine()
+        runner.process_job(
+            {"session_id": SESSION, "kind": "rerun",
+             "params": {"target_state": "CLARIFY", "researcher_id": "u", "request": "r"}},
+            db, engine,
+        )
+        assert engine.rewound_to == "CLARIFY"
+        assert any("CLARIFY" in m["content"] for m in db.messages)  # marker message
+        assert "approval_request" in [m["kind"] for m in db.messages]
+        assert db.status == "completed"
+
+    def test_rerun_requires_target_state(self):
+        db = FakeDB()
+        try:
+            runner.process_job({"session_id": SESSION, "kind": "rerun", "params": {}}, db, FakeEngine())
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+
+    def test_max_cost_forwarded_from_params(self):
+        # A per-run budget in the job params must reach build_orchestrator so the
+        # orchestrator caps this run's spend (rather than the deployment default).
+        db = FakeDB(approval="approve")
+        engine = FakeEngine()
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start",
+             "params": {"request": "r", "researcher_id": "u", "max_cost": 2.5}},
+            db, engine,
+        )
+        assert engine.built_with["max_cost"] == 2.5
+
+    def test_no_max_cost_forwards_none(self):
+        # Absent from params => None, so the engine applies the deployment default.
+        db = FakeDB(approval="approve")
+        engine = FakeEngine()
+        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, engine)
+        assert engine.built_with["max_cost"] is None
+
+    def test_pre_flight_warns_when_estimate_over_budget(self):
+        # Plan estimate ($5) above the run budget ($1) => a warn-only heads-up
+        # posted before the approval gate (the run is not blocked).
+        db = FakeDB(approval="approve")
+        engine = FakeEngine(plan={"cost_estimate": {"min_cost": 5.0}})
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start", "params": {"max_cost": 1.0}}, db, engine,
+        )
+        assert any("budget" in m["content"].lower() for m in db.messages)
+        assert db.status == "completed"  # warned, but still ran to completion
+
+    def test_pre_flight_silent_when_estimate_within_budget(self):
+        db = FakeDB(approval="approve")
+        engine = FakeEngine(plan={"cost_estimate": {"min_cost": 0.5}})
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start", "params": {"max_cost": 1.0}}, db, engine,
+        )
+        assert not any("heads up" in m["content"].lower() for m in db.messages)
 
 
 class TestRunLoop:
@@ -385,3 +479,37 @@ class TestCaptureArtifacts:
         assert count == 2  # gpw (sanitized) + execution_result; main.py skipped
         assert "execution_result" in names
         assert "run_bundle/aaa.gpw" in names
+
+
+class TestRematerializeInputs:
+    def test_restores_surviving_upstream_specs_to_disk(self, tmp_path):
+        # A re-run runs in a fresh process: the original artifact files are gone,
+        # so the surviving upstream specs must be rewritten to disk from the DB and
+        # context.artifacts repointed at the fresh paths.
+        db = FakeDB()
+        db.upsert_artifact("s1", "intent_spec", '{"objective": "x"}', "json")
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                artifacts_dir=str(tmp_path),
+                context=types.SimpleNamespace(
+                    artifacts={"intent_spec": "/gone/intent_spec.json"}
+                ),
+            )
+        )
+        restored = rematerialize_inputs(db, "s1", orch)
+        assert restored == 1
+        new_path = orch.sm.context.artifacts["intent_spec"]
+        assert Path(new_path).is_file()
+        assert "objective" in Path(new_path).read_text(encoding="utf-8")
+
+    def test_skips_specs_absent_from_db(self, tmp_path):
+        # A spec that was trimmed (or never captured) is left untouched.
+        db = FakeDB()  # no artifacts stored
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                artifacts_dir=str(tmp_path),
+                context=types.SimpleNamespace(artifacts={"intent_spec": "/gone.json"}),
+            )
+        )
+        assert rematerialize_inputs(db, "s1", orch) == 0
+        assert orch.sm.context.artifacts["intent_spec"] == "/gone.json"  # unchanged

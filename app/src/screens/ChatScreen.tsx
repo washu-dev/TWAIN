@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  Modal,
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -20,6 +21,19 @@ const C = Colors.light;
 const PIPELINE_STATES = [
   'INTAKE', 'CLARIFY', 'DECOMPOSE', 'DISCOVER', 'PLAN',
   'BUILD', 'EXECUTE', 'INTERPRET', 'VALIDATE', 'ACCEPT', 'TERMINATE',
+];
+
+// Stages a finished run can be restarted from, with plain-language descriptions
+// of what re-running each one redoes. A re-run resets the chosen stage and every
+// stage after it, keeping the earlier work as input.
+const RERUN_STAGES: { state: string; label: string; desc: string }[] = [
+  { state: 'INTAKE', label: 'Intake', desc: 'Re-read your request from scratch' },
+  { state: 'CLARIFY', label: 'Clarify', desc: 'Re-ask the clarifying questions' },
+  { state: 'DECOMPOSE', label: 'Decompose', desc: 'Rebuild the goal breakdown' },
+  { state: 'DISCOVER', label: 'Discover', desc: 'Re-pick the candidate tools' },
+  { state: 'PLAN', label: 'Plan', desc: 'Re-synthesize the execution plan' },
+  { state: 'BUILD', label: 'Build', desc: 'Regenerate the run code' },
+  { state: 'EXECUTE', label: 'Execute', desc: 'Re-run the calculation' },
 ];
 
 const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_approval', 'cancelling'];
@@ -37,17 +51,30 @@ type SlurmDraft = {
 type PlanSummary = {
   compute_target?: string;
   slurm_cluster?: string;
-  selected_method?: { tool_name?: string; tool_version?: string | number };
-  cost_estimate?: { min_cost?: number };
-  compute_estimate?: { cpu_hours?: number };
+  summary?: string | null;
+  goal_id?: string | null;
+  target_system?: {
+    formula?: string;
+    kind?: string;
+    crystal?: { name?: string; phase?: string };
+  } | null;
+  requested_property?: string | null;
+  selected_method?: {
+    tool_name?: string;
+    tool_version?: string | number;
+    calculator?: string;
+    libraries?: string[];
+  } | null;
+  cost_estimate?: { min_cost?: number } | null;
+  compute_estimate?: { cpu_hours?: number } | null;
   slurm_request?: {
     cpu_count?: number;
     gpu_count?: number;
     ram?: number;
     max_time?: number;
   };
-  acceptance_metrics?: unknown;
-  safety_notes?: string[];
+  acceptance_metrics?: { metric_name?: string; target_value?: number; tolerance?: number }[] | null;
+  safety_notes?: string[] | null;
   note?: string;
 };
 
@@ -85,8 +112,10 @@ export const ChatScreen: React.FC = () => {
   // (locally on the runner host). 'slurm' submits to the WashU RIS cluster.
   const [computeTarget, setComputeTarget] = useState<ComputeTarget | undefined>(undefined);
   const [slurmDraft, setSlurmDraft] = useState<SlurmDraft | null>(null);
+  const [budget, setBudget] = useState('');  // per-run cost cap (USD); blank => default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rerunOpen, setRerunOpen] = useState(false);  // "Re-run from…" picker
   const scrollRef = useRef<ScrollView>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -96,7 +125,7 @@ export const ChatScreen: React.FC = () => {
   const isTerminal = !!status && TERMINAL_STATUSES.includes(status);
   const terminalMessage =
     status === 'completed'
-      ? 'Run complete.'
+      ? '✓ Simulation complete — your results are ready.'
       : status === 'rejected'
         ? 'Plan rejected — nothing was executed.'
         : status === 'cancelled'
@@ -177,7 +206,9 @@ export const ChatScreen: React.FC = () => {
     setError(null);
     try {
       if (!conversation) {
-        const created = await apiClient.startConversation(text, computeTarget);
+        const parsed = budget.trim() ? Number(budget) : NaN;
+        const maxCost = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+        const created = await apiClient.startConversation(text, computeTarget, maxCost);
         setConversation(created);
       } else {
         await apiClient.sendMessage(conversation.id, text);
@@ -226,6 +257,26 @@ export const ChatScreen: React.FC = () => {
       setBusy(false);
     }
   };
+
+  const handleRerun = async (state: string) => {
+    if (!conversationId || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiClient.rerunConversation(conversationId, state);
+      setRerunOpen(false);
+      // Reload the full conversation (now `running` at `state`, with the marker
+      // message); the poll effect restarts automatically once it's active again.
+      await refresh(conversationId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to re-run from that step');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The stages this run reached (so the picker only offers steps that ran).
+  const reachedIndex = conversation ? PIPELINE_STATES.indexOf(conversation.current_state) : -1;
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
@@ -359,18 +410,30 @@ export const ChatScreen: React.FC = () => {
       ) : isTerminal ? (
         <View style={styles.terminalBar}>
           <Text style={styles.terminalText}>{terminalMessage}</Text>
-          <TouchableOpacity
-            style={styles.reportBtn}
-            onPress={() =>
-              router.push({ pathname: '/report', params: { id: conversationId as string } })
-            }
-            accessibilityRole="button"
-          >
-            <Text style={styles.reportText}>View report</Text>
-          </TouchableOpacity>
+          <View style={styles.terminalButtons}>
+            <TouchableOpacity
+              style={[styles.rerunBtn, busy && styles.disabled]}
+              onPress={() => setRerunOpen(true)}
+              disabled={busy}
+              accessibilityRole="button"
+            >
+              <Text style={styles.rerunText}>↩︎ Re-run from…</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.reportBtn}
+              onPress={() =>
+                router.push({ pathname: '/report', params: { id: conversationId as string } })
+              }
+              accessibilityRole="button"
+            >
+              <Text style={styles.reportText}>
+                {status === 'completed' ? 'View results' : 'View report'}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       ) : (
-        <View>
+        <View style={styles.composer}>
           {/* Compute target is fixed at creation, so only offer it for new runs. */}
           {!conversation && (
             <View style={styles.targetBar}>
@@ -389,28 +452,90 @@ export const ChatScreen: React.FC = () => {
               </View>
             </View>
           )}
-          {/* Skip the divider when the target bar above already draws one. */}
-          <View style={[styles.inputBar, !conversation && { borderTopWidth: 0 }]}>
-          <TextInput
-            style={styles.input}
-            value={input}
-            onChangeText={setInput}
-            placeholder={conversation ? 'Type your reply…' : 'Describe your simulation…'}
-            placeholderTextColor={C.textSecondary}
-            editable={!busy && (!conversation || isActive)}
-            onSubmitEditing={handleSend}
-            multiline
-          />
-          <TouchableOpacity
-            style={[styles.sendBtn, (busy || (!conversation && !input.trim())) && styles.disabled]}
-            onPress={handleSend}
-            accessibilityRole="button"
-          >
-            <Text style={styles.sendText}>{conversation ? 'Send' : 'Start'}</Text>
-          </TouchableOpacity>
+          {!conversation && (
+            <View style={styles.budgetRow}>
+              <Text style={styles.budgetLabel}>Budget $</Text>
+              <TextInput
+                style={styles.budgetInput}
+                value={budget}
+                onChangeText={setBudget}
+                placeholder="default"
+                placeholderTextColor={C.textSecondary}
+                keyboardType="decimal-pad"
+                editable={!busy}
+              />
+              <Text style={styles.budgetHint}>optional — caps LLM spend for this run</Text>
+            </View>
+          )}
+          <View style={styles.inputBar}>
+            <TextInput
+              style={styles.input}
+              value={input}
+              onChangeText={setInput}
+              placeholder={conversation ? 'Type your reply…' : 'Describe your simulation…'}
+              placeholderTextColor={C.textSecondary}
+              editable={!busy && (!conversation || isActive)}
+              onSubmitEditing={handleSend}
+              multiline
+            />
+            <TouchableOpacity
+              style={[styles.sendBtn, (busy || (!conversation && !input.trim())) && styles.disabled]}
+              onPress={handleSend}
+              accessibilityRole="button"
+            >
+              <Text style={styles.sendText}>{conversation ? 'Send' : 'Start'}</Text>
+            </TouchableOpacity>
           </View>
         </View>
       )}
+
+      <Modal
+        visible={rerunOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => (busy ? undefined : setRerunOpen(false))}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Re-run from a step</Text>
+            <Text style={styles.modalHint}>
+              Pick a step to restart from. That step and everything after it run again; the
+              earlier steps are kept.
+            </Text>
+            <ScrollView style={styles.stageList}>
+              {RERUN_STAGES.map((stage) => {
+                const stageIndex = PIPELINE_STATES.indexOf(stage.state);
+                // Offer only steps the run actually reached.
+                const enabled = reachedIndex >= 0 && stageIndex <= reachedIndex;
+                return (
+                  <TouchableOpacity
+                    key={stage.state}
+                    style={[styles.stageRow, (!enabled || busy) && styles.disabled]}
+                    onPress={() => handleRerun(stage.state)}
+                    disabled={!enabled || busy}
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: !enabled || busy }}
+                  >
+                    <View style={styles.stageMain}>
+                      <Text style={styles.stageLabel}>{stage.label}</Text>
+                      <Text style={styles.stageDesc}>{stage.desc}</Text>
+                    </View>
+                    <Text style={styles.stageChevron}>›</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <TouchableOpacity
+              style={styles.modalCancel}
+              onPress={() => setRerunOpen(false)}
+              disabled={busy}
+              accessibilityRole="button"
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -484,45 +609,7 @@ const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
     return <Text style={styles.terminateNote}>You asked to terminate this run.</Text>;
   }
   if (message.kind === 'approval_request') {
-    const plan = parsePlanSummary(message.content);
-    if (plan) {
-      const method = plan.selected_method?.tool_name
-        ? `${plan.selected_method.tool_name} ${plan.selected_method.tool_version ?? ''}`.trim()
-        : '—';
-      const slurm = plan.slurm_request;
-      return (
-        <View style={styles.planCard}>
-          <Text style={styles.planTitle}>Proposed execution plan</Text>
-          {plan.compute_target === 'slurm' && (
-            <Text style={styles.planTarget}>
-              Will submit to RIS / Slurm
-              {plan.slurm_cluster ? ` (${plan.slurm_cluster})` : ''}
-            </Text>
-          )}
-          <Text style={styles.planLine}>Method: {method}</Text>
-          {plan.cost_estimate?.min_cost != null && (
-            <Text style={styles.planLine}>
-              Est. LLM cost: ${Number(plan.cost_estimate.min_cost).toFixed(2)}
-            </Text>
-          )}
-          {slurm && (
-            <Text style={styles.planLine}>
-              Slurm ask: {slurm.cpu_count ?? '—'} CPU, {slurm.gpu_count ?? 0} GPU,{' '}
-              {slurm.ram ?? '—'} GB RAM, {slurm.max_time ?? '—'} h
-            </Text>
-          )}
-          {!!plan.safety_notes?.length && (
-            <Text style={styles.planNotes}>{plan.safety_notes.slice(0, 3).join(' · ')}</Text>
-          )}
-        </View>
-      );
-    }
-    return (
-      <View style={styles.planCard}>
-        <Text style={styles.planTitle}>Proposed execution plan</Text>
-        <Text style={styles.planBody}>{prettyPlan(message.content)}</Text>
-      </View>
-    );
+    return <PlanCard content={message.content} />;
   }
   return (
     <View style={[styles.bubble, isUser ? styles.userBubble : styles.assistantBubble]}>
@@ -534,13 +621,101 @@ const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   );
 };
 
-function prettyPlan(content: string): string {
-  try {
-    return JSON.stringify(JSON.parse(content), null, 2);
-  } catch {
-    return content;
+// Renders the approval-gate plan: leads with the plain-language summary of what
+// the run will do, then the concrete method / system / cost / notes.
+const PlanCard: React.FC<{ content: string }> = ({ content }) => {
+  const plan = parsePlanSummary(content);
+  if (!plan) {
+    return (
+      <View style={styles.planCard}>
+        <Text style={styles.planTitle}>Proposed execution plan</Text>
+        <Text style={styles.planBody}>{content}</Text>
+      </View>
+    );
   }
-}
+
+  const method = plan.selected_method ?? undefined;
+  const methodText = method?.tool_name
+    ? [
+        `${method.tool_name}${method.tool_version ? ` ${method.tool_version}` : ''}`,
+        method.calculator ? `+ ${method.calculator}` : '',
+      ]
+        .filter(Boolean)
+        .join(' ')
+    : undefined;
+  const libs = method?.libraries?.length ? method.libraries.join(' + ') : undefined;
+
+  const sys = plan.target_system ?? undefined;
+  const sysText = sys
+    ? [sys.formula ?? sys.crystal?.name, sys.crystal?.phase, sys.kind].filter(Boolean).join(', ')
+    : undefined;
+
+  const cost = plan.cost_estimate?.min_cost;
+  const cpu = plan.compute_estimate?.cpu_hours;
+  const costText = [
+    cost != null ? `$${Number(cost).toFixed(2)} LLM` : null,
+    cpu != null ? `${Number(cpu).toFixed(2)} CPU·h` : null,
+  ]
+    .filter(Boolean)
+    .join(' + ');
+
+  const metrics = plan.acceptance_metrics ?? [];
+  const notes = plan.safety_notes ?? [];
+  const slurm = plan.slurm_request;
+
+  return (
+    <View style={styles.planCard}>
+      <Text style={styles.planTitle}>Proposed execution plan</Text>
+      {plan.compute_target === 'slurm' && (
+        <Text style={styles.planTarget}>
+          Will submit to RIS / Slurm
+          {plan.slurm_cluster ? ` (${plan.slurm_cluster})` : ''}
+        </Text>
+      )}
+      {plan.summary ? <Text style={styles.planSummary}>{plan.summary}</Text> : null}
+      {sysText ? <PlanRow label="System" value={sysText} /> : null}
+      {plan.requested_property ? <PlanRow label="Property" value={plan.requested_property} /> : null}
+      {methodText ? (
+        <PlanRow label="Method" value={libs ? `${methodText}  ·  ${libs}` : methodText} />
+      ) : null}
+      {costText ? <PlanRow label="Estimated cost" value={costText} /> : null}
+      {slurm ? (
+        <PlanRow
+          label="Slurm ask"
+          value={`${slurm.cpu_count ?? '—'} CPU, ${slurm.gpu_count ?? 0} GPU, ${
+            slurm.ram ?? '—'
+          } GB RAM, ${slurm.max_time ?? '—'} h`}
+        />
+      ) : null}
+      {plan.goal_id ? <PlanRow label="Goal" value={plan.goal_id} /> : null}
+      {metrics.length > 0 ? (
+        <PlanRow
+          label="Accept if"
+          value={metrics
+            .map((m) => `${m.metric_name} ≈ ${m.target_value} ± ${m.tolerance}`)
+            .join('; ')}
+        />
+      ) : null}
+      {notes.length > 0 ? (
+        <View style={styles.planNotes}>
+          <Text style={styles.planNotesLabel}>Notes</Text>
+          {notes.map((n, i) => (
+            <Text key={`note-${i}`} style={styles.planNote}>
+              • {n}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
+const PlanRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <View style={styles.planRow}>
+    <Text style={styles.planRowLabel}>{label}</Text>
+    <Text style={styles.planRowValue}>{value}</Text>
+  </View>
+);
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
@@ -611,24 +786,37 @@ const styles = StyleSheet.create({
   },
   planTitle: { fontSize: 14, fontWeight: '700', color: C.washuGreen, marginBottom: Spacing.two },
   planTarget: { fontSize: 13, fontWeight: '700', color: C.washuRed, marginBottom: Spacing.one },
-  planLine: { fontSize: 13, color: C.text, marginBottom: 4 },
-  planNotes: { fontSize: 12, color: C.textSecondary, marginTop: Spacing.one },
   planBody: {
     fontSize: 12,
     color: C.text,
     fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' }),
   },
+  planSummary: { fontSize: 14, color: C.text, lineHeight: 20, marginBottom: Spacing.two },
+  planRow: { flexDirection: 'row', gap: Spacing.two, paddingVertical: 3 },
+  planRowLabel: { fontSize: 12, color: C.textSecondary, fontWeight: '600', width: 96 },
+  planRowValue: { fontSize: 13, color: C.text, flex: 1 },
+  planNotes: { marginTop: Spacing.two, gap: 3 },
+  planNotesLabel: {
+    fontSize: 11,
+    color: C.washuGreen,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  planNote: { fontSize: 12, color: C.textSecondary, lineHeight: 17 },
   working: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, padding: Spacing.two },
   workingText: { color: C.textSecondary, fontSize: 13 },
   error: { color: C.washuRed, paddingHorizontal: Spacing.three, paddingVertical: Spacing.one },
+  composer: {
+    borderTopWidth: 1,
+    borderTopColor: C.backgroundElement,
+  },
   targetBar: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
     paddingHorizontal: Spacing.two,
     paddingTop: Spacing.two,
-    borderTopWidth: 1,
-    borderTopColor: C.backgroundElement,
   },
   targetLabel: { fontSize: 13, fontWeight: '600', color: C.textSecondary },
   targetOptions: { flexDirection: 'row', gap: Spacing.one },
@@ -643,13 +831,31 @@ const styles = StyleSheet.create({
   targetOptionSelected: { borderColor: C.washuGreen, backgroundColor: C.washuGreen },
   targetOptionText: { fontSize: 12, color: C.textSecondary, fontWeight: '600' },
   targetOptionTextSelected: { color: '#FFFFFF' },
+  budgetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    paddingTop: Spacing.two,
+  },
+  budgetLabel: { fontSize: 14, fontWeight: '600', color: C.text },
+  budgetInput: {
+    width: 80,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#DDDDDD',
+    paddingHorizontal: Spacing.two,
+    fontSize: 15,
+    color: C.text,
+    backgroundColor: C.washuWhite,
+  },
+  budgetHint: { flex: 1, fontSize: 12, color: C.textSecondary },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: Spacing.two,
     padding: Spacing.two,
-    borderTopWidth: 1,
-    borderTopColor: C.backgroundElement,
   },
   input: {
     flex: 1,
@@ -719,21 +925,75 @@ const styles = StyleSheet.create({
   },
   rejectText: { color: C.washuRed, fontWeight: '700', fontSize: 15 },
   terminalBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
     gap: Spacing.two,
     padding: Spacing.three,
     borderTopWidth: 1,
     borderTopColor: C.backgroundElement,
   },
-  terminalText: { flex: 1, fontSize: 14, color: C.textSecondary },
+  terminalText: { fontSize: 14, color: C.textSecondary },
+  terminalButtons: { flexDirection: 'row', gap: Spacing.two },
+  rerunBtn: {
+    flex: 1,
+    backgroundColor: C.washuWhite,
+    borderWidth: 1,
+    borderColor: C.washuRed,
+    borderRadius: 10,
+    paddingVertical: Spacing.three,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rerunText: { color: C.washuRed, fontWeight: '700', fontSize: 15 },
   reportBtn: {
+    flex: 1,
     backgroundColor: C.washuGreen,
     borderRadius: 10,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   reportText: { color: '#FFFFFF', fontWeight: '700', fontSize: 15 },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: Spacing.four,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 380,
+    maxHeight: '80%',
+    backgroundColor: C.washuWhite,
+    borderRadius: 12,
+    padding: Spacing.four,
+    gap: Spacing.two,
+  },
+  modalTitle: { fontSize: 17, fontWeight: '700', color: C.text },
+  modalHint: { fontSize: 13, color: C.textSecondary, lineHeight: 18 },
+  stageList: { flexGrow: 0, marginVertical: Spacing.one },
+  stageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    borderRadius: 10,
+    backgroundColor: C.backgroundElement,
+    marginBottom: Spacing.two,
+  },
+  stageMain: { flex: 1, gap: 2 },
+  stageLabel: { fontSize: 15, fontWeight: '700', color: C.text },
+  stageDesc: { fontSize: 12, color: C.textSecondary },
+  stageChevron: { fontSize: 22, color: C.washuRed, fontWeight: '400' },
+  modalCancel: {
+    alignSelf: 'flex-end',
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#DDDDDD',
+  },
+  modalCancelText: { fontSize: 15, fontWeight: '600', color: C.text },
   disabled: { opacity: 0.5 },
 });
