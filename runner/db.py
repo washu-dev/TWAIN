@@ -63,6 +63,13 @@ class RunnerDB:
         at a time. That keeps a redundant ``resume`` (e.g. the user replied twice)
         from racing a live run on the same checkpoint. A duplicate that does slip
         through is a safe no-op — DbAsk finds no new answer and re-suspends.
+
+        Claiming stamps ``heartbeat_at`` and bumps ``attempts``; the runner keeps
+        the heartbeat fresh while it works so :meth:`reap_stale_jobs` can tell a
+        healthy long slice from a crashed one. The returned dict carries the new
+        ``attempts`` so the loop can decide retry-vs-dead-letter. The per-session
+        skip above is therefore never permanent: a crashed session's stuck job is
+        re-queued by the reaper once its lease expires.
         """
         conn = self._connect()
         try:
@@ -83,9 +90,12 @@ class RunnerDB:
             job = cursor.fetchone()
             if job is not None:
                 cursor.execute(
-                    "UPDATE jobs SET status = 'claimed', claimed_at = now() WHERE id = %s;",
+                    "UPDATE jobs SET status = 'claimed', claimed_at = now(), "
+                    "heartbeat_at = now(), attempts = attempts + 1 "
+                    "WHERE id = %s RETURNING attempts;",
                     (job["id"],),
                 )
+                job["attempts"] = cursor.fetchone()["attempts"]
             conn.commit()
             cursor.close()
             return job
@@ -94,6 +104,62 @@ class RunnerDB:
 
     def mark_job(self, job_id: int, status: str) -> None:
         self._execute("UPDATE jobs SET status = %s WHERE id = %s;", (status, job_id))
+
+    def heartbeat_job(self, job_id: int) -> None:
+        """Refresh a claimed job's lease so the reaper doesn't reclaim a healthy,
+        long-running slice (e.g. a multi-hour EXECUTE). A no-op once the job leaves
+        the in-flight states, so a late beat can't resurrect a finished or
+        re-queued job."""
+        self._execute(
+            "UPDATE jobs SET heartbeat_at = now() "
+            "WHERE id = %s AND status IN ('claimed', 'running');",
+            (job_id,),
+        )
+
+    def reap_stale_jobs(self, lease_seconds: float, max_attempts: int) -> list:
+        """Recover jobs orphaned by a dead runner (heartbeat older than the lease).
+
+        A claimed/running job whose heartbeat has gone stale is presumed abandoned
+        — the runner crashed, was OOM-killed, or redeployed mid-slice. Re-queue it
+        so another runner re-drives it from its checkpoint, unless it has already
+        been attempted ``max_attempts`` times, in which case dead-letter it
+        (``status='error'``) and return it so the caller can fail the conversation.
+
+        Safe to run from several runners at once: the UPDATEs are atomic and the
+        under- vs. at/over-``max_attempts`` sets are disjoint. Returns the
+        dead-lettered rows ``[{id, session_id, attempts}]`` (empty when none).
+        """
+        conn = self._connect()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            # Dead-letter the exhausted ones first, RETURNING them so the caller
+            # can post a failure message and mark the conversation errored.
+            cursor.execute(
+                """
+                UPDATE jobs SET status = 'error'
+                WHERE status IN ('claimed', 'running')
+                  AND COALESCE(heartbeat_at, claimed_at) < now() - make_interval(secs => %s)
+                  AND attempts >= %s
+                RETURNING id, session_id, attempts;
+                """,
+                (lease_seconds, max_attempts),
+            )
+            dead = cursor.fetchall()
+            # Re-queue the recoverable ones for another attempt.
+            cursor.execute(
+                """
+                UPDATE jobs SET status = 'queued'
+                WHERE status IN ('claimed', 'running')
+                  AND COALESCE(heartbeat_at, claimed_at) < now() - make_interval(secs => %s)
+                  AND attempts < %s;
+                """,
+                (lease_seconds, max_attempts),
+            )
+            conn.commit()
+            cursor.close()
+            return dead
+        finally:
+            conn.close()
 
     # ---- conversations --------------------------------------------------------
     def set_conversation_status(self, session_id: str, status: str) -> None:
@@ -188,6 +254,18 @@ class RunnerDB:
                 kind = EXCLUDED.kind, content = EXCLUDED.content, created_at = now();
             """,
             (session_id, name, kind, content),
+        )
+
+    def get_artifacts(self, session_id: str) -> list:
+        """Every stored artifact (name + content) for a session.
+
+        The read side of :meth:`upsert_artifact`: on resume the runner rehydrates
+        these back onto local disk (see ``runner.artifacts.rehydrate_artifacts``)
+        so a run can continue on any box even though the state machine reads its
+        stage artifacts from files.
+        """
+        return self._query_all(
+            "SELECT name, content FROM artifacts WHERE session_id = %s;", (session_id,)
         )
 
     # ---- sessions (backing store for the engine) ------------------------------

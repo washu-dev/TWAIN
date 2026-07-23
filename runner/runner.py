@@ -12,11 +12,11 @@ Because no process is pinned to a waiting run, one runner serves many runs, and
 any idle runner can resume any run — no work is wasted spinning on ``sleep``.
 
 Resume durability: the run's state + context resume from the Postgres session
-store, but stage artifacts (intent_spec, the run bundle, …) are files under
-``logs/`` written by the state machine. Resuming on a *different* box therefore
-requires those files to be reachable — run a single runner, or put ``logs/`` on
-shared storage (e.g. EFS). Making mid-run artifacts fully DB-backed is a
-follow-up.
+store, and stage artifacts (intent_spec, the run bundle, …) are made durable too
+— ``capture_artifacts`` writes their contents to Postgres each slice and
+``rehydrate_artifacts`` restores them to local disk before a resume drives the
+run. So any runner can resume any run, even on a fresh box or after ``logs/`` was
+cleaned; no shared ``logs/`` volume is required.
 
 Usage::
 
@@ -24,9 +24,11 @@ Usage::
     pixi run python -m runner.runner --once     # process at most one job (dev/CI)
 """
 import argparse
+import os
+import threading
 import time
 
-from runner.artifacts import capture_artifacts
+from runner.artifacts import capture_artifacts, rehydrate_artifacts
 from runner.bridges import DbAsk, PgEventSink, consume_approval, post_plan_for_approval
 from runner.db import JobNotifyWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
@@ -37,6 +39,26 @@ from runner.pg_store import PgStore
 # instant a job is queued, so this only bounds how long a *missed* notification
 # could sit unclaimed — it no longer gates latency, so it can be generous.
 DEFAULT_POLL_SECONDS = 30.0
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive-int env override, falling back to ``default`` if unset/bad."""
+    try:
+        value = int(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# Job-lease / crash-recovery knobs. While a job runs, the runner bumps its
+# heartbeat every HEARTBEAT seconds. If a runner dies, its heartbeat goes stale
+# and after LEASE seconds the reaper re-queues the job (or dead-letters it once it
+# has been attempted MAX_ATTEMPTS times). LEASE only has to outlast a few missed
+# heartbeats — NOT the longest slice — because a healthy multi-hour EXECUTE keeps
+# beating, so recovery after a real crash takes ~LEASE rather than hours.
+DEFAULT_LEASE_SECONDS = _env_int("TWAIN_JOB_LEASE_SECONDS", 600)
+DEFAULT_HEARTBEAT_SECONDS = _env_int("TWAIN_JOB_HEARTBEAT_SECONDS", 60)
+DEFAULT_MAX_ATTEMPTS = _env_int("TWAIN_JOB_MAX_ATTEMPTS", 3)
 
 SUPPORTED_JOB_KINDS = ("start", "resume")
 
@@ -140,6 +162,12 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         sink=PgEventSink(db, session_id),
         store=PgStore(db),
     )
+    # Resume-safety: the orchestrator restored state + context (artifact *paths*)
+    # from Postgres, but the files themselves may be absent on this box (fresh
+    # runner, or logs/ was cleaned). Restore them from the DB before driving so
+    # _load_artifact and EXECUTE find their inputs. No-op on a start (nothing
+    # stored yet) and on a same-box resume (files already present).
+    rehydrate_artifacts(db, session_id, orch)
     try:
         _drive_run(db, session_id, orch, engine)
     finally:
@@ -151,9 +179,86 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
             print(f"[runner] artifact capture failed for {session_id}: {exc}")
 
 
+class _Heartbeat:
+    """Keeps a claimed job's lease alive for as long as its slice runs.
+
+    A daemon thread bumps ``jobs.heartbeat_at`` every ``interval`` seconds so the
+    reaper won't reclaim a healthy but long-running slice (e.g. a multi-hour
+    EXECUTE that has shelled out to a DFT engine, releasing the GIL). When the
+    runner process dies the beats stop, the lease expires, and
+    :meth:`RunnerDB.reap_stale_jobs` re-queues the job. Best-effort: a failed beat
+    is swallowed (the next beat, or the reaper, covers it) and never disturbs the
+    run. ``interval <= 0`` disables it (used by tests).
+    """
+
+    def __init__(self, db, job_id, interval: float):
+        self._db = db
+        self._job_id = job_id
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self) -> None:
+        if self._interval <= 0:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        # Event.wait doubles as the sleep, so stop() interrupts it immediately.
+        while not self._stop.wait(self._interval):
+            try:
+                self._db.heartbeat_job(self._job_id)
+            except Exception:  # noqa: BLE001, S110 -- a missed beat is not fatal
+                pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+
+
+def _reap_orphans(db: RunnerDB, lease_seconds: float, max_attempts: int) -> None:
+    """Recover jobs whose runner died mid-slice; fail the ones out of attempts.
+
+    Re-queued jobs are picked up by the next ``claim_job`` (this runner on its
+    next turn, or any peer within the fallback poll). Dead-lettered ones are
+    surfaced to the user here so the conversation doesn't sit silently wedged.
+    """
+    for dead in db.reap_stale_jobs(lease_seconds, max_attempts):
+        db.set_conversation_status(dead["session_id"], "error")
+        db.add_assistant_message(
+            dead["session_id"],
+            f"Run failed to recover after {dead['attempts']} attempts — please retry.",
+            kind="chat",
+        )
+
+
+def _handle_job_failure(db: RunnerDB, job: dict, exc: Exception, max_attempts: int) -> None:
+    """Retry a failed job (re-queue) until its attempts are exhausted, then fail it.
+
+    A transient failure — a VPN/LLM-gateway blip, a stage timeout — should not kill
+    a run. We re-queue it (``claim_job`` will re-drive from the last checkpoint and
+    bump ``attempts``); only once it has been attempted ``max_attempts`` times do we
+    dead-letter it and tell the user.
+    """
+    attempt = job.get("attempts", 1)
+    if attempt >= max_attempts:
+        db.mark_job(job["id"], "error")
+        db.set_conversation_status(job["session_id"], "error")
+        db.add_assistant_message(
+            job["session_id"], f"Run failed after {attempt} attempt(s): {exc}", kind="chat"
+        )
+    else:
+        db.mark_job(job["id"], "queued")
+
+
 def run_loop(
     *, once: bool = False, poll: float = DEFAULT_POLL_SECONDS, db: RunnerDB | None = None,
     engine_factory=default_engine, sleep=time.sleep, waiter=None,
+    lease_seconds: float = DEFAULT_LEASE_SECONDS,
+    heartbeat_seconds: float = DEFAULT_HEARTBEAT_SECONDS,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> None:
     """Claim and process jobs until interrupted (or one job when ``once``).
 
@@ -161,9 +266,22 @@ def run_loop(
     queued job wakes it immediately; ``poll`` is only the fallback cadence. If no
     ``waiter`` is given it falls back to ``sleep(poll)`` (used by ``--once`` and
     the unit tests, which never idle).
+
+    Crash recovery: each iteration first reaps jobs orphaned by a dead runner
+    (heartbeat older than ``lease_seconds``) — re-queuing them, or dead-lettering
+    ones already tried ``max_attempts`` times. While a job runs a heartbeat keeps
+    its lease alive; an in-process failure is re-queued until it has been attempted
+    ``max_attempts`` times, then the conversation is failed.
     """
     db = db or RunnerDB()
+    last_reap = 0.0
+    reap_interval = max(heartbeat_seconds, 1.0)
     while True:
+        now = time.monotonic()
+        if now - last_reap >= reap_interval:
+            _reap_orphans(db, lease_seconds, max_attempts)
+            last_reap = now
+
         job = db.claim_job()
         if job is None:
             if once:
@@ -173,14 +291,17 @@ def run_loop(
             else:
                 sleep(poll)
             continue
+
+        heartbeat = _Heartbeat(db, job["id"], heartbeat_seconds)
         try:
             db.mark_job(job["id"], "running")
+            heartbeat.start()
             process_job(job, db, engine=engine_factory())
             db.mark_job(job["id"], "done")
         except Exception as exc:  # noqa: BLE001 -- a bad job must not kill the loop
-            db.mark_job(job["id"], "error")
-            db.set_conversation_status(job["session_id"], "error")
-            db.add_assistant_message(job["session_id"], f"Run failed: {exc}", kind="chat")
+            _handle_job_failure(db, job, exc, max_attempts)
+        finally:
+            heartbeat.stop()
         if once:
             return
 

@@ -19,11 +19,14 @@ Web app (Expo, app/) ──► API (FastAPI, api/, :8000) ──► Postgres (:5
                                                            └─► WashU LLM API (needs VPN)
 ```
 
-The web app never talks to the pipeline directly. The API writes a row into
-the `jobs` table; the **runner** polls that table, claims the job, drives the
-state machine (INTAKE → CLARIFY → … → PLAN → *approval gate* → BUILD → EXECUTE
-→ … → TERMINATE), and writes messages, progress events, and artifacts back to
-Postgres, which the app renders.
+The web app never talks to the pipeline directly. The API writes a row into the
+`jobs` table (a Postgres-backed queue) and the **runner** — woken instantly by
+`LISTEN/NOTIFY` — claims the job and drives the state machine (INTAKE → CLARIFY →
+… → PLAN → *approval gate* → BUILD → EXECUTE → … → TERMINATE), writing messages,
+progress events, and artifacts back to Postgres for the app to render. When a run
+needs the researcher (a clarification, the plan approval, a heavy-calc confirm) it
+**suspends** — checkpointed to Postgres, the process released — and a `resume` job
+picks it back up when the user replies, so nothing stays pinned waiting on a human.
 
 ## Quick start (one command)
 
@@ -56,8 +59,10 @@ Prerequisites:
 
 Then open <http://localhost:8081>, describe a simulation, wait ~30 s for the
 proposed execution plan, and hit **Approve & run**. If a conversation seems
-idle, check whether it is waiting on your approval before re-prompting — every
-prompt starts a new run, and the runner processes them one at a time.
+idle, check whether it is waiting on your approval before re-prompting. A single
+runner drives one slice at a time and serializes work per conversation, but a
+suspended run consumes nothing while it waits — so different conversations
+progress independently, and you can leave and come back to any of them.
 
 ## Running the pieces by hand
 

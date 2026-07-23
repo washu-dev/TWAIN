@@ -4,12 +4,13 @@ model: a run advances until it needs the user, then *releases* the process (it
 never blocks polling), and a ``resume`` job picks it back up.
 """
 import json
+import threading
 import types
 
 import pytest
 
 from runner import runner
-from runner.artifacts import capture_artifacts
+from runner.artifacts import capture_artifacts, rehydrate_artifacts
 from runner.bridges import (
     DbAsk,
     PgEventSink,
@@ -34,6 +35,7 @@ class FakeDB:
         self._jobs = list(jobs or [])
         self.sessions = {}
         self.artifacts = []
+        self._reap_batches = []  # each run_loop reap() call pops one batch of dead jobs
         self._next_id = 1
 
     # -- message helpers --------------------------------------------------------
@@ -77,12 +79,21 @@ class FakeDB:
     def upsert_artifact(self, sid, name, content, kind):
         self.artifacts.append({"name": name, "content": content, "kind": kind})
 
+    def get_artifacts(self, sid):
+        return [{"name": a["name"], "content": a["content"]} for a in self.artifacts]
+
     # -- jobs -------------------------------------------------------------------
     def claim_job(self):
         return self._jobs.pop(0) if self._jobs else None
 
     def mark_job(self, job_id, status):
         self.jobs_done.append((job_id, status))
+
+    def heartbeat_job(self, job_id):
+        pass
+
+    def reap_stale_jobs(self, lease_seconds, max_attempts):
+        return self._reap_batches.pop(0) if self._reap_batches else []
 
     # -- sessions ---------------------------------------------------------------
     def session_get(self, sid):
@@ -345,7 +356,10 @@ class TestRunLoop:
                 raise RuntimeError("kaboom")
 
         db = FakeDB(jobs=[{"id": 9, "session_id": SESSION, "kind": "start", "params": {}}])
-        runner.run_loop(once=True, db=db, engine_factory=Boom, sleep=lambda _s: None)
+        # max_attempts=1 → the first failure is terminal (no retry) and dead-letters.
+        runner.run_loop(
+            once=True, db=db, engine_factory=Boom, sleep=lambda _s: None, max_attempts=1
+        )
         assert (9, "error") in db.jobs_done
         assert db.status == "error"
 
@@ -375,6 +389,65 @@ class TestRunLoop:
             runner.run_loop(db=db, engine_factory=FakeEngine, sleep=boom_sleep, waiter=waiter)
         assert (11, "done") in db.jobs_done
         assert waiter.calls == 2
+
+    def test_transient_failure_is_requeued_under_max_attempts(self):
+        # A failing job with attempts below the cap is re-queued (retried), not
+        # dead-lettered — a transient blip must not kill the run.
+        class Boom(FakeEngine):
+            def build_orchestrator(self, **_kwargs):
+                raise RuntimeError("blip")
+
+        db = FakeDB(jobs=[{"id": 3, "session_id": SESSION, "kind": "start", "params": {}}])
+        runner.run_loop(
+            once=True, db=db, engine_factory=Boom, sleep=lambda _s: None, max_attempts=3
+        )
+        assert (3, "queued") in db.jobs_done  # re-queued for another attempt
+        assert (3, "error") not in db.jobs_done
+        assert db.status != "error"
+
+    def test_reaper_dead_letters_orphaned_job(self):
+        # A job whose runner died and whose attempts are exhausted is surfaced to
+        # the user (conversation errored) instead of being left silently wedged.
+        db = FakeDB()
+        db._reap_batches = [[{"id": 5, "session_id": SESSION, "attempts": 3}]]
+        runner.run_loop(once=True, db=db, engine_factory=FakeEngine, sleep=lambda _s: None)
+        assert db.status == "error"
+        assert any(
+            "recover" in m["content"].lower()
+            for m in db.messages
+            if m["role"] == "assistant"
+        )
+
+
+# ── heartbeat ─────────────────────────────────────────────────────────────────
+class TestHeartbeat:
+    def test_ticks_until_stopped(self):
+        seen = []
+        beat = threading.Event()
+
+        class HbDB:
+            def heartbeat_job(self, job_id):
+                seen.append(job_id)
+                beat.set()
+
+        hb = runner._Heartbeat(HbDB(), 42, interval=0.01)
+        hb.start()
+        assert beat.wait(2.0)  # a beat lands promptly
+        hb.stop()
+        assert 42 in seen
+        assert not hb._thread.is_alive()  # stop() joined the thread
+
+    def test_disabled_when_interval_not_positive(self):
+        seen = []
+
+        class HbDB:
+            def heartbeat_job(self, job_id):
+                seen.append(job_id)
+
+        hb = runner._Heartbeat(HbDB(), 1, interval=0)
+        hb.start()
+        hb.stop()
+        assert seen == []  # never started, so never beats
 
 
 # ── PgEventSink ───────────────────────────────────────────────────────────────
@@ -444,3 +517,55 @@ class TestCaptureArtifacts:
         assert "script" not in names
         assert kinds["run_bundle/main.py"] == "python"
         assert kinds["execution_plan"] == "json"
+
+
+class TestRehydrateArtifacts:
+    """Inverse of capture: restore a run's files from the DB before a resume."""
+
+    def _orch(self, artifacts):
+        return types.SimpleNamespace(
+            sm=types.SimpleNamespace(context=types.SimpleNamespace(artifacts=artifacts))
+        )
+
+    def test_round_trip_restores_missing_files(self, tmp_path):
+        # Capture a plan + a run_bundle dir, wipe the local files (fresh box),
+        # then rehydrate and confirm every file is back with its content.
+        plan = tmp_path / "execution_plan_x.json"
+        plan.write_text('{"cost": 1}')
+        bundle = tmp_path / "run_bundle_x"
+        bundle.mkdir()
+        (bundle / "main.py").write_text("import pymatgen\n")
+        (bundle / "requirements.txt").write_text("pymatgen\n")
+        orch = self._orch({
+            "execution_plan": str(plan),
+            "run_bundle": str(bundle),
+            "script": str(bundle / "main.py"),  # duplicate of the bundle entrypoint
+        })
+        db = FakeDB()
+        capture_artifacts(db, "s1", orch)
+
+        (bundle / "main.py").unlink()
+        (bundle / "requirements.txt").unlink()
+        bundle.rmdir()
+        plan.unlink()
+
+        restored = rehydrate_artifacts(db, "s1", orch)
+        assert restored == 3  # plan + 2 bundle files; "script" skipped
+        assert plan.read_text() == '{"cost": 1}'
+        assert (bundle / "main.py").read_text() == "import pymatgen\n"
+        assert (bundle / "requirements.txt").read_text() == "pymatgen\n"
+
+    def test_write_if_missing_does_not_clobber_local_files(self, tmp_path):
+        plan = tmp_path / "execution_plan_x.json"
+        plan.write_text("LOCAL")  # already present (same-box resume)
+        db = FakeDB()
+        db.upsert_artifact("s1", "execution_plan", "FROM_DB", "json")
+        restored = rehydrate_artifacts(db, "s1", self._orch({"execution_plan": str(plan)}))
+        assert restored == 0
+        assert plan.read_text() == "LOCAL"
+
+    def test_noop_when_nothing_stored(self, tmp_path):
+        plan = tmp_path / "execution_plan_x.json"
+        orch = self._orch({"execution_plan": str(plan)})
+        assert rehydrate_artifacts(FakeDB(), "s1", orch) == 0
+        assert not plan.exists()

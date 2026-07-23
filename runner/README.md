@@ -41,13 +41,29 @@ A generous fallback poll (`--poll`, default 30s) covers any missed notification.
 when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or `sns`/`ses`);
 see `runner/notifications.py`. `TWAIN_APP_URL` adds a deep link back to the run.
 
-**Resume durability (important)** — a run's state + context resume from the
-Postgres session store, but stage artifacts (intent_spec, the run bundle, …) are
-files under `logs/` written by the state machine. Resuming on a *different* box
-therefore needs those files reachable: run a single runner, or put `logs/` on
-shared storage (e.g. EFS). Making mid-run artifacts fully DB-backed is a
-follow-up. Concurrency is safe regardless — `claim_job` serializes jobs per
-session and a redundant `resume` is a no-op.
+**Resume durability** — a run's state + context resume from the Postgres session
+store, and its stage artifacts (intent_spec, execution_plan, the generated run
+bundle, …) are durable too: `capture_artifacts` writes their contents to the
+`artifacts` table every slice, and `rehydrate_artifacts` restores them to local
+disk before a resume drives the run (see `runner/artifacts.py`). So any runner
+can resume any run — even on a fresh box, or after `logs/` was cleaned — with no
+shared `logs/` volume required. (Outputs produced within the final, non-suspending
+slice aren't needed to resume.) Concurrency is safe regardless — `claim_job`
+serializes jobs per session and a redundant `resume` is a no-op.
+
+**Crash recovery** — a claimed job is kept alive by a heartbeat (`jobs.heartbeat_at`)
+while the runner works. If a runner dies mid-slice (OOM, redeploy, SIGKILL) its
+heartbeat goes stale; after the lease (`TWAIN_JOB_LEASE_SECONDS`, default 600s)
+any runner's reaper re-queues the job so it re-drives from the checkpoint, or
+dead-letters it once it has been attempted `TWAIN_JOB_MAX_ATTEMPTS` times (default
+3) and posts a failure message. The lease only has to outlast a few missed
+heartbeats (`TWAIN_JOB_HEARTBEAT_SECONDS`, default 60s), **not** the longest slice
+— a healthy multi-hour EXECUTE keeps beating — so recovery after a real crash
+takes about one lease, not hours. In-process failures (a VPN/LLM blip, a stage
+timeout) are retried the same way before the run is failed. Without this, a
+crashed runner left its job stuck `running` forever and, because of the
+per-session serialization above, permanently blocked every future `resume` for
+that session.
 
 ## Run locally
 Requires a reachable Postgres with the schema from `api/migrations/001_web_ui.sql`

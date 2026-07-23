@@ -97,7 +97,7 @@
                     │      ask=<db-bridge>, store=PgStore) │
                     │  - .run(until=…)                     │
                     │  - writes sessions + run_events      │
-                    │  - `ask` blocks on pending Q row     │
+                    │  - `ask` suspends, resume drives     │
                     └───────┬──────────────────────────────┘
                             │
               RDS PostgreSQL (twaindb) ── shared state
@@ -108,7 +108,7 @@
 ### 4.1 Why a separate runner service (key decision)
 The current `api` image is `python:3.12-slim` with light deps. The engine needs the **pixi environment** (pymatgen, ase, psutil, …), the `modules/` tree, the WashU LLM credentials, and can run for **many minutes** (EXECUTE alone allows 20 min) — potentially executing generated code. Running that inside the request-serving API task would bloat the image, block workers, and complicate scaling.
 
-**Decision:** keep the API light and add a **runner** service built from the repo root (reusing `pixi.toml`). The API and runner share Postgres. This also cleanly supports the orchestrator's **blocking `ask` callable**: a runner process owns one run and can block on a "pending question" row until the user answers via the API — exactly matching chat clarification and plan approval.
+**Decision:** keep the API light and add a **runner** service built from the repo root (reusing `pixi.toml`). The API and runner share Postgres. When a run needs the researcher, the orchestrator's `ask` callable **suspends** it — the run is checkpointed to Postgres and the process released — rather than blocking a thread on a "pending question" row; the user's reply (via the API) enqueues a `resume` job that drives the run onward. One runner therefore serves many runs and nothing spins waiting on a human. *(Earlier drafts described a blocking `ask` that owned a run and waited on the pending-question row; that model was replaced by suspend/resume — see `runner/suspend.py` and `runner/README.md`.)*
 
 **Coordination (MVP):** a `jobs` table in Postgres acts as the queue (the runner claims rows with `SELECT … FOR UPDATE SKIP LOCKED`). No SQS needed initially; SQS/EventBridge is a later hardening step.
 
