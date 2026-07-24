@@ -320,9 +320,9 @@ import paths that only worked in older releases, and NEVER invent a module path 
 merely sounds plausible. In ASE >= 3.23, cell-relaxation filters live in `ase.filters` \
 (`from ase.filters import FrechetCellFilter`), NOT `ase.constraints`. The band-gap \
 helper is `from ase.dft.bandgap import bandgap` (pass it the attached calculator); \
-there is NO `gpaw.bandgap` module. In GPAW, occupations={"name": "fixed"} requires an \
+there is NO `gpaw.bandgap` module. In GPAW, occupations={{"name": "fixed"}} requires an \
 explicit per-band `numbers` array -- for a frozen-occupations band-structure pass use \
-{"name": "fixed-uniform"}.
+{{"name": "fixed-uniform"}}.
 - Attach the {calculator} calculator (`{calculator_import}`) and compute {property}. \
 Do NOT invent model, dataset, or parameter-set identifiers -- a name you guess may \
 not exist. If the calculator loads a named pretrained model, discover the valid \

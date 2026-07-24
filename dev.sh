@@ -61,8 +61,13 @@ require python3
 # Two ways to run psql commands, so the script works both with a native install
 # and with Postgres inside Docker (no psql client on the host needed).
 USE_DOCKER_PG=0
+# -w: never prompt for a password. Without it, when the twain-pg container is
+# already up (Colima running), this probe hits the container's Postgres, which
+# asks for a password interactively -- blocking the script on a prompt that can
+# only fail. With -w the probe fails silently and we take the Docker path.
 if command -v psql >/dev/null 2>&1 \
-   && psql -h "$DB_HOST" -p "$DB_PORT" -U "${DB_USER:-$(whoami)}" -lqt >/dev/null 2>&1; then
+   && PGCONNECT_TIMEOUT=3 PGPASSWORD="${DB_PASSWORD:-}" \
+      psql -w -h "$DB_HOST" -p "$DB_PORT" -U "${DB_USER:-$(whoami)}" -lqt >/dev/null 2>&1; then
   DB_USER="${DB_USER:-$(whoami)}"
   DB_PASSWORD="${DB_PASSWORD:-}"
 else
