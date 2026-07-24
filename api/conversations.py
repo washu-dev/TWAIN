@@ -13,7 +13,7 @@ from psycopg2.extras import RealDictCursor
 from database import get_connection
 
 # Conversation lifecycle statuses the UI understands.
-TERMINAL_STATUSES = ("completed", "error", "rejected")
+TERMINAL_STATUSES = ("completed", "error", "rejected", "cancelled")
 
 # Pipeline stages a finished run can be restarted from, in order (mirrors the
 # engine's REWINDABLE_STATES). Kept as plain strings so the light API image needs
@@ -23,11 +23,18 @@ RERUNNABLE_STATES = (
     "BUILD", "EXECUTE", "INTERPRET", "VALIDATE", "ACCEPT",
 )
 
-
 def create_conversation(
-    user_id: str, request: str, title: str | None = None, max_cost: float | None = None,
+    user_id: str,
+    request: str,
+    title: str | None = None,
+    *,
+    compute_target: str | None = None,
+    max_cost: float | None = None,
 ) -> dict:
     """Create a conversation, store the first user turn, and enqueue a start job.
+
+    ``compute_target`` ('local' | 'slurm') rides in the job params so the runner
+    can pick the execution backend per run; None keeps the runner's default.
 
     All three writes share one transaction so a conversation never exists
     without its opening message and queued job. ``max_cost`` (optional) is the
@@ -55,6 +62,8 @@ def create_conversation(
             (session_id, request),
         )
         params = {"request": request, "researcher_id": user_id}
+        if compute_target:
+            params["compute_target"] = compute_target
         if max_cost is not None:
             params["max_cost"] = max_cost
         cursor.execute(
@@ -184,8 +193,23 @@ def add_message(conversation_id: str, content: str, *, kind: str = "chat") -> di
         conn.close()
 
 
-def add_approval_response(conversation_id: str, decision: str) -> dict:
-    """Record the user's plan-approval decision ('approve' | 'reject')."""
+def add_approval_response(
+    conversation_id: str,
+    decision: str,
+    *,
+    slurm_request: dict | None = None,
+) -> dict:
+    """Record the user's plan-approval decision ('approve' | 'reject').
+
+    When the user edited Slurm settings on the approval card, ``slurm_request``
+    (plan units: ram GB, max_time hours) is embedded in the message content so
+    the runner can patch the execution plan before BUILD/EXECUTE.
+    """
+    content = (
+        json.dumps({"decision": decision, "slurm_request": slurm_request})
+        if slurm_request is not None
+        else decision
+    )
     conn = get_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -195,7 +219,7 @@ def add_approval_response(conversation_id: str, decision: str) -> dict:
             VALUES (%s, 'user', %s, 'approval_response')
             RETURNING id, role, content, kind, state, created_at;
             """,
-            (conversation_id, decision),
+            (conversation_id, content),
         )
         row = cursor.fetchone()
         conn.commit()
@@ -204,6 +228,39 @@ def add_approval_response(conversation_id: str, decision: str) -> dict:
     except Exception as e:
         conn.rollback()
         raise Exception(f"Failed to record approval: {e}") from e
+    finally:
+        conn.close()
+
+
+def request_termination(conversation_id: str) -> dict:
+    """Record the user's request to stop the run (Terminate button).
+
+    Inserts a 'terminate' control message (the runner polls for it between
+    stages and blocking waits) and flips the status to 'cancelling' so the UI
+    shows immediate feedback. The runner settles the final 'cancelled' status.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            INSERT INTO messages (conversation_id, role, content, kind)
+            VALUES (%s, 'user', 'terminate', 'terminate')
+            RETURNING id, role, content, kind, state, created_at;
+            """,
+            (conversation_id,),
+        )
+        row = cursor.fetchone()
+        cursor.execute(
+            "UPDATE conversations SET status = 'cancelling', updated_at = now() WHERE id = %s;",
+            (conversation_id,),
+        )
+        conn.commit()
+        cursor.close()
+        return row
+    except Exception as e:
+        conn.rollback()
+        raise Exception(f"Failed to request termination: {e}") from e
     finally:
         conn.close()
 

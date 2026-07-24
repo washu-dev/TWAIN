@@ -2,7 +2,8 @@
 
 The FastAPI service behind the web UI (conversations, auth, artifacts). It shares
 a Postgres database with the **runner**; its `id` for each conversation is the
-engine's session id. For the full picture see the repo-root `DEPLOYMENT.md`.
+engine's session id. For the full picture see the repo-root `README.md`
+(the "Deploying to AWS" section is the deployment runbook).
 
 ## Easiest: the whole stack locally
 
@@ -57,5 +58,6 @@ python -m pytest -q --import-mode=importlib      # the api test suite
 - **Can't connect to Postgres** — is it running? `./dev.sh` starts one. Check the
   `DB_*` env vars. Run `python ../scripts/preflight.py` for a full readiness check.
 - **401s on every route** — auth is on but unconfigured. For local dev set
-  `AUTH_DISABLED=true`; for a deploy see `DEPLOYMENT.md` §5.
+  `AUTH_DISABLED=true`; for a deploy see the "Auth for a shared/cloud deploy"
+  section of the repo-root `README.md`.
 - **Port 8000 in use** — `uvicorn main:app --port 8001`.

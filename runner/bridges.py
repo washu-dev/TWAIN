@@ -25,12 +25,19 @@ class ReplyTimeout(TimeoutError):
     """Raised when the user does not reply within the wait window."""
 
 
+class RunCancelled(RuntimeError):
+    """Raised when the user pressed Terminate while the run was blocked."""
+
+
 def _wait_for_reply(
     db: RunnerDB, session_id: str, after_id: int, kind: str | None,
     poll: float, timeout: float, sleep=time.sleep, monotonic=time.monotonic,
+    cancel=None,
 ) -> str:
     deadline = monotonic() + timeout
     while True:
+        if cancel is not None and cancel():
+            raise RunCancelled(f"run {session_id} terminated by the user")
         replies = db.user_replies_after(session_id, after_id, kind=kind)
         if replies:
             return replies[0]["content"]
@@ -45,13 +52,14 @@ class DbAsk:
     def __init__(
         self, db: RunnerDB, session_id: str,
         poll: float = DEFAULT_POLL_SECONDS, timeout: float = DEFAULT_WAIT_TIMEOUT,
-        sleep=time.sleep,
+        sleep=time.sleep, cancel=None,
     ):
         self.db = db
         self.session_id = session_id
         self.poll = poll
         self.timeout = timeout
         self._sleep = sleep
+        self._cancel = cancel
 
     def __call__(self, message: str) -> str:
         baseline = self.db.max_message_id(self.session_id)
@@ -62,6 +70,7 @@ class DbAsk:
         answer = _wait_for_reply(
             self.db, self.session_id, baseline, kind=None,
             poll=self.poll, timeout=self.timeout, sleep=self._sleep,
+            cancel=self._cancel,
         )
         self.db.set_conversation_status(self.session_id, "running")
         return answer
@@ -69,29 +78,57 @@ class DbAsk:
 
 def request_plan_approval(
     db: RunnerDB, session_id: str, plan: dict | None,
+    *,
+    compute_target: str | None = None,
+    slurm_cluster: str | None = None,
     poll: float = DEFAULT_POLL_SECONDS, timeout: float = DEFAULT_WAIT_TIMEOUT,
-    sleep=time.sleep,
-) -> str:
+    sleep=time.sleep, cancel=None,
+) -> tuple[str, dict | None]:
     """Post the plan for approval and block for the user's decision.
 
-    Returns the raw decision string ('approve' or 'reject').
+    Returns ``(decision, slurm_overrides)`` where decision is ``'approve'`` or
+    ``'reject'`` and ``slurm_overrides`` is an optional plan-unit
+    ``slurm_request`` dict the user edited on the approval card (ram in GB,
+    max_time in hours).
     """
     baseline = db.max_message_id(session_id)
     db.add_assistant_message(
         session_id,
-        json.dumps(_plan_summary(plan)),
+        json.dumps(_plan_summary(plan, compute_target=compute_target,
+                                 slurm_cluster=slurm_cluster)),
         kind="approval_request",
         state="PLAN",
     )
     db.set_conversation_status(session_id, "awaiting_approval")
-    decision = _wait_for_reply(
+    raw = _wait_for_reply(
         db, session_id, baseline, kind="approval_response",
-        poll=poll, timeout=timeout, sleep=sleep,
+        poll=poll, timeout=timeout, sleep=sleep, cancel=cancel,
     )
-    return decision.strip().lower()
+    return _parse_approval_reply(raw)
 
 
-def _plan_summary(plan: dict | None) -> dict:
+def _parse_approval_reply(raw: str) -> tuple[str, dict | None]:
+    """Accept plain ``approve``/``reject`` or a JSON body with optional overrides."""
+    text = (raw or "").strip()
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        return text.lower(), None
+    if isinstance(body, dict) and "decision" in body:
+        decision = str(body.get("decision", "")).strip().lower()
+        overrides = body.get("slurm_request")
+        if not isinstance(overrides, dict):
+            overrides = None
+        return decision, overrides
+    return text.lower(), None
+
+
+def _plan_summary(
+    plan: dict | None,
+    *,
+    compute_target: str | None = None,
+    slurm_cluster: str | None = None,
+) -> dict:
     """Trim an ExecutionPlan artifact to the fields worth showing for approval.
 
     Reads the fields where they actually live (goal_id under ``metadata``,
@@ -99,9 +136,14 @@ def _plan_summary(plan: dict | None) -> dict:
     the plan's plain-language ``summary`` of what the run will do.
     """
     if not plan:
-        return {"note": "No execution plan was produced."}
+        return {
+            "note": "No execution plan was produced.",
+            "compute_target": compute_target or "local",
+        }
+    target = compute_target or "local"
     metadata = plan.get("metadata") or {}
-    return {
+    summary = {
+        "compute_target": target,
         "summary": plan.get("summary"),
         "goal_id": metadata.get("goal_id"),
         "target_system": plan.get("target_system"),
@@ -113,6 +155,15 @@ def _plan_summary(plan: dict | None) -> dict:
         "acceptance_metrics": plan.get("acceptance_metrics"),
         "safety_notes": plan.get("safety_notes"),
     }
+    if target == "slurm":
+        summary["slurm_cluster"] = slurm_cluster or "compute2"
+        summary["slurm_units"] = {
+            "ram": "GB",
+            "max_time": "hours",
+            "cpu_count": "cores",
+            "gpu_count": "GPUs",
+        }
+    return summary
 
 
 class PgEventSink:

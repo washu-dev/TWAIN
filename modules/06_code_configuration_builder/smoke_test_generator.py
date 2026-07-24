@@ -57,6 +57,7 @@ MAIN = HERE / "@@MAIN@@"
 OUTPUT = HERE / "@@OUTPUT@@"
 TOOL_NAME = "@@TOOL@@"
 RUN_SMOKE = @@RUN_SMOKE@@
+REQUIRE_OUTPUT = @@REQUIRE_OUTPUT@@
 REQUIRED_IMPORTS = @@IMPORTS@@
 
 
@@ -133,9 +134,14 @@ def main():
             print(err.strip())
         return 4
     if not produced:
-        print(f"[smoke] expected output not created: {OUTPUT.name}")
-        return 4
-    print(f"[smoke] smoke run OK -> {OUTPUT.name}")
+        # A load-only smoke (heavy calculator: construct + exit, no compute)
+        # legitimately writes nothing -- only a compute smoke owes the file.
+        if REQUIRE_OUTPUT:
+            print(f"[smoke] expected output not created: {OUTPUT.name}")
+            return 4
+        print("[smoke] smoke run OK (load-only; no output file expected)")
+    else:
+        print(f"[smoke] smoke run OK -> {OUTPUT.name}")
     print("[smoke] PASS")
     return 0
 
@@ -175,11 +181,15 @@ def generate_inline_tests(
     main_filename: str = "main.py",
     output_filename: str = "results.csv",
     run_smoke: bool = True,
+    require_output: bool = True,
 ) -> str:
     """Render the ``inline_tests.py`` source for a bundle.
 
     ``required_import_names`` are the *import* names (not PyPI names) of the
     scientific packages whose absence should abort before the real run.
+    ``require_output`` should be False for a load-only smoke (heavy
+    calculators construct the calculator and exit without computing), where
+    no output file is expected.
 
     >>> src = generate_inline_tests(tool_name="ASE", required_import_names=["ase"])
     >>> "MISSING DEPENDENCY" in src and "ase" in src
@@ -193,6 +203,7 @@ def generate_inline_tests(
     rendered = rendered.replace("@@MAIN@@", main_filename)
     rendered = rendered.replace("@@OUTPUT@@", output_filename)
     rendered = rendered.replace("@@RUN_SMOKE@@", "True" if run_smoke else "False")
+    rendered = rendered.replace("@@REQUIRE_OUTPUT@@", "True" if require_output else "False")
     # json.dumps yields a valid Python list literal of strings.
     rendered = rendered.replace("@@IMPORTS@@", json.dumps(imports))
     return rendered

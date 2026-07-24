@@ -90,6 +90,21 @@ class FakeAgent:
         return {"content": [{"text": self._intent_json}]}
 
 
+class TruncatingAgent(FakeAgent):
+    """First reply is cut mid-string (the 1024-token truncation failure mode);
+    subsequent replies are whole."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.calls = 0
+
+    def call_agent(self, prompt, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {"content": [{"text": self._intent_json[:80]}]}
+        return super().call_agent(prompt, **kwargs)
+
+
 def _offline_machine(tmp_path, *, agent=None, **ctx_overrides) -> StateMachine:
     """A StateMachine wired with a fake agent + tmp artifacts dir, so the
     interactive intake/clarify handlers run fully offline (still needs
@@ -382,6 +397,23 @@ class TestExecuteRunsBundle:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. Guard rejection (invalid context)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+class TestAgentJsonRobustness:
+    def test_intake_retries_truncated_agent_json(self, tmp_path):
+        # A reply cut mid-string (token-cap truncation) must trigger one clean
+        # retry instead of surfacing JSONDecodeError from the stage handler.
+        agent = TruncatingAgent()
+        m = _offline_machine(tmp_path, agent=agent)
+        with patch("builtins.input", return_value="predict solubility"):
+            assert m.intake() == State.CLARIFY
+        assert agent.calls == 2
+        assert m._load_artifact("intent_spec")["objective"] == VALID_INTENT["objective"]
+
+    def test_agent_json_raises_after_retries_exhausted(self, tmp_path):
+        m = _offline_machine(tmp_path, agent=lambda prompt: '{"unterminated": "trunca')
+        with pytest.raises(json.JSONDecodeError):
+            m._agent_json("prompt", retries=1)
+
 
 class TestGuardRejection:
     def test_clarify_loops_when_not_confident(self, tmp_path):

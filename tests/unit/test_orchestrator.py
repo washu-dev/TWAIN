@@ -38,7 +38,7 @@ import error_handler  # noqa: E402
 from error_handler import (  # noqa: E402
     ErrorCategory, classify, AgentTimeout, PolicyError, ConfigError, LLMError,
 )
-from orchestrator import Orchestrator  # noqa: E402
+from orchestrator import Orchestrator, RunCancelled  # noqa: E402
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -318,6 +318,42 @@ class TestErrorHandling:
         assert o.run_session.correct_count == 3
         assert o.last_error.category == ErrorCategory.POLICY
 
+    def test_cancel_between_stages_raises_run_cancelled(self, env):
+        # The Terminate button: cancel_check flips to True after two stages;
+        # the next loop turn must raise RunCancelled (for the runner to mark
+        # the conversation 'cancelled') instead of finishing or erroring.
+        fired = {"n": 0}
+
+        def cancel():
+            fired["n"] += 1
+            return fired["n"] > 2
+
+        o = build(env, "cancelme", cancel_check=cancel)
+        with pytest.raises(RunCancelled):
+            o.run()
+        assert env["notes"] == []                    # no error card for a cancel
+        assert "run.cancelled" in env["bus"].types()
+        assert o.run_session.get_status() == RunStatus.PAUSED
+
+    def test_failure_while_cancelled_surfaces_as_cancel_not_error(self, env):
+        # A stage failure caused by the termination (aborted wait, scancelled
+        # job) must not be classified as a run error: with the cancel flag set,
+        # _handle_error re-raises RunCancelled instead.
+        aborted = {"flag": False}
+
+        def boom():
+            # terminate lands mid-DISCOVER: the flag is set and the blocking
+            # call aborts by raising, exactly like an interrupted wait.
+            aborted["flag"] = True
+            raise RuntimeError("wait aborted")
+
+        sm = make_sm(env["tmp"], discover=boom)
+        o = build(env, "cancelfail", sm=sm, cancel_check=lambda: aborted["flag"])
+        with pytest.raises(RunCancelled):
+            o.run()
+        assert env["notes"] == []
+        assert o.last_error is None
+
     def test_handler_failure_stops_with_actionable_error(self, env):
         def boom():
             raise RuntimeError("registry unreachable")
@@ -475,7 +511,9 @@ class TestAgentRunner:
             run_agent(lambda _s: {"x": 1}, {}, timeout=None, validator=lambda o: "y" in o)
 
     def test_timeout_table_matches_criteria(self):
-        assert agent_runner.timeout_for("EXECUTE") == 20 * 60
+        # EXECUTE was raised from the criteria's 20 min to 2 h: real runs
+        # (local DFT, bounded Slurm polling) routinely exceed 20 minutes.
+        assert agent_runner.timeout_for("EXECUTE") == 2 * 60 * 60
         assert agent_runner.timeout_for("CLARIFY") == 5 * 60
 
 

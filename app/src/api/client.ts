@@ -5,16 +5,23 @@ export type ConversationStatus =
   | 'running'
   | 'awaiting_input'
   | 'awaiting_approval'
+  | 'cancelling'
   | 'completed'
   | 'error'
-  | 'rejected';
+  | 'rejected'
+  | 'cancelled';
+
+// Where the run's EXECUTE stage happens: the runner host itself, or a job
+// submitted to the WashU RIS Slurm cluster. Omitted = the runner's default.
+export type ComputeTarget = 'local' | 'slurm';
 
 export type MessageRole = 'user' | 'assistant' | 'system';
 export type MessageKind =
   | 'chat'
   | 'clarification'
   | 'approval_request'
-  | 'approval_response';
+  | 'approval_response'
+  | 'terminate';
 
 export interface Message {
   id: number;
@@ -140,8 +147,15 @@ class APIClient {
   }
 
   // ── Conversations / chat (Phase 1) ─────────────────────────────────────────
-  async startConversation(request: string, maxCost?: number | null): Promise<Conversation> {
-    const body: { request: string; max_cost?: number } = { request };
+  async startConversation(
+    request: string,
+    computeTarget?: ComputeTarget,
+    maxCost?: number | null,
+  ): Promise<Conversation> {
+    const body: { request: string; compute_target?: ComputeTarget; max_cost?: number } = {
+      request,
+    };
+    if (computeTarget) body.compute_target = computeTarget;
     if (maxCost != null) body.max_cost = maxCost;
     const response = await this.client.post('/api/conversations', body);
     return response.data.data;
@@ -168,10 +182,25 @@ class APIClient {
     return response.data.data;
   }
 
-  async sendApproval(id: string, decision: 'approve' | 'reject'): Promise<Message> {
+  async sendApproval(
+    id: string,
+    decision: 'approve' | 'reject',
+    slurmRequest?: {
+      cpu_count?: number;
+      gpu_count?: number;
+      ram?: number;
+      max_time?: number;
+    },
+  ): Promise<Message> {
     const response = await this.client.post(`/api/conversations/${id}/approval`, {
       decision,
+      ...(slurmRequest ? { slurm_request: slurmRequest } : {}),
     });
+    return response.data.data;
+  }
+
+  async terminateConversation(id: string): Promise<Message> {
+    const response = await this.client.post(`/api/conversations/${id}/terminate`);
     return response.data.data;
   }
 

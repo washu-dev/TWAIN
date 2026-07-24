@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { apiClient, Conversation, Message } from '@/api/client';
+import { apiClient, ComputeTarget, Conversation, Message } from '@/api/client';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -36,15 +36,84 @@ const RERUN_STAGES: { state: string; label: string; desc: string }[] = [
   { state: 'EXECUTE', label: 'Execute', desc: 'Re-run the calculation' },
 ];
 
-const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_approval'];
-const TERMINAL_STATUSES = ['completed', 'error', 'rejected'];
+const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_approval', 'cancelling'];
+const TERMINAL_STATUSES = ['completed', 'error', 'rejected', 'cancelled'];
 const POLL_MS = 1500;
+const MIN_RAM_GB = 4;
+
+type SlurmDraft = {
+  cpu_count: string;
+  gpu_count: string;
+  ram: string;
+  max_time: string;
+};
+
+type PlanSummary = {
+  compute_target?: string;
+  slurm_cluster?: string;
+  summary?: string | null;
+  goal_id?: string | null;
+  target_system?: {
+    formula?: string;
+    kind?: string;
+    crystal?: { name?: string; phase?: string };
+  } | null;
+  requested_property?: string | null;
+  selected_method?: {
+    tool_name?: string;
+    tool_version?: string | number;
+    calculator?: string;
+    libraries?: string[];
+  } | null;
+  cost_estimate?: { min_cost?: number } | null;
+  compute_estimate?: { cpu_hours?: number } | null;
+  slurm_request?: {
+    cpu_count?: number;
+    gpu_count?: number;
+    ram?: number;
+    max_time?: number;
+  };
+  acceptance_metrics?: { metric_name?: string; target_value?: number; tolerance?: number }[] | null;
+  safety_notes?: string[] | null;
+  note?: string;
+};
+
+function parsePlanSummary(content: string): PlanSummary | null {
+  try {
+    const parsed = JSON.parse(content);
+    return typeof parsed === 'object' && parsed ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function inferComputeTarget(messages: Message[], chosen?: ComputeTarget): ComputeTarget | undefined {
+  if (chosen) return chosen;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.kind === 'approval_request') {
+      const plan = parsePlanSummary(m.content);
+      if (plan?.compute_target === 'slurm' || plan?.compute_target === 'local') {
+        return plan.compute_target;
+      }
+    }
+    if (m.role === 'assistant' && m.content.includes('RIS cluster')) return 'slurm';
+    if (m.role === 'assistant' && m.content.includes('this server')) return 'local';
+  }
+  return undefined;
+}
 
 export const ChatScreen: React.FC = () => {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState('');
+  // Where the run should execute; undefined keeps the runner's default
+  // (locally on the runner host). 'slurm' submits to the WashU RIS cluster.
+  const [computeTarget, setComputeTarget] = useState<ComputeTarget | undefined>(undefined);
+  // The researcher's edits to the Slurm resource request, keyed to the approval
+  // card they were made on so a fresh card reseeds from its own plan.
+  const [slurmEdit, setSlurmEdit] = useState<{ key: string; draft: SlurmDraft } | null>(null);
   const [budget, setBudget] = useState('');  // per-run cost cap (USD); blank => default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +130,34 @@ export const ChatScreen: React.FC = () => {
       ? '✓ Simulation complete — your results are ready.'
       : status === 'rejected'
         ? 'Plan rejected — nothing was executed.'
-        : 'The run ended with an error.';
+        : status === 'cancelled'
+          ? 'Run terminated.'
+          : 'The run ended with an error.';
+  const cancelling = status === 'cancelling';
+
+  const messages = conversation?.messages ?? [];
+  const awaitingApproval = status === 'awaiting_approval';
+  const approvalContent =
+    [...messages].reverse().find((m) => m.kind === 'approval_request')?.content ?? null;
+  const approvalPlan = approvalContent ? parsePlanSummary(approvalContent) : null;
+  const effectiveTarget =
+    inferComputeTarget(messages, computeTarget) ??
+    (approvalPlan?.compute_target === 'slurm' ? 'slurm' : undefined);
+
+  // Editable Slurm fields: the plan's request seeds the values; the
+  // researcher's edits (if made on this approval card) override them.
+  const seededSlurmDraft: SlurmDraft | null = approvalPlan?.slurm_request
+    ? {
+        cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
+        gpu_count: String(approvalPlan.slurm_request.gpu_count ?? 0),
+        ram: String(Math.max(MIN_RAM_GB, approvalPlan.slurm_request.ram ?? 16)),
+        max_time: String(approvalPlan.slurm_request.max_time ?? 0.17),
+      }
+    : null;
+  const slurmDraft =
+    slurmEdit && slurmEdit.key === approvalContent ? slurmEdit.draft : seededSlurmDraft;
+  const setSlurmDraft = (draft: SlurmDraft) =>
+    setSlurmEdit({ key: approvalContent ?? '', draft });
 
   const refresh = useCallback(async (id: string) => {
     try {
@@ -115,7 +211,7 @@ export const ChatScreen: React.FC = () => {
       if (!conversation) {
         const parsed = budget.trim() ? Number(budget) : NaN;
         const maxCost = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-        const created = await apiClient.startConversation(text, maxCost);
+        const created = await apiClient.startConversation(text, computeTarget, maxCost);
         setConversation(created);
       } else {
         await apiClient.sendMessage(conversation.id, text);
@@ -129,12 +225,34 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
+  const handleTerminate = async () => {
+    if (!conversation || cancelling) return;
+    setError(null);
+    try {
+      await apiClient.terminateConversation(conversation.id);
+      await refresh(conversation.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to terminate the run');
+    }
+  };
+
   const handleApproval = async (decision: 'approve' | 'reject') => {
     if (!conversation || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await apiClient.sendApproval(conversation.id, decision);
+      let overrides:
+        | { cpu_count: number; gpu_count: number; ram: number; max_time: number }
+        | undefined;
+      if (decision === 'approve' && effectiveTarget === 'slurm' && slurmDraft) {
+        overrides = {
+          cpu_count: Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8),
+          gpu_count: Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0),
+          ram: Math.max(MIN_RAM_GB, parseInt(slurmDraft.ram, 10) || MIN_RAM_GB),
+          max_time: Math.max(10 / 60, parseFloat(slurmDraft.max_time) || 0.17),
+        };
+      }
+      await apiClient.sendApproval(conversation.id, decision, overrides);
       await refresh(conversation.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to submit decision');
@@ -160,8 +278,6 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
-  const messages = conversation?.messages ?? [];
-  const awaitingApproval = status === 'awaiting_approval';
   // The stages this run reached (so the picker only offers steps that ran).
   const reachedIndex = conversation ? PIPELINE_STATES.indexOf(conversation.current_state) : -1;
 
@@ -178,8 +294,38 @@ export const ChatScreen: React.FC = () => {
         <Text style={styles.title} numberOfLines={1}>
           {conversation?.title ?? 'New simulation'}
         </Text>
-        <View style={{ width: 48 }} />
+        {conversation && isActive ? (
+          <TouchableOpacity
+            style={[styles.terminateBtn, cancelling && styles.disabled]}
+            onPress={handleTerminate}
+            disabled={cancelling}
+            accessibilityRole="button"
+          >
+            <Text style={styles.terminateText}>
+              {cancelling ? 'Terminating…' : 'Terminate'}
+            </Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 48 }} />
+        )}
       </View>
+
+      {(conversation || computeTarget) && (
+        <View style={styles.targetBadgeRow}>
+          <Text
+            style={[
+              styles.targetBadge,
+              effectiveTarget === 'slurm' ? styles.targetBadgeSlurm : styles.targetBadgeLocal,
+            ]}
+          >
+            {effectiveTarget === 'slurm'
+              ? `RIS / Slurm${approvalPlan?.slurm_cluster ? ` · ${approvalPlan.slurm_cluster}` : ''}`
+              : computeTarget === 'slurm'
+                ? 'RIS / Slurm (selected)'
+                : 'This server'}
+          </Text>
+        </View>
+      )}
 
       {conversation && <StateStepper current={conversation.current_state} status={status} />}
 
@@ -197,7 +343,11 @@ export const ChatScreen: React.FC = () => {
           <View style={styles.working}>
             <ActivityIndicator color={C.washuRed} />
             <Text style={styles.workingText}>
-              {status === 'awaiting_input' ? 'Waiting for your answer…' : 'Working…'}
+              {cancelling
+                ? 'Terminating the run…'
+                : status === 'awaiting_input'
+                  ? 'Waiting for your answer…'
+                  : 'Working…'}
             </Text>
           </View>
         )}
@@ -207,14 +357,49 @@ export const ChatScreen: React.FC = () => {
 
       {awaitingApproval ? (
         <View style={styles.approvalBar}>
-          <Text style={styles.approvalLabel}>Approve this plan?</Text>
+          <Text style={styles.approvalLabel}>
+            {effectiveTarget === 'slurm'
+              ? 'Approve this plan for the RIS cluster?'
+              : 'Approve this plan?'}
+          </Text>
+          {effectiveTarget === 'slurm' && slurmDraft && (
+            <View style={styles.slurmEditor}>
+              <Text style={styles.slurmEditorTitle}>Slurm resources (editable)</Text>
+              <View style={styles.slurmRow}>
+                <SlurmField
+                  label="CPUs"
+                  value={slurmDraft.cpu_count}
+                  onChange={(v) => setSlurmDraft({ ...slurmDraft, cpu_count: v })}
+                />
+                <SlurmField
+                  label="GPUs"
+                  value={slurmDraft.gpu_count}
+                  onChange={(v) => setSlurmDraft({ ...slurmDraft, gpu_count: v })}
+                />
+              </View>
+              <View style={styles.slurmRow}>
+                <SlurmField
+                  label={`RAM (GB, min ${MIN_RAM_GB})`}
+                  value={slurmDraft.ram}
+                  onChange={(v) => setSlurmDraft({ ...slurmDraft, ram: v })}
+                />
+                <SlurmField
+                  label="Wall time (hours)"
+                  value={slurmDraft.max_time}
+                  onChange={(v) => setSlurmDraft({ ...slurmDraft, max_time: v })}
+                />
+              </View>
+            </View>
+          )}
           <View style={styles.approvalButtons}>
             <TouchableOpacity
               style={[styles.approveBtn, busy && styles.disabled]}
               onPress={() => handleApproval('approve')}
               accessibilityRole="button"
             >
-              <Text style={styles.approveText}>Approve & run</Text>
+              <Text style={styles.approveText}>
+                {effectiveTarget === 'slurm' ? 'Approve & submit to RIS' : 'Approve & run'}
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.rejectBtn, busy && styles.disabled]}
@@ -252,6 +437,24 @@ export const ChatScreen: React.FC = () => {
         </View>
       ) : (
         <View style={styles.composer}>
+          {/* Compute target is fixed at creation, so only offer it for new runs. */}
+          {!conversation && (
+            <View style={styles.targetBar}>
+              <Text style={styles.targetLabel}>Run on</Text>
+              <View style={styles.targetOptions}>
+                <TargetOption
+                  label="This server"
+                  selected={computeTarget !== 'slurm'}
+                  onPress={() => setComputeTarget(undefined)}
+                />
+                <TargetOption
+                  label="RIS cluster (Slurm)"
+                  selected={computeTarget === 'slurm'}
+                  onPress={() => setComputeTarget('slurm')}
+                />
+              </View>
+            </View>
+          )}
           {!conversation && (
             <View style={styles.budgetRow}>
               <Text style={styles.budgetLabel}>Budget $</Text>
@@ -340,6 +543,40 @@ export const ChatScreen: React.FC = () => {
   );
 };
 
+const SlurmField: React.FC<{
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}> = ({ label, value, onChange }) => (
+  <View style={styles.slurmField}>
+    <Text style={styles.slurmFieldLabel}>{label}</Text>
+    <TextInput
+      style={styles.slurmFieldInput}
+      value={value}
+      onChangeText={onChange}
+      keyboardType="decimal-pad"
+      accessibilityLabel={label}
+    />
+  </View>
+);
+
+const TargetOption: React.FC<{
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+}> = ({ label, selected, onPress }) => (
+  <TouchableOpacity
+    style={[styles.targetOption, selected && styles.targetOptionSelected]}
+    onPress={onPress}
+    accessibilityRole="button"
+    accessibilityState={{ selected }}
+  >
+    <Text style={[styles.targetOptionText, selected && styles.targetOptionTextSelected]}>
+      {label}
+    </Text>
+  </TouchableOpacity>
+);
+
 const StateStepper: React.FC<{ current: string; status?: string }> = ({ current, status }) => {
   const currentIndex = PIPELINE_STATES.indexOf(current);
   return (
@@ -371,6 +608,9 @@ const StateStepper: React.FC<{ current: string; status?: string }> = ({ current,
 
 const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   const isUser = message.role === 'user';
+  if (message.kind === 'terminate') {
+    return <Text style={styles.terminateNote}>You asked to terminate this run.</Text>;
+  }
   if (message.kind === 'approval_request') {
     return <PlanCard content={message.content} />;
   }
@@ -384,36 +624,10 @@ const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   );
 };
 
-interface PlanSummary {
-  summary?: string | null;
-  goal_id?: string | null;
-  target_system?: {
-    formula?: string;
-    kind?: string;
-    crystal?: { name?: string; phase?: string };
-  } | null;
-  requested_property?: string | null;
-  selected_method?: {
-    tool_name?: string;
-    tool_version?: number | string;
-    calculator?: string;
-    libraries?: string[];
-  } | null;
-  cost_estimate?: { min_cost?: number } | null;
-  compute_estimate?: { cpu_hours?: number } | null;
-  acceptance_metrics?: { metric_name?: string; target_value?: number; tolerance?: number }[] | null;
-  safety_notes?: string[] | null;
-}
-
 // Renders the approval-gate plan: leads with the plain-language summary of what
 // the run will do, then the concrete method / system / cost / notes.
 const PlanCard: React.FC<{ content: string }> = ({ content }) => {
-  let plan: PlanSummary | null = null;
-  try {
-    plan = JSON.parse(content) as PlanSummary;
-  } catch {
-    plan = null;
-  }
+  const plan = parsePlanSummary(content);
   if (!plan) {
     return (
       <View style={styles.planCard}>
@@ -450,10 +664,17 @@ const PlanCard: React.FC<{ content: string }> = ({ content }) => {
 
   const metrics = plan.acceptance_metrics ?? [];
   const notes = plan.safety_notes ?? [];
+  const slurm = plan.slurm_request;
 
   return (
     <View style={styles.planCard}>
       <Text style={styles.planTitle}>Proposed execution plan</Text>
+      {plan.compute_target === 'slurm' && (
+        <Text style={styles.planTarget}>
+          Will submit to RIS / Slurm
+          {plan.slurm_cluster ? ` (${plan.slurm_cluster})` : ''}
+        </Text>
+      )}
       {plan.summary ? <Text style={styles.planSummary}>{plan.summary}</Text> : null}
       {sysText ? <PlanRow label="System" value={sysText} /> : null}
       {plan.requested_property ? <PlanRow label="Property" value={plan.requested_property} /> : null}
@@ -461,6 +682,14 @@ const PlanCard: React.FC<{ content: string }> = ({ content }) => {
         <PlanRow label="Method" value={libs ? `${methodText}  ·  ${libs}` : methodText} />
       ) : null}
       {costText ? <PlanRow label="Estimated cost" value={costText} /> : null}
+      {slurm ? (
+        <PlanRow
+          label="Slurm ask"
+          value={`${slurm.cpu_count ?? '—'} CPU, ${slurm.gpu_count ?? 0} GPU, ${
+            slurm.ram ?? '—'
+          } GB RAM, ${slurm.max_time ?? '—'} h`}
+        />
+      ) : null}
       {plan.goal_id ? <PlanRow label="Goal" value={plan.goal_id} /> : null}
       {metrics.length > 0 ? (
         <PlanRow
@@ -503,6 +732,36 @@ const styles = StyleSheet.create({
   },
   back: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', width: 48 },
   title: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
+  terminateBtn: {
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
+    borderRadius: 6,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 4,
+  },
+  terminateText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  terminateNote: {
+    alignSelf: 'center',
+    color: C.textSecondary,
+    fontSize: 12,
+    fontStyle: 'italic',
+    marginVertical: Spacing.one,
+  },
+  targetBadgeRow: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+    backgroundColor: C.backgroundElement,
+  },
+  targetBadge: {
+    alignSelf: 'flex-start',
+    fontSize: 12,
+    fontWeight: '700',
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 4,
+    overflow: 'hidden',
+  },
+  targetBadgeSlurm: { color: C.washuGreen },
+  targetBadgeLocal: { color: C.textSecondary },
   stepper: { maxHeight: 62, backgroundColor: C.backgroundElement, flexGrow: 0 },
   stepperContent: { alignItems: 'center', paddingHorizontal: Spacing.three, gap: Spacing.three },
   step: { alignItems: 'center', gap: 4, paddingVertical: Spacing.two },
@@ -529,6 +788,7 @@ const styles = StyleSheet.create({
     backgroundColor: C.washuWhite,
   },
   planTitle: { fontSize: 14, fontWeight: '700', color: C.washuGreen, marginBottom: Spacing.two },
+  planTarget: { fontSize: 13, fontWeight: '700', color: C.washuRed, marginBottom: Spacing.one },
   planBody: {
     fontSize: 12,
     color: C.text,
@@ -554,6 +814,26 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: C.backgroundElement,
   },
+  targetBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    paddingTop: Spacing.two,
+  },
+  targetLabel: { fontSize: 13, fontWeight: '600', color: C.textSecondary },
+  targetOptions: { flexDirection: 'row', gap: Spacing.one },
+  targetOption: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#DDDDDD',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: 5,
+    backgroundColor: C.washuWhite,
+  },
+  targetOptionSelected: { borderColor: C.washuGreen, backgroundColor: C.washuGreen },
+  targetOptionText: { fontSize: 12, color: C.textSecondary, fontWeight: '600' },
+  targetOptionTextSelected: { color: '#FFFFFF' },
   budgetRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -608,6 +888,26 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   approvalLabel: { fontSize: 15, fontWeight: '600', color: C.text },
+  slurmEditor: {
+    gap: Spacing.two,
+    padding: Spacing.two,
+    backgroundColor: C.backgroundElement,
+    borderRadius: 10,
+  },
+  slurmEditorTitle: { fontSize: 13, fontWeight: '700', color: C.text },
+  slurmRow: { flexDirection: 'row', gap: Spacing.two },
+  slurmField: { flex: 1, gap: 4 },
+  slurmFieldLabel: { fontSize: 11, color: C.textSecondary, fontWeight: '600' },
+  slurmFieldInput: {
+    borderWidth: 1,
+    borderColor: '#DDDDDD',
+    borderRadius: 8,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.one,
+    backgroundColor: C.washuWhite,
+    fontSize: 14,
+    color: C.text,
+  },
   approvalButtons: { flexDirection: 'row', gap: Spacing.two },
   approveBtn: {
     flex: 1,

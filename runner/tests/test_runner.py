@@ -8,7 +8,7 @@ from pathlib import Path
 
 from runner import runner
 from runner.artifacts import capture_artifacts, rematerialize_inputs
-from runner.bridges import DbAsk, PgEventSink, request_plan_approval
+from runner.bridges import DbAsk, PgEventSink, RunCancelled, request_plan_approval
 from runner.pg_store import PgStore
 
 SESSION = "conv-1"
@@ -17,7 +17,8 @@ SESSION = "conv-1"
 class FakeDB:
     """In-memory stand-in for RunnerDB."""
 
-    def __init__(self, approval="approve", clarify="25 degrees C", jobs=None):
+    def __init__(self, approval="approve", clarify="25 degrees C", jobs=None,
+                 terminate=False):
         self.messages = []
         self.events = []
         self.status = None
@@ -28,6 +29,7 @@ class FakeDB:
         self._jobs = list(jobs or [])
         self.sessions = {}
         self.artifacts = []
+        self.terminate = terminate
 
     # messages / status / state
     def add_assistant_message(self, sid, content, *, kind="chat", state=None):
@@ -44,6 +46,9 @@ class FakeDB:
 
     def set_conversation_status(self, sid, status):
         self.status = status
+
+    def terminate_requested(self, sid):
+        return self.terminate
 
     def set_conversation_state(self, sid, state):
         self.state = state
@@ -110,15 +115,23 @@ class FakeOrchestrator:
 class FakeEngine:
     STATE_BUILD = "BUILD"
 
-    def __init__(self, plan=None):
+    def __init__(self, plan=None, *, compute_target="local", slurm_cluster="compute2"):
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
+        self.compute_targets = []  # what process_job forwarded from job params
+        self._compute_target = compute_target
+        self._slurm_cluster = slurm_cluster
+        self.applied_overrides = []
         self.built_with = None  # records build_orchestrator kwargs for assertions
         self.rewound_to = None  # records the rewind target for rerun assertions
         self.approved = False   # set when approve_plan() is called
 
     def build_orchestrator(
-        self, *, session_id, researcher_id, request, ask, sink, store, max_cost=None,
+        self, *, session_id, researcher_id, request, ask, sink, store,
+        compute_target=None, cancel=None, max_cost=None,
     ):
+        self.compute_targets.append(compute_target)
+        if compute_target is not None:
+            self._compute_target = compute_target
         self.built_with = {
             "session_id": session_id, "researcher_id": researcher_id,
             "request": request, "max_cost": max_cost,
@@ -134,6 +147,15 @@ class FakeEngine:
         # A real approve_plan flips the plan_approved guard flag; the fake records
         # that it happened so a test can assert the run was actually approved.
         self.approved = True
+
+    def compute_target_of(self, orch):
+        return self._compute_target
+
+    def slurm_cluster_of(self, orch):
+        return self._slurm_cluster if self._compute_target == "slurm" else None
+
+    def apply_slurm_overrides(self, orch, overrides):
+        self.applied_overrides.append(overrides)
 
     def read_execution_plan(self, orch):
         return self._plan
@@ -178,6 +200,54 @@ class TestProcessJob:
         assert "approval_request" not in [m["kind"] for m in db.messages]
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
+
+    def test_compute_target_forwarded_from_job_params(self):
+        db = FakeDB(approval="approve")
+        engine = FakeEngine()
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start",
+             "params": {"compute_target": "slurm"}},
+            db, engine,
+        )
+        assert engine.compute_targets == ["slurm"]
+        assert any("RIS cluster" in m["content"] for m in db.messages)
+
+    def test_slurm_overrides_applied_on_approve(self):
+        payload = json.dumps({
+            "decision": "approve",
+            "slurm_request": {"cpu_count": 16, "ram": 32, "max_time": 1.0, "gpu_count": 0},
+        })
+        db = FakeDB(approval=payload)
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(
+            {"session_id": SESSION, "kind": "start",
+             "params": {"compute_target": "slurm"}},
+            db, engine,
+        )
+        assert engine.applied_overrides == [
+            {"cpu_count": 16, "ram": 32, "max_time": 1.0, "gpu_count": 0}
+        ]
+        assert any("updated Slurm settings" in m["content"] for m in db.messages)
+
+    def test_terminate_during_approval_wait_cancels_run(self):
+        # The user pressed Terminate while the run sat at the approval gate:
+        # the wait must abort, the conversation settle as 'cancelled' (not
+        # 'error'), and the job finish normally.
+        class TerminatedDB(FakeDB):
+            def user_replies_after(self, sid, after_id, kind=None):
+                if kind == "approval_response":
+                    # Instead of answering the approval card, the user presses
+                    # Terminate; the next cancel check aborts the wait.
+                    self.terminate = True
+                    return []
+                return super().user_replies_after(sid, after_id, kind)
+
+        db = TerminatedDB()
+        runner.process_job({"session_id": SESSION, "kind": "start", "params": {}}, db, FakeEngine())
+        assert db.status == "cancelled"
+        assert "terminated by user" in db.messages[-1]["content"].lower()
+        # leg 2 never ran
+        assert not any(e["event_type"] == "run.completed" for e in db.events)
 
     def test_unsupported_kind_raises(self):
         db = FakeDB()
@@ -278,9 +348,43 @@ class TestBridges:
 
     def test_request_plan_approval_returns_decision(self):
         db = FakeDB(approval="APPROVE")
-        decision = request_plan_approval(db, SESSION, {"cost": 1.0}, sleep=lambda _s: None)
+        decision, overrides = request_plan_approval(
+            db, SESSION, {"cost_estimate": {"min_cost": 1.0}}, sleep=lambda _s: None
+        )
         assert decision == "approve"  # normalized
+        assert overrides is None
         assert db.messages[0]["kind"] == "approval_request"
+        summary = json.loads(db.messages[0]["content"])
+        assert summary["compute_target"] == "local"
+        assert "slurm_request" in summary
+
+    def test_request_plan_approval_parses_slurm_overrides(self):
+        payload = json.dumps({
+            "decision": "approve",
+            "slurm_request": {"cpu_count": 16, "ram": 32, "max_time": 1.0, "gpu_count": 0},
+        })
+        db = FakeDB(approval=payload)
+        decision, overrides = request_plan_approval(
+            db, SESSION, {"slurm_request": {"ram": 16}},
+            compute_target="slurm", slurm_cluster="compute2",
+            sleep=lambda _s: None,
+        )
+        assert decision == "approve"
+        assert overrides["ram"] == 32
+        summary = json.loads(db.messages[0]["content"])
+        assert summary["compute_target"] == "slurm"
+        assert summary["slurm_cluster"] == "compute2"
+
+    def test_wait_aborts_with_run_cancelled_when_terminate_requested(self):
+        db = FakeDB(terminate=True)
+        db.user_replies_after = lambda sid, after_id, kind=None: []
+        ask = DbAsk(db, SESSION, sleep=lambda _s: None,
+                    cancel=lambda: db.terminate_requested(SESSION))
+        try:
+            ask("Which solvent?")
+            raise AssertionError("expected RunCancelled")
+        except RunCancelled:
+            pass
 
     def test_event_sink_persists_and_mirrors_state(self):
         db = FakeDB()
@@ -343,6 +447,38 @@ class TestCaptureArtifacts:
         assert "script" not in names
         assert kinds["run_bundle/main.py"] == "python"
         assert kinds["execution_plan"] == "json"
+
+    def test_nul_bytes_stripped_and_bad_upsert_does_not_abort(self, tmp_path):
+        # Binary outputs (e.g. a fetched .gpw file) carry NUL bytes, which
+        # Postgres TEXT rejects; they must be stripped and one failing upsert
+        # must not lose the remaining artifacts (like execution_result).
+        bundle = tmp_path / "run_bundle_x"
+        bundle.mkdir()
+        (bundle / "aaa.gpw").write_bytes(b"BIN\x00ARY\x00")
+        (bundle / "main.py").write_text("print('hi')")
+        result = tmp_path / "execution_result_x.json"
+        result.write_text('{"status": "success"}')
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                context=types.SimpleNamespace(
+                    artifacts={"run_bundle": str(bundle), "execution_result": str(result)}
+                )
+            )
+        )
+
+        class PickyDB(FakeDB):
+            def upsert_artifact(self, sid, name, content, kind):
+                assert "\x00" not in content  # sanitized before the DB sees it
+                if name.endswith("main.py"):
+                    raise RuntimeError("simulated db failure")
+                super().upsert_artifact(sid, name, content, kind)
+
+        db = PickyDB()
+        count = capture_artifacts(db, "s1", orch)
+        names = {a["name"] for a in db.artifacts}
+        assert count == 2  # gpw (sanitized) + execution_result; main.py skipped
+        assert "execution_result" in names
+        assert "run_bundle/aaa.gpw" in names
 
 
 class TestRematerializeInputs:

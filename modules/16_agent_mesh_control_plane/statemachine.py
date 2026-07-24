@@ -15,6 +15,8 @@ import twain_paths
 
 logger = logging.getLogger(__name__)
 
+from intake.intent_spec import IntentSpec
+from result_interpreter.result_package import ResultPackage
 from states import State, Context, GuardsBroken, InvalidTransition
 from crash_recovery import DataStorage
 from AgentInterface import AgentInterface
@@ -140,7 +142,7 @@ class StateMachine:
                  execution_adapter=None, verify_codegen: bool = False,
                  script_doctor=None, library_available=None, sim_available=None,
                  auto_approve=False, execute_slurm: bool = False,
-                 slurm_cluster: str = None):
+                 slurm_cluster: str = None, should_abort=None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -180,6 +182,11 @@ class StateMachine:
         # run happens even though execute_locally may be off.
         self.execute_slurm = execute_slurm
         self.slurm_cluster = slurm_cluster or "compute2"
+        # Terminate seam: a zero-arg callable that returns True once the
+        # researcher asked to stop the run. The Slurm adapter polls it between
+        # squeue checks so a Terminate press scancels the cluster job instead
+        # of letting it burn its whole wall time.
+        self.should_abort = should_abort
         # When on, the REPAIR stage may call the LLM to repair the synthesized
         # calculator script and proactively scan it for latent bugs. Off by
         # default so offline/seeded/test runs make no network calls there; the
@@ -370,6 +377,24 @@ class StateMachine:
             return text[start:end + 1]
         return text
 
+    def _agent_json(self, prompt: str, *, max_tokens: int = 4096,
+                    retries: int = 1) -> dict:
+        """Call the agent and parse its JSON reply, retrying on a bad payload.
+
+        Intent specs routinely exceed the agent's default 1024-token response
+        cap, which truncates the JSON mid-string (JSONDecodeError: unterminated
+        string) -- so JSON calls get an explicit larger budget, fence/prose
+        stripping, and one clean retry before the error propagates.
+        """
+        last_error = None
+        for _ in range(retries + 1):
+            text = self._agent_text(prompt, max_tokens=max_tokens)
+            try:
+                return json.loads(self._extract_json_object(text))
+            except json.JSONDecodeError as exc:
+                last_error = exc
+        raise last_error
+
     @staticmethod
     def _system_kind(intent: dict) -> str:
         """The target system's representation: 'crystal', 'surface', or 'molecule'.
@@ -442,7 +467,7 @@ class StateMachine:
         # prompt; otherwise fall back to asking on stdin.
         query = self._request if self._request else self._ask_user(self._WELCOME)
         prompt = self.prompt_generator.json_schema_prompt(schema, query)
-        intent = json.loads(self._agent_text(prompt))
+        intent = self._agent_json(prompt)
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
         return State.CLARIFY
 
@@ -484,8 +509,7 @@ class StateMachine:
         answer = self._ask_user(
             f"I need a little more detail before continuing:\n{questions}"
         )
-        text = self._agent_text(self.prompt_generator.modify_json_schema(text, answer))
-        intent = json.loads(text)
+        intent = self._agent_json(self.prompt_generator.modify_json_schema(text, answer))
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
         self._clarify_rounds += 1
         if self._is_confident(intent):
@@ -1004,6 +1028,13 @@ class StateMachine:
                     f"for property '{requested_property}'")
             if calc_entry.heavy:
                 note += " (heavy run -- confirm before executing)"
+                # The generic 10-minute wall default gets a real DFT run killed
+                # at the short partition's limit; give heavy calculators room
+                # (still editable on the approval card). max_time is hours.
+                from plan_synthesizer.plan_synthesizer import HEAVY_WALL_MINUTES
+                heavy_hours = HEAVY_WALL_MINUTES / 60.0
+                if execution_plan.slurm_request.max_time < heavy_hours:
+                    execution_plan.slurm_request.max_time = heavy_hours
             if calc_entry.needs_external_data:
                 note += " (needs external parameter data to run)"
             execution_plan.safety_notes.append(note)
@@ -1306,6 +1337,10 @@ class StateMachine:
             "material_desc": CodegenEngine._material_desc(material),
             "acceptance": plan.get("acceptance_metrics") or [],
             "output_file": "results.csv",
+            # The researcher's own words: lets checks that enforce fast defaults
+            # (e.g. primitive cell) stand down when the researcher explicitly
+            # asked for the expensive variant (conventional cell, supercell, ...).
+            "objective": (intent or {}).get("objective") or plan.get("objective") or "",
         }
 
     def _log_repair(self, report) -> None:
@@ -1467,6 +1502,7 @@ class StateMachine:
         from execution_adapter.cluster_profile import ClusterProfile
         from execution_adapter.slurm_execution_adapter import SlurmExecutionAdapter
         from plan_synthesizer.execution_plan import SlurmRequest
+        from plan_synthesizer.plan_synthesizer import MIN_RAM_GB, MIN_WALL_MINUTES
         try:
             profile = ClusterProfile.load(self.slurm_cluster)
         except (OSError, ValueError, TypeError) as exc:
@@ -1477,9 +1513,34 @@ class StateMachine:
         raw = plan.get("slurm_request")
         if isinstance(raw, dict):
             try:
-                request = SlurmRequest(**raw)
+                # Plan contract: ram is GB, max_time is hours (plan_synthesizer /
+                # schema examples). The Slurm adapter expects MB + minutes.
+                ram_gb = max(MIN_RAM_GB, int(raw.get("ram") or MIN_RAM_GB))
+                max_hours = float(raw.get("max_time") or (MIN_WALL_MINUTES / 60.0))
+                request = SlurmRequest(
+                    cpu_count=int(raw.get("cpu_count") or 8),
+                    gpu_count=int(raw.get("gpu_count") or 0),
+                    max_time=max(MIN_WALL_MINUTES, max_hours * 60.0),
+                    ram=ram_gb * 1024,
+                )
             except (TypeError, ValueError):
                 request = None  # malformed plan request -> adapter default
+        # Pre-provisioned cluster envs: try <envs_root>/<calculator>/bin/python
+        # then <envs_root>/default/bin/python before falling back to a venv --
+        # compiled calculators (GPAW needs libxc) can't be pip-built on nodes.
+        env_pythons = []
+        if profile.envs_root:
+            method = plan.get("selected_method") or {}
+            names = []
+            for key in ("calculator", "tool_name"):
+                name = method.get(key)
+                if isinstance(name, str) and name.strip():
+                    name = name.strip().lower()
+                    if name not in names:
+                        names.append(name)
+            names.append("default")
+            env_pythons = [f"{profile.envs_root}/{n}/bin/python" for n in names]
+
         host = os.environ.get("TWAIN_SLURM_HOST")  # None => profile login node
         return SlurmExecutionAdapter(
             profile,
@@ -1487,7 +1548,36 @@ class StateMachine:
             host=host,
             user=os.environ.get("TWAIN_SLURM_USER"),
             workspace_root=str(self.artifacts_dir),
+            env_pythons=env_pythons,
+            # Poll for as long as the job may legitimately run (its wall time)
+            # plus queue headroom -- otherwise a 4-hour DFT run outlives the
+            # adapter's default 2-hour wait and EXECUTE reports a bogus timeout.
+            max_wait=self.slurm_wait_budget(),
+            # Terminate button: checked between polls; scancels the job.
+            should_abort=self.should_abort,
         )
+
+    # Extra polling headroom on top of the job's wall time: covers time spent
+    # pending in the Slurm queue plus staging/accounting latency.
+    SLURM_QUEUE_MARGIN_SECONDS = 30 * 60
+
+    def slurm_wait_budget(self) -> float:
+        """Seconds EXECUTE should wait on a Slurm job: wall time + queue margin.
+
+        Read from the plan's ``slurm_request`` (max_time is hours). Also used by
+        the orchestrator to stretch the EXECUTE stage timeout so the stage
+        doesn't abort while the adapter is still legitimately polling.
+        """
+        from execution_adapter.slurm_execution_adapter import DEFAULT_MAX_WAIT
+        from plan_synthesizer.plan_synthesizer import MIN_WALL_MINUTES
+        plan = self._load_artifact("execution_plan") or {}
+        raw = plan.get("slurm_request") or {}
+        try:
+            hours = float(raw.get("max_time") or (MIN_WALL_MINUTES / 60.0))
+        except (TypeError, ValueError):
+            hours = MIN_WALL_MINUTES / 60.0
+        return max(DEFAULT_MAX_WAIT,
+                   hours * 3600.0 + self.SLURM_QUEUE_MARGIN_SECONDS)
 
     def _confirm_heavy_execution(self) -> bool:
         """Ask the researcher before running a heavy calculation; True to proceed.
