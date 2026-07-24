@@ -111,7 +111,9 @@ export const ChatScreen: React.FC = () => {
   // Where the run should execute; undefined keeps the runner's default
   // (locally on the runner host). 'slurm' submits to the WashU RIS cluster.
   const [computeTarget, setComputeTarget] = useState<ComputeTarget | undefined>(undefined);
-  const [slurmDraft, setSlurmDraft] = useState<SlurmDraft | null>(null);
+  // The researcher's edits to the Slurm resource request, keyed to the approval
+  // card they were made on so a fresh card reseeds from its own plan.
+  const [slurmEdit, setSlurmEdit] = useState<{ key: string; draft: SlurmDraft } | null>(null);
   const [budget, setBudget] = useState('');  // per-run cost cap (USD); blank => default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -142,6 +144,21 @@ export const ChatScreen: React.FC = () => {
     inferComputeTarget(messages, computeTarget) ??
     (approvalPlan?.compute_target === 'slurm' ? 'slurm' : undefined);
 
+  // Editable Slurm fields: the plan's request seeds the values; the
+  // researcher's edits (if made on this approval card) override them.
+  const seededSlurmDraft: SlurmDraft | null = approvalPlan?.slurm_request
+    ? {
+        cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
+        gpu_count: String(approvalPlan.slurm_request.gpu_count ?? 0),
+        ram: String(Math.max(MIN_RAM_GB, approvalPlan.slurm_request.ram ?? 16)),
+        max_time: String(approvalPlan.slurm_request.max_time ?? 0.17),
+      }
+    : null;
+  const slurmDraft =
+    slurmEdit && slurmEdit.key === approvalContent ? slurmEdit.draft : seededSlurmDraft;
+  const setSlurmDraft = (draft: SlurmDraft) =>
+    setSlurmEdit({ key: approvalContent ?? '', draft });
+
   const refresh = useCallback(async (id: string) => {
     try {
       setConversation(await apiClient.getConversation(id));
@@ -166,20 +183,6 @@ export const ChatScreen: React.FC = () => {
       cancelled = true;
     };
   }, [params.id, conversation]);
-
-  // Seed editable Slurm fields when an approval card arrives.
-  useEffect(() => {
-    if (!awaitingApproval || !approvalContent) return;
-    const plan = parsePlanSummary(approvalContent);
-    const s = plan?.slurm_request;
-    if (!s) return;
-    setSlurmDraft({
-      cpu_count: String(s.cpu_count ?? 8),
-      gpu_count: String(s.gpu_count ?? 0),
-      ram: String(Math.max(MIN_RAM_GB, s.ram ?? 16)),
-      max_time: String(s.max_time ?? 0.17),
-    });
-  }, [awaitingApproval, approvalContent]);
 
   // Poll while the run is active; stop once it reaches a terminal state.
   useEffect(() => {
