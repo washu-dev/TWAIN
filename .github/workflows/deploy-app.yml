@@ -17,7 +17,7 @@ env:
   CLOUDFRONT_DISTRIBUTION_ID: E3PINHJ1G0F5PS
   NODE_VERSION: '20'
   # SSO-only reader role (Terraform: sso_ci_reader_role_arn). Injects the public
-  # EXPO_PUBLIC_AZURE_* identifiers into the build; cannot read other TWAIN secrets.
+  # EXPO_PUBLIC_ENTRA_* identifiers into the build; cannot read other TWAIN secrets.
   TWAIN_SSO_CI_ROLE_ARN: arn:aws:iam::730335203321:role/TWAIN-sso-ci-reader
 
 jobs:
@@ -101,15 +101,15 @@ jobs:
           set -euo pipefail
           client_id=$(aws secretsmanager get-secret-value --secret-id TWAIN/sso/APP_ID    --query SecretString --output text)
           tenant_id=$(aws secretsmanager get-secret-value --secret-id TWAIN/sso/TENANT_ID --query SecretString --output text)
-          echo "EXPO_PUBLIC_AZURE_CLIENT_ID=${client_id}" >> "$GITHUB_ENV"
-          echo "EXPO_PUBLIC_AZURE_TENANT_ID=${tenant_id}" >> "$GITHUB_ENV"
+          echo "EXPO_PUBLIC_ENTRA_CLIENT_ID=${client_id}" >> "$GITHUB_ENV"
+          echo "EXPO_PUBLIC_ENTRA_TENANT_ID=${tenant_id}" >> "$GITHUB_ENV"
           echo "Loaded Entra client/tenant IDs from Secrets Manager."
 
       - name: Build Expo web app
         working-directory: app
         env:
           EXPO_PUBLIC_API_BASE_URL: ${{ secrets.API_BASE_URL }}
-          # EXPO_PUBLIC_AZURE_CLIENT_ID / EXPO_PUBLIC_AZURE_TENANT_ID come from
+          # EXPO_PUBLIC_ENTRA_CLIENT_ID / EXPO_PUBLIC_ENTRA_TENANT_ID come from
           # $GITHUB_ENV (set in the previous step) and are inlined by expo export.
         run: npx expo export --platform web
 
