@@ -267,5 +267,40 @@ class TestInterimTokenAcceptedByApi:
         assert response.json()["data"]["email"] == "a@wustl.edu"
 
 
+class TestEntraConfig:
+    """Lazy resolution of the Entra tenant/audience: env-first, then Secrets Manager."""
+
+    @staticmethod
+    def _reset():
+        auth._sso_config.cache_clear()
+
+    def test_env_takes_precedence_and_skips_secrets(self, monkeypatch):
+        self._reset()
+        monkeypatch.setenv("ENTRA_TENANT_ID", "tenant-xyz")
+        monkeypatch.setenv("ENTRA_API_AUDIENCE", "aud-abc")
+        with patch("auth.get_secret", side_effect=AssertionError("must not read secrets")):
+            assert auth._sso_config() == ("tenant-xyz", "aud-abc")
+        self._reset()
+
+    def test_falls_back_to_secrets_manager(self, monkeypatch):
+        self._reset()
+        monkeypatch.delenv("ENTRA_TENANT_ID", raising=False)
+        monkeypatch.delenv("ENTRA_API_AUDIENCE", raising=False)
+        secrets = {"TWAIN/sso/TENANT_ID": "t-sm ", "TWAIN/sso/APP_ID": " a-sm"}
+        with patch("auth.get_secret", side_effect=lambda k: secrets[k]):
+            assert auth._sso_config() == ("t-sm", "a-sm")  # values are stripped
+        self._reset()
+
+    def test_unconfigured_raises_500(self, monkeypatch):
+        self._reset()
+        monkeypatch.delenv("ENTRA_TENANT_ID", raising=False)
+        monkeypatch.delenv("ENTRA_API_AUDIENCE", raising=False)
+        with patch("auth.get_secret", side_effect=Exception("no aws")), \
+             pytest.raises(HTTPException) as exc:
+            auth._sso_config()
+        assert exc.value.status_code == 500
+        self._reset()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

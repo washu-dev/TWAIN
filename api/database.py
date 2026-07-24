@@ -14,7 +14,7 @@ Access model:
 """
 
 import os
-from functools import lru_cache
+from functools import cache, lru_cache
 
 import boto3
 import psycopg2
@@ -58,6 +58,18 @@ def _secrets_client():
             aws_session_token=creds["SessionToken"],
         )
     return boto3.client("secretsmanager", region_name=AWS_REGION)
+
+
+@cache
+def get_secret(secret_id: str) -> str:
+    """Read a single ``SecretString`` from Secrets Manager (cached per id).
+
+    Used for config identifiers stored outside the DB group — e.g. the public
+    Entra tenant/app ids under ``TWAIN/sso/*`` that ``auth.py`` needs — using the
+    same task-role / assume-role credentials as the DB secrets. Raises on failure
+    so callers can decide whether a missing secret is fatal.
+    """
+    return _secrets_client().get_secret_value(SecretId=secret_id)["SecretString"]
 
 
 @lru_cache(maxsize=1)
