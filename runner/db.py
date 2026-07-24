@@ -174,6 +174,24 @@ class RunnerDB:
             (state, session_id),
         )
 
+    def get_session_owner_email(self, session_id: str) -> str | None:
+        """Email of the researcher who owns this run, or None.
+
+        Joins the run's conversation to its owning user (``conversations.id`` is the
+        session_id; ``conversations.user_id`` → ``users.email``). Used by the
+        notifier to reach the *specific* researcher who left the session, instead of
+        one global ``TWAIN_NOTIFY_EMAIL`` address. Returns None when the session or
+        user is unknown, or the user has no email on file, so the caller can fall
+        back to the configured address.
+        """
+        row = self._query_one(
+            "SELECT u.email FROM conversations c "
+            "JOIN users u ON u.id = c.user_id "
+            "WHERE c.id = %s;",
+            (session_id,),
+        )
+        return row["email"] if row and row.get("email") else None
+
     # ---- messages -------------------------------------------------------------
     def add_assistant_message(
         self, session_id: str, content: str, *, kind: str = "chat", state: str | None = None
