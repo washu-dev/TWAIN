@@ -104,6 +104,13 @@ jobs:
           echo "EXPO_PUBLIC_ENTRA_CLIENT_ID=${client_id}" >> "$GITHUB_ENV"
           echo "EXPO_PUBLIC_ENTRA_TENANT_ID=${tenant_id}" >> "$GITHUB_ENV"
           echo "Loaded Entra client/tenant IDs from Secrets Manager."
+          # ── Access-token mode (do NOT enable until the Entra app registration
+          # exposes the access_as_user scope; requesting a scope that doesn't exist
+          # breaks sign-in). Once WashU IT sets identifierUris + the scope on
+          # CFU-Provost-TWAIN (148f5c4a), uncomment to send the API-audienced
+          # access token instead of the ID token. The API accepts both (aud = the
+          # app/client id in either mode), so no backend change is needed.
+          # echo "EXPO_PUBLIC_ENTRA_API_SCOPE=api://${client_id}/access_as_user" >> "$GITHUB_ENV"
 
       - name: Build Expo web app
         working-directory: app
