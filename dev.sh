@@ -26,6 +26,10 @@ cd "$REPO"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-twaindb}"
+# Use the DB_* env vars below for the API's connection, not AWS Secrets Manager
+# (which has no credentials locally). Without this the API 500s on every
+# DB-backed request. See api/database.py:_load_db_config.
+TWAIN_DB_FROM_ENV="${TWAIN_DB_FROM_ENV:-true}"
 API_PORT="${API_PORT:-8000}"
 AUTH_DISABLED="${AUTH_DISABLED:-true}"
 PG_CONTAINER="${PG_CONTAINER:-twain-pg}"
@@ -92,7 +96,7 @@ else
     sleep 1
   done
 fi
-export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD AUTH_DISABLED TWAIN_EXECUTE_LOCALLY
+export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD TWAIN_DB_FROM_ENV AUTH_DISABLED TWAIN_EXECUTE_LOCALLY
 
 # psql against the dev DB, transparently local or via the container.
 run_psql() {
