@@ -289,6 +289,13 @@ class RunnerDB:
             "SELECT name, content FROM artifacts WHERE session_id = %s;", (session_id,)
         )
 
+    def get_artifact(self, session_id: str, name: str) -> dict | None:
+        """Fetch one persisted artifact's content by name (for a rerun's inputs)."""
+        return self._query_one(
+            "SELECT name, kind, content FROM artifacts WHERE session_id = %s AND name = %s;",
+            (session_id, name),
+        )
+
     # ---- sessions (backing store for the engine) ------------------------------
     def session_get(self, session_id: str) -> dict | None:
         row = self._query_one(

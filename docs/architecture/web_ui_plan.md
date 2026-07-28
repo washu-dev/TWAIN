@@ -130,7 +130,7 @@ The engine defaults to SQLite (`logs/sessions.db`) + JSON files under `logs/`. F
 > The engine already has a **confidential** app registration for the LLM (client-credentials). The web UI needs its own registrations. These require someone with WashU Azure AD app-registration rights.
 
 - **API app registration** ("twain-api"): exposes an App ID URI / scope (e.g. `api://twain-api/access_as_user`). Its Application ID is the JWT **audience** the API validates.
-- **SPA app registration** ("twain-web"): platform = SPA, redirect URIs for `http://localhost:8081` (dev) and `https://d1z5umg4xc2bl8.cloudfront.net` (prod, plus `twain.wustl.edu` when DNS is ready); requests the API scope above. Public client (PKCE, no secret).
+- **SPA app registration** ("twain-web"): platform = SPA, redirect URIs for `http://localhost:3001` (dev) and `https://d1z5umg4xc2bl8.cloudfront.net` (prod, plus `twain.wustl.edu` when DNS is ready); requests the API scope above. Public client (PKCE, no secret).
 
 ### 5.3 API environment variables (names only — values via Secrets Manager / `.env`)
 ```

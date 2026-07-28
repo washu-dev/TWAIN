@@ -1,16 +1,22 @@
 """Unit tests for the async runner — fakes stand in for the DB and the engine, so
 no Postgres or pixi environment is needed. These exercise the suspend/resume
 model: a run advances until it needs the user, then *releases* the process (it
-never blocks polling), and a ``resume`` job picks it back up.
+never blocks polling), and a ``resume`` job picks it back up. They also cover the
+``rerun`` path (rewind to an earlier stage) and the per-run budget heads-up.
 """
 import json
 import threading
 import types
+from pathlib import Path
 
 import pytest
 
 from runner import runner
-from runner.artifacts import capture_artifacts, rehydrate_artifacts
+from runner.artifacts import (
+    capture_artifacts,
+    rehydrate_artifacts,
+    rematerialize_inputs,
+)
 from runner.bridges import (
     DbAsk,
     PgEventSink,
@@ -54,6 +60,11 @@ class FakeDB:
     def add_user(self, content, kind="chat"):  # test-only helper
         return self._add("user", content, kind)
 
+    def preload_approval(self, decision="approve"):  # test-only helper
+        """Seed an already-recorded approval decision (as if the user replied)."""
+        self.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        self.add_user(decision, kind="approval_response")
+
     def max_message_id(self, sid):
         return self.messages[-1]["id"] if self.messages else 0
 
@@ -85,6 +96,12 @@ class FakeDB:
 
     def get_artifacts(self, sid):
         return [{"name": a["name"], "content": a["content"]} for a in self.artifacts]
+
+    def get_artifact(self, sid, name):
+        for a in self.artifacts:
+            if a["name"] == name:
+                return a
+        return None
 
     # -- jobs -------------------------------------------------------------------
     def claim_job(self):
@@ -132,16 +149,19 @@ class FakeOrchestrator:
     Drives INTAKE → (CLARIFY) → pause at BUILD on leg 1, then → (EXECUTE heavy) →
     TERMINATE on leg 2. Calls the injected ``ask`` at CLARIFY / heavy-calc; if it
     raises :class:`SuspendRun` we stay in the current state and return "paused"
-    (exactly what ``Orchestrator.run`` does).
+    (exactly what ``Orchestrator.run`` does). ``run_budget`` mirrors the real
+    orchestrator's per-run cap so the pre-flight budget warning has something to
+    compare the plan estimate against.
     """
 
-    def __init__(self, ask, sink, *, clarifies=False, heavy=False):
+    def __init__(self, ask, sink, *, clarifies=False, heavy=False, max_cost=1.0):
         self.ask = ask
         self.sink = sink
         self.sm = types.SimpleNamespace(
             context=types.SimpleNamespace(artifacts={}),
             current_state=types.SimpleNamespace(name="INTAKE"),
         )
+        self.run_budget = types.SimpleNamespace(max_cost=max_cost)
         self._clarified = not clarifies
         self._heavy = heavy
         self._heavy_done = False
@@ -181,12 +201,34 @@ class FakeEngine:
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
         self._clarifies = clarifies
         self._heavy = heavy
+        self.built_with = None  # records build_orchestrator kwargs for assertions
+        self.rewound_to = None  # records the rewind target for rerun assertions
+        self.approved = False   # set when approve_plan() is called
 
-    def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store):
-        return FakeOrchestrator(ask, sink, clarifies=self._clarifies, heavy=self._heavy)
+    def build_orchestrator(
+        self, *, session_id, researcher_id, request, ask, sink, store, max_cost=None,
+    ):
+        self.built_with = {
+            "session_id": session_id, "researcher_id": researcher_id,
+            "request": request, "max_cost": max_cost,
+        }
+        return FakeOrchestrator(
+            ask, sink, clarifies=self._clarifies, heavy=self._heavy,
+            max_cost=max_cost if max_cost is not None else 1.0,
+        )
 
     def current_state_name(self, orch):
         return orch.sm.current_state.name
+
+    def rewind(self, orch, target_state):
+        # A real rewind resets the run to `target_state`; the fake just records it
+        # (the fresh FakeOrchestrator already starts at leg 0, i.e. the top).
+        self.rewound_to = target_state
+
+    def approve_plan(self, orch):
+        # A real approve_plan flips the plan_approved guard flag; the fake records
+        # that it happened so a test can assert the run was actually approved.
+        self.approved = True
 
     def read_execution_plan(self, orch):
         return self._plan
@@ -276,8 +318,8 @@ class TestApprovalGate:
 
 # ── process_job / the drive loop ──────────────────────────────────────────────
 class TestProcessJob:
-    def _job(self, kind="start"):
-        return {"session_id": SESSION, "kind": kind, "params": {}}
+    def _job(self, kind="start", **params):
+        return {"session_id": SESSION, "kind": kind, "params": params}
 
     def test_clarify_suspends_and_releases(self):
         db = FakeDB()
@@ -298,41 +340,97 @@ class TestProcessJob:
         # Decision already recorded (e.g. arrived before the runner reached BUILD,
         # or this is the resume that carries it): the run crosses the gate + finishes.
         db = FakeDB()
-        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
-        db.add_user("approve", kind="approval_response")
-        runner.process_job(self._job(), db, FakeEngine())
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        assert engine.approved is True          # plan_approved guard flag was set
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
         assert db.messages[-1]["content"] == "Run complete."
 
     def test_rejected_run_stops_before_build(self):
         db = FakeDB()
-        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
-        db.add_user("reject", kind="approval_response")
-        runner.process_job(self._job(), db, FakeEngine())
+        db.preload_approval("reject")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
         assert db.status == "rejected"
+        assert engine.approved is False         # never approved -> guard stays closed
         assert not any(e["event_type"] == "run.completed" for e in db.events)
         assert "rejected" in db.messages[-1]["content"].lower()
 
     def test_auto_run_skips_approval_gate(self, monkeypatch):
         monkeypatch.setenv("TWAIN_AUTO_RUN", "1")
         db = FakeDB()
-        runner.process_job(self._job(), db, FakeEngine())
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
         assert "approval_request" not in db.kinds()
+        assert engine.approved is True          # auto-approve still sets the guard
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
 
     def test_resume_kind_is_supported(self):
         db = FakeDB()
-        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
-        db.add_user("approve", kind="approval_response")
+        db.preload_approval("approve")
         runner.process_job(self._job(kind="resume"), db, FakeEngine())
         assert db.status == "completed"
 
     def test_unsupported_kind_raises(self):
         db = FakeDB()
         with pytest.raises(NotImplementedError):
+            runner.process_job(self._job(kind="frobnicate"), db, FakeEngine())
+
+    def test_rerun_rewinds_then_drives_the_run(self):
+        # A 'rerun' job rewinds the run to the requested stage, posts a marker
+        # message, and drives it forward again through the approval gate.
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        runner.process_job(
+            self._job(kind="rerun", target_state="CLARIFY", researcher_id="u", request="r"),
+            db, engine,
+        )
+        assert engine.rewound_to == "CLARIFY"
+        assert any("CLARIFY" in m["content"] for m in db.messages)  # marker message
+        assert "approval_request" in [m["kind"] for m in db.messages]
+        assert db.status == "completed"
+
+    def test_rerun_requires_target_state(self):
+        db = FakeDB()
+        with pytest.raises(ValueError):
             runner.process_job(self._job(kind="rerun"), db, FakeEngine())
+
+    def test_max_cost_forwarded_from_params(self):
+        # A per-run budget in the job params must reach build_orchestrator so the
+        # orchestrator caps this run's spend (rather than the deployment default).
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        runner.process_job(self._job(request="r", researcher_id="u", max_cost=2.5), db, engine)
+        assert engine.built_with["max_cost"] == 2.5
+
+    def test_no_max_cost_forwards_none(self):
+        # Absent from params => None, so the engine applies the deployment default.
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        assert engine.built_with["max_cost"] is None
+
+    def test_pre_flight_warns_when_estimate_over_budget(self):
+        # Plan estimate ($5) above the run budget ($1) => a warn-only heads-up
+        # posted alongside the plan at the approval gate (the run is not blocked).
+        db = FakeDB()
+        engine = FakeEngine(plan={"cost_estimate": {"min_cost": 5.0}})
+        runner.process_job(self._job(max_cost=1.0), db, engine)
+        assert any("budget" in m["content"].lower() for m in db.messages)
+        assert db.status == "awaiting_approval"  # warned, plan posted, released
+
+    def test_pre_flight_silent_when_estimate_within_budget(self):
+        db = FakeDB()
+        engine = FakeEngine(plan={"cost_estimate": {"min_cost": 0.5}})
+        runner.process_job(self._job(max_cost=1.0), db, engine)
+        assert not any("heads up" in m["content"].lower() for m in db.messages)
+        assert db.status == "awaiting_approval"
 
 
 # ── run_loop ──────────────────────────────────────────────────────────────────
@@ -349,8 +447,7 @@ class TestRunLoop:
 
     def test_resume_job_is_processed(self):
         db = FakeDB(jobs=[{"id": 8, "session_id": SESSION, "kind": "resume", "params": {}}])
-        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
-        db.add_user("approve", kind="approval_response")
+        db.preload_approval("approve")
         runner.run_loop(once=True, db=db, engine_factory=FakeEngine, sleep=lambda _s: None)
         assert (8, "done") in db.jobs_done
 
@@ -573,3 +670,37 @@ class TestRehydrateArtifacts:
         orch = self._orch({"execution_plan": str(plan)})
         assert rehydrate_artifacts(FakeDB(), "s1", orch) == 0
         assert not plan.exists()
+
+
+class TestRematerializeInputs:
+    def test_restores_surviving_upstream_specs_to_disk(self, tmp_path):
+        # A re-run runs in a fresh process: the original artifact files are gone,
+        # so the surviving upstream specs must be rewritten to disk from the DB and
+        # context.artifacts repointed at the fresh paths.
+        db = FakeDB()
+        db.upsert_artifact("s1", "intent_spec", '{"objective": "x"}', "json")
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                artifacts_dir=str(tmp_path),
+                context=types.SimpleNamespace(
+                    artifacts={"intent_spec": "/gone/intent_spec.json"}
+                ),
+            )
+        )
+        restored = rematerialize_inputs(db, "s1", orch)
+        assert restored == 1
+        new_path = orch.sm.context.artifacts["intent_spec"]
+        assert Path(new_path).is_file()
+        assert "objective" in Path(new_path).read_text(encoding="utf-8")
+
+    def test_skips_specs_absent_from_db(self, tmp_path):
+        # A spec that was trimmed (or never captured) is left untouched.
+        db = FakeDB()  # no artifacts stored
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                artifacts_dir=str(tmp_path),
+                context=types.SimpleNamespace(artifacts={"intent_spec": "/gone.json"}),
+            )
+        )
+        assert rematerialize_inputs(db, "s1", orch) == 0
+        assert orch.sm.context.artifacts["intent_spec"] == "/gone.json"  # unchanged

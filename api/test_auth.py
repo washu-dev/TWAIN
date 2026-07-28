@@ -4,8 +4,16 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+import auth
 import database
-from auth import _identity_from_claims, get_current_user, require_admin
+from auth import (
+    _identity_from_claims,
+    email_allowed,
+    get_current_user,
+    mint_interim_token,
+    require_admin,
+    verify_interim_token,
+)
 from main import app
 
 client = TestClient(app)
@@ -164,6 +172,99 @@ class TestUserCrud:
     def test_set_user_role_rejects_bad_role(self):
         with pytest.raises(ValueError, match="role must be one of"):
             database.set_user_role("u1", "root")
+
+
+# ── Interim email auth (pre-SSO) ──────────────────────────────────────────────
+class TestInterimEmailPolicy:
+    def test_allows_configured_domain(self):
+        with patch.object(auth, "INTERIM_ALLOWED_DOMAINS", {"wustl.edu"}), \
+             patch.object(auth, "INTERIM_ALLOWED_EMAILS", set()):
+            assert email_allowed("Alice@WUSTL.EDU") is True
+            assert email_allowed("bob@gmail.com") is False
+
+    def test_allows_explicit_allowlist_email(self):
+        with patch.object(auth, "INTERIM_ALLOWED_DOMAINS", set()), \
+             patch.object(auth, "INTERIM_ALLOWED_EMAILS", {"ext@partner.org"}):
+            assert email_allowed("ext@partner.org") is True
+            assert email_allowed("other@partner.org") is False
+
+    def test_rejects_malformed(self):
+        assert email_allowed("not-an-email") is False
+        assert email_allowed("") is False
+
+
+class TestInterimToken:
+    USER = {"subject": "interim:a@wustl.edu", "email": "a@wustl.edu", "role": "user"}
+
+    def test_mint_and_verify_roundtrip(self):
+        with patch.object(auth, "INTERIM_JWT_SECRET", "s3cret"):
+            claims = verify_interim_token(mint_interim_token(self.USER))
+        assert claims["sub"] == "interim:a@wustl.edu"
+        assert claims["email"] == "a@wustl.edu"
+        assert claims["role"] == "user"
+
+    def test_verify_rejects_wrong_secret(self):
+        with patch.object(auth, "INTERIM_JWT_SECRET", "s3cret"):
+            token = mint_interim_token(self.USER)
+        with patch.object(auth, "INTERIM_JWT_SECRET", "different"), \
+             pytest.raises(HTTPException) as exc:
+            verify_interim_token(token)
+        assert exc.value.status_code == 401
+
+    def test_verify_unconfigured_raises_401(self):
+        with patch.object(auth, "INTERIM_JWT_SECRET", ""), \
+             pytest.raises(HTTPException) as exc:
+            verify_interim_token("whatever")
+        assert exc.value.status_code == 401
+
+
+class TestLoginEndpoint:
+    def test_login_503_when_unconfigured(self):
+        with patch.object(auth, "INTERIM_JWT_SECRET", ""):
+            response = client.post("/api/auth/login", json={"email": "a@wustl.edu"})
+        assert response.status_code == 503
+
+    def test_login_403_when_email_not_allowed(self):
+        with patch.object(auth, "INTERIM_JWT_SECRET", "s3cret"), \
+             patch.object(auth, "INTERIM_ALLOWED_DOMAINS", {"wustl.edu"}), \
+             patch.object(auth, "INTERIM_ALLOWED_EMAILS", set()):
+            response = client.post("/api/auth/login", json={"email": "x@gmail.com"})
+        assert response.status_code == 403
+
+    @patch("main.upsert_user")
+    def test_login_success_returns_token_and_user(self, mock_upsert):
+        mock_upsert.return_value = {
+            "id": "u1", "subject": "interim:a@wustl.edu",
+            "email": "a@wustl.edu", "name": "a@wustl.edu", "role": "user",
+        }
+        with patch.object(auth, "INTERIM_JWT_SECRET", "s3cret"), \
+             patch.object(auth, "INTERIM_ALLOWED_DOMAINS", {"wustl.edu"}):
+            response = client.post("/api/auth/login", json={"email": "A@wustl.edu"})
+        assert response.status_code == 200
+        body = response.json()["data"]
+        assert body["user"]["email"] == "a@wustl.edu"
+        assert body["token"]
+        assert mock_upsert.call_args.args[0] == "interim:a@wustl.edu"
+
+
+class TestInterimTokenAcceptedByApi:
+    @patch("auth.upsert_user")
+    def test_me_accepts_interim_bearer_token(self, mock_upsert):
+        user = {
+            "id": "u1", "subject": "interim:a@wustl.edu",
+            "email": "a@wustl.edu", "name": "a@wustl.edu", "role": "user",
+        }
+        mock_upsert.return_value = user
+        with patch.object(auth, "INTERIM_JWT_SECRET", "s3cret"), \
+             patch.object(auth, "AUTH_DISABLED", False):
+            token = mint_interim_token(
+                {"subject": "interim:a@wustl.edu", "email": "a@wustl.edu", "role": "user"}
+            )
+            response = client.get(
+                "/api/me", headers={"Authorization": f"Bearer {token}"}
+            )
+        assert response.status_code == 200
+        assert response.json()["data"]["email"] == "a@wustl.edu"
 
 
 if __name__ == "__main__":

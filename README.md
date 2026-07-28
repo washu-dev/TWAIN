@@ -8,7 +8,7 @@ built or executed.
 ## Architecture (local dev)
 
 ```
-Browser (localhost:8081)
+Browser (localhost:3001)
    │ HTTP
    ▼
 Web app (Expo, app/) ──► API (FastAPI, api/, :8000) ──► Postgres (:5432, Docker)
@@ -37,7 +37,7 @@ picks it back up when the user replies, so nothing stays pinned waiting on a hum
 This starts everything: Postgres (a native server if `psql` can reach one,
 otherwise the `twain-pg` Docker container — created on first run, with Colima
 started automatically on macOS), the API on :8000 (auth disabled for dev), the
-runner (with real execution enabled), and the web app on :8081. First run also
+runner (with real execution enabled), and the web app on :3001. First run also
 applies DB migrations and installs API/app/pixi dependencies. Ctrl-C stops
 everything together.
 
@@ -57,7 +57,7 @@ Prerequisites:
   `CLIENT_SECRET`) and the WUSTL VPN — the runner needs both to reach the LLM
   gateway
 
-Then open <http://localhost:8081>, describe a simulation, wait ~30 s for the
+Then open <http://localhost:3001>, describe a simulation, wait ~30 s for the
 proposed execution plan, and hit **Approve & run**. If a conversation seems
 idle, check whether it is waiting on your approval before re-prompting. A single
 runner drives one slice at a time and serializes work per conversation, but a
@@ -90,10 +90,10 @@ export DB_HOST=localhost DB_PORT=5432 DB_NAME=twaindb DB_USER=postgres DB_PASSWO
 TWAIN_EXECUTE_LOCALLY=1 pixi run python -m runner.runner
 ```
 
-**Terminal 3 — web app** (port 8081):
+**Terminal 3 — web app** (port 3001):
 
 ```bash
-cd app && npm run start
+cd app && npm run web
 ```
 
 ## Configuration flags
@@ -103,7 +103,6 @@ cd app && npm run start
 | `AUTH_DISABLED=true` | API | skip Entra sign-in; every request is a dev admin. Local only. |
 | `TWAIN_EXECUTE_LOCALLY=1` | runner | actually run the generated script at EXECUTE (otherwise planning-only) |
 | `TWAIN_AUTO_RUN=1` | runner | fully unattended: executes and skips the plan-approval + heavy-calc gates |
-| `TWAIN_EXECUTE_SLURM=1` | runner | submit the run to the Compute2 Slurm cluster instead (see `runner/README.md`) |
 | `TWAIN_VERIFY_CODEGEN=1` | runner | verify + repair generated scripts before running (defaults on when executing) |
 | `DB_HOST/PORT/NAME/USER/PASSWORD` | API + runner | Postgres connection (dev defaults: `localhost:5432`, `twaindb`, `postgres`/`postgres`) |
 
@@ -112,7 +111,7 @@ cd app && npm run start
 See [`docs/README.md`](docs/README.md) for the full documentation index. Highlights:
 
 - `docs/project/GETTING_STARTED.md` — project orientation and repo layout
-- `runner/README.md` — the runner service: Docker offload, Slurm/Compute2 execution, AWS deploy
+- `runner/README.md` — the runner service: Docker offload and AWS deploy
 - `api/QUICKSTART.md`, `app/QUICKSTART.md` — per-service details
 - `docs/backlog/DETAILED_BACKLOG.md` — the story-level backlog
 

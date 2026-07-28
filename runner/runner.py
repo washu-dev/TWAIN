@@ -6,7 +6,8 @@ plan-approval gate — at which point it is checkpointed to the shared session
 store and the process is **released** (the job is done). Nothing blocks waiting
 on a human. When the user replies, the API enqueues a ``resume`` job and a runner
 picks the run back up from its checkpoint. A ``start`` job runs the first slice;
-each ``resume`` runs the next.
+each ``resume`` runs the next. A ``rerun`` job rewinds a finished run to an
+earlier stage and drives it forward again.
 
 Because no process is pinned to a waiting run, one runner serves many runs, and
 any idle runner can resume any run — no work is wasted spinning on ``sleep``.
@@ -28,7 +29,11 @@ import os
 import threading
 import time
 
-from runner.artifacts import capture_artifacts, rehydrate_artifacts
+from runner.artifacts import (
+    capture_artifacts,
+    rehydrate_artifacts,
+    rematerialize_inputs,
+)
 from runner.bridges import DbAsk, PgEventSink, consume_approval, post_plan_for_approval
 from runner.db import JobNotifyWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
@@ -60,12 +65,34 @@ DEFAULT_LEASE_SECONDS = _env_int("TWAIN_JOB_LEASE_SECONDS", 600)
 DEFAULT_HEARTBEAT_SECONDS = _env_int("TWAIN_JOB_HEARTBEAT_SECONDS", 60)
 DEFAULT_MAX_ATTEMPTS = _env_int("TWAIN_JOB_MAX_ATTEMPTS", 3)
 
-SUPPORTED_JOB_KINDS = ("start", "resume")
+SUPPORTED_JOB_KINDS = ("start", "resume", "rerun")
 
 
 def _state_name(state_obj) -> str:
     """Normalize a State enum (real engine) or bare string (tests) to its name."""
     return getattr(state_obj, "name", state_obj)
+
+
+def _budget_warning(plan: dict | None, run_budget) -> str | None:
+    """A warn-only heads-up when a plan's estimated cost exceeds the run budget.
+
+    The budget caps *actual* LLM spend at runtime; the plan's ``cost_estimate``
+    is a pre-run figure, so this only flags the risk — it never blocks the run.
+    Returns the message to post, or ``None`` when there's nothing to warn about.
+    """
+    if not plan or run_budget is None:
+        return None
+    max_cost = getattr(run_budget, "max_cost", None)
+    if not max_cost:
+        return None
+    estimate = (plan.get("cost_estimate") or {}).get("min_cost")
+    if not isinstance(estimate, (int, float)) or estimate <= max_cost:
+        return None
+    return (
+        f"⚠️ Heads up: the estimated cost (~${estimate:.2f}) is above this "
+        f"run's budget of ${max_cost:.2f}. You can still approve it, but the run "
+        f"will stop automatically if actual LLM spend reaches the budget."
+    )
 
 
 def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_notifier) -> None:
@@ -113,10 +140,15 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
     """Handle the BUILD approval gate. True to proceed into execution, else release.
 
     Unattended mode (TWAIN_AUTO_RUN) approves automatically. Otherwise: consume
-    the user's decision if it's in; if not, post the plan and release; a 'reject'
-    stops the run.
+    the user's decision if it's in; if not, post the plan (with a budget heads-up
+    when the estimate is over the run's cap) and release; a 'reject' stops the run.
+    Either way, crossing the gate records a real plan approval
+    (``engine.approve_plan``) so the BUILD→REPAIR / REPAIR→EXECUTE guards let the
+    run proceed — execution truly requires an explicit approval, not merely that
+    the runner reached this point.
     """
     if _env_flag("TWAIN_AUTO_RUN"):
+        engine.approve_plan(orch)
         db.add_assistant_message(
             session_id, "Plan auto-approved (unattended mode). Building and executing…",
             kind="chat", state="BUILD",
@@ -125,26 +157,54 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
 
     decision = consume_approval(db, session_id)
     if decision is None:
-        # No decision yet: show the plan (idempotently), mark awaiting, release.
-        post_plan_for_approval(db, session_id, engine.read_execution_plan(orch), notifier=notifier)
+        # No decision yet: show the plan (idempotently) with any budget warning,
+        # mark awaiting, release.
+        plan = engine.read_execution_plan(orch)
+        warning = _budget_warning(plan, getattr(orch, "run_budget", None))
+        if warning:
+            db.add_assistant_message(session_id, warning, kind="chat", state="PLAN")
+        post_plan_for_approval(db, session_id, plan, notifier=notifier)
         return False
     if decision != "approve":
         db.set_conversation_status(session_id, "rejected")
         db.add_assistant_message(
             session_id,
             "Plan rejected — nothing was built or executed. "
-            "Start a new run, or (soon) rerun from an earlier step with changes.",
+            "Start a new run, or re-run this one from an earlier step "
+            "(e.g. Discover or Plan) to try a different approach.",
             kind="chat",
         )
         return False
+    engine.approve_plan(orch)
     db.add_assistant_message(
         session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
     )
     return True
 
 
+def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier):
+    """Wire an orchestrator for this session with the chat/event/store bridges."""
+    return engine.build_orchestrator(
+        session_id=session_id,
+        researcher_id=params.get("researcher_id", ""),
+        request=params.get("request"),
+        ask=DbAsk(db, session_id, notifier=notifier),
+        sink=PgEventSink(db, session_id),
+        store=PgStore(db),
+        # Per-run budget override (falls back to the deployment default in engine).
+        max_cost=params.get("max_cost"),
+    )
+
+
 def process_job(job: dict, db: RunnerDB, engine=None) -> None:
-    """Drive one slice of a run (start or resume), then capture its artifacts."""
+    """Drive one slice of a run, then capture its artifacts.
+
+    ``start`` runs the first slice of a fresh pipeline; ``resume`` continues a
+    checkpointed run after the user responds. ``rerun`` resumes an existing run,
+    rewinds it to the requested pipeline stage (discarding that stage's and every
+    later stage's output while keeping the earlier work), restores the upstream
+    inputs to disk, and drives it forward again through the same approval gate.
+    """
     engine = engine or default_engine()
     session_id = job["session_id"]
     kind = job.get("kind", "start")
@@ -156,22 +216,30 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     # a suspend pings the specific researcher who left it. Shared by both suspend
     # paths — the CLARIFY/heavy-calc ask bridge and the plan-approval gate.
     notifier = make_notifier(db)
-    # On resume the orchestrator rebuilds its state + context from the session
+    # On resume/rerun the orchestrator rebuilds its state + context from the session
     # store; request/researcher_id are only needed to *start* a run.
-    orch = engine.build_orchestrator(
-        session_id=session_id,
-        researcher_id=params.get("researcher_id", ""),
-        request=params.get("request"),
-        ask=DbAsk(db, session_id, notifier=notifier),
-        sink=PgEventSink(db, session_id),
-        store=PgStore(db),
-    )
-    # Resume-safety: the orchestrator restored state + context (artifact *paths*)
-    # from Postgres, but the files themselves may be absent on this box (fresh
-    # runner, or logs/ was cleaned). Restore them from the DB before driving so
-    # _load_artifact and EXECUTE find their inputs. No-op on a start (nothing
-    # stored yet) and on a same-box resume (files already present).
-    rehydrate_artifacts(db, session_id, orch)
+    orch = _build_orchestrator(engine, db, session_id, params, notifier)
+
+    if kind == "rerun":
+        target = params.get("target_state")
+        if not target:
+            raise ValueError("a 'rerun' job requires a 'target_state' param")
+        # Rewind the restored run to `target`, then restore just the surviving
+        # upstream specs to disk so the re-run's stages find their inputs (a fresh
+        # process has none of the original run's artifact files on disk).
+        engine.rewind(orch, target)
+        rematerialize_inputs(db, session_id, orch)
+        db.add_assistant_message(
+            session_id, f"↩︎ Re-running from {target}…", kind="chat", state=target,
+        )
+    else:
+        # Resume-safety: the orchestrator restored state + context (artifact *paths*)
+        # from Postgres, but the files themselves may be absent on this box (fresh
+        # runner, or logs/ was cleaned). Restore them from the DB before driving so
+        # _load_artifact and EXECUTE find their inputs. No-op on a start (nothing
+        # stored yet) and on a same-box resume (files already present).
+        rehydrate_artifacts(db, session_id, orch)
+
     try:
         _drive_run(db, session_id, orch, engine, notifier=notifier)
     finally:

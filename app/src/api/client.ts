@@ -47,20 +47,46 @@ export interface ArtifactContent {
   content: string;
 }
 
+// One run's budget snapshot (from the budget.json artifact the orchestrator
+// writes each step). Costs are USD; iterations/wall-time are the run's rails.
+export interface RunBudgetSnapshot {
+  cost: number;
+  max_cost: number;
+  iterations: number;
+  max_iterations: number;
+  elapsed_seconds: number;
+  wall_time_limit_seconds: number;
+}
+
+export interface BudgetArtifact {
+  run?: RunBudgetSnapshot;
+  global?: Record<string, unknown>;
+}
+
 export interface Report {
   conversation: Conversation;
   final_state: string;
   status: ConversationStatus;
   plan: Record<string, unknown> | string | null;
   execution_result: Record<string, unknown> | string | null;
-  budget: Record<string, unknown> | string | null;
+  result: Record<string, unknown> | null;
+  results_dir: string | null;
+  budget: BudgetArtifact | string | null;
   artifacts: ArtifactMeta[];
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  role: 'user' | 'admin';
 }
 
 class APIClient {
   private client: AxiosInstance;
   private token: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
+  private onUnauthorized: (() => void) | null = null;
 
   constructor() {
     this.client = axios.create({
@@ -80,6 +106,16 @@ class APIClient {
       }
       return config;
     });
+    // Drop the session on any 401 so the auth guard routes back to the login screen.
+    this.client.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        if (error?.response?.status === 401) {
+          this.onUnauthorized?.();
+        }
+        return Promise.reject(error);
+      },
+    );
   }
 
   /**
@@ -94,18 +130,33 @@ class APIClient {
     this.token = token;
   }
 
+  setUnauthorizedHandler(handler: (() => void) | null) {
+    this.onUnauthorized = handler;
+  }
+
   setBaseURL(url: string) {
     this.client.defaults.baseURL = url;
   }
 
-  async getGreetings() {
-    const response = await this.client.get('/api/greetings');
+  async health(): Promise<{ status: string }> {
+    const response = await this.client.get('/api/health');
     return response.data;
   }
 
+  // ── Auth ────────────────────────────────────────────────────────────────────
+  // The Entra access token is attached by the request interceptor; this returns
+  // the authenticated user the API resolved from it (identity + role). Doubles as
+  // the token-validity check on app start.
+  async me(): Promise<AuthUser> {
+    const response = await this.client.get('/api/me');
+    return response.data.data;
+  }
+
   // ── Conversations / chat (Phase 1) ─────────────────────────────────────────
-  async startConversation(request: string): Promise<Conversation> {
-    const response = await this.client.post('/api/conversations', { request });
+  async startConversation(request: string, maxCost?: number | null): Promise<Conversation> {
+    const body: { request: string; max_cost?: number } = { request };
+    if (maxCost != null) body.max_cost = maxCost;
+    const response = await this.client.post('/api/conversations', body);
     return response.data.data;
   }
 
@@ -119,6 +170,10 @@ class APIClient {
     return response.data.data;
   }
 
+  async deleteConversation(id: string): Promise<void> {
+    await this.client.delete(`/api/conversations/${id}`);
+  }
+
   async sendMessage(id: string, content: string): Promise<Message> {
     const response = await this.client.post(`/api/conversations/${id}/messages`, {
       content,
@@ -130,6 +185,13 @@ class APIClient {
     const response = await this.client.post(`/api/conversations/${id}/approval`, {
       decision,
     });
+    return response.data.data;
+  }
+
+  // Re-run a finished conversation from an earlier pipeline stage. Resets that
+  // stage and everything after it; returns the conversation back in `running`.
+  async rerunConversation(id: string, state: string): Promise<Conversation> {
+    const response = await this.client.post(`/api/conversations/${id}/rerun`, { state });
     return response.data.data;
   }
 
