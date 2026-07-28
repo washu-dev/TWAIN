@@ -23,6 +23,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:8081",
         "http://localhost:3000",
+        "http://localhost:3001",  # app/package.json "web" script pins this port
         "http://localhost:3002",
         "https://d1z5umg4xc2bl8.cloudfront.net",
     ],

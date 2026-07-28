@@ -35,7 +35,7 @@ class FakeDB:
         self._jobs = list(jobs or [])
         self.sessions = {}
         self.artifacts = []
-        self.owner_email = None  # what get_session_owner_email returns
+        self.owner = None  # {"email", "name", "phone"} that owner_contact returns
         self._reap_batches = []  # each run_loop reap() call pops one batch of dead jobs
         self._next_id = 1
 
@@ -74,8 +74,8 @@ class FakeDB:
     def set_conversation_state(self, sid, state):
         self.state = state
 
-    def get_session_owner_email(self, sid):
-        return self.owner_email
+    def owner_contact(self, sid):
+        return self.owner
 
     def insert_run_event(self, sid, event_type, payload, seq=None):
         self.events.append({"event_type": event_type, "payload": payload})
@@ -573,145 +573,3 @@ class TestRehydrateArtifacts:
         orch = self._orch({"execution_plan": str(plan)})
         assert rehydrate_artifacts(FakeDB(), "s1", orch) == 0
         assert not plan.exists()
-
-
-class TestPerUserNotificationRouting:
-    """The SES backend emails the run's *owner*, falling back to the global address."""
-
-    def test_resolve_recipient_prefers_owner(self, monkeypatch):
-        from runner import notifications
-
-        monkeypatch.setattr(notifications, "_owner_email", lambda sid: "owner@wustl.edu")
-        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "global@twain.dev")
-        assert notifications._resolve_recipient(SESSION) == "owner@wustl.edu"
-
-    def test_resolve_recipient_falls_back_to_global(self, monkeypatch):
-        from runner import notifications
-
-        monkeypatch.setattr(notifications, "_owner_email", lambda sid: None)
-        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "global@twain.dev")
-        assert notifications._resolve_recipient(SESSION) == "global@twain.dev"
-
-    def test_owner_email_lookup_never_raises(self, monkeypatch):
-        """A DB blow-up (down, or a non-UUID session id) degrades to None, not a crash."""
-        from runner import notifications
-
-        class Boom:
-            def get_session_owner_email(self, sid):
-                raise RuntimeError("db is down")
-
-        monkeypatch.setattr("runner.db.RunnerDB", Boom)
-        assert notifications._owner_email("not-a-uuid") is None
-
-    def test_ses_sends_to_the_owner(self, monkeypatch):
-        from runner import notifications
-
-        sent = {}
-
-        class FakeSes:
-            def send_email(self, **kwargs):
-                sent.update(kwargs)
-
-        monkeypatch.setattr(notifications, "_owner_email", lambda sid: "owner@wustl.edu")
-        monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
-        monkeypatch.setitem(__import__("sys").modules, "boto3",
-                            types.SimpleNamespace(client=lambda *a, **k: FakeSes()))
-
-        notifications._notify_ses(SESSION, "approval", "Your plan is ready.")
-        assert sent["Destination"] == {"ToAddresses": ["owner@wustl.edu"]}
-        assert sent["Source"] == "twain@twain.dev"
-
-    def test_ses_errors_when_no_recipient(self, monkeypatch):
-        from runner import notifications
-
-        monkeypatch.setattr(notifications, "_owner_email", lambda sid: None)
-        monkeypatch.delenv("TWAIN_NOTIFY_EMAIL", raising=False)
-        with pytest.raises(RuntimeError, match="no recipient"):
-            notifications._notify_ses(SESSION, "approval", "x")
-
-
-class TestSendGridBackend:
-    """The sendgrid backend POSTs to the run owner via the SendGrid HTTP API."""
-
-    def _no_env_file(self, monkeypatch):
-        from runner import notifications
-
-        # Don't let a real repo .env leak into the test's env resolution.
-        monkeypatch.setattr(notifications, "_ensure_env_loaded", lambda: None)
-
-    def test_sends_to_owner_with_bearer_key(self, monkeypatch):
-        from runner import notifications
-
-        self._no_env_file(monkeypatch)
-        captured = {}
-
-        class FakeResp:
-            status = 202
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-        def fake_urlopen(request, timeout=None):
-            captured["url"] = request.full_url
-            captured["auth"] = request.headers["Authorization"]
-            captured["body"] = json.loads(request.data.decode())
-            return FakeResp()
-
-        monkeypatch.setattr(notifications, "_resolve_recipient", lambda sid: "owner@wustl.edu")
-        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
-        monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
-        monkeypatch.setattr(notifications.urllib.request, "urlopen", fake_urlopen)
-
-        notifications._notify_sendgrid(SESSION, "approval", "Your plan is ready.")
-
-        assert captured["url"] == notifications.SENDGRID_API_URL
-        assert captured["auth"] == "Bearer SG.secret"
-        assert captured["body"]["personalizations"][0]["to"][0]["email"] == "owner@wustl.edu"
-        assert captured["body"]["from"]["email"] == "twain@twain.dev"
-        assert "waiting for your approval" in captured["body"]["subject"]
-
-    def test_dispatch_via_default_notifier(self, monkeypatch):
-        """backend=sendgrid routes default_notifier to the SendGrid path."""
-        from runner import notifications
-
-        called = {}
-        monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "sendgrid")
-        monkeypatch.setattr(
-            notifications, "_notify_sendgrid",
-            lambda sid, reason, msg: called.update(sid=sid, reason=reason),
-        )
-        notifications.default_notifier(SESSION, "input", "Which solvent?")
-        assert called == {"sid": SESSION, "reason": "input"}
-
-    def test_requires_api_key(self, monkeypatch):
-        from runner import notifications
-
-        self._no_env_file(monkeypatch)
-        monkeypatch.delenv("TWAIN_SENDGRID_API_KEY", raising=False)
-        with pytest.raises(RuntimeError, match="TWAIN_SENDGRID_API_KEY"):
-            notifications._notify_sendgrid(SESSION, "approval", "x")
-
-    def test_requires_verified_sender(self, monkeypatch):
-        from runner import notifications
-
-        self._no_env_file(monkeypatch)
-        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
-        monkeypatch.setattr(notifications, "_resolve_recipient", lambda sid: "owner@wustl.edu")
-        monkeypatch.delenv("TWAIN_NOTIFY_FROM", raising=False)
-        with pytest.raises(RuntimeError, match="TWAIN_NOTIFY_FROM"):
-            notifications._notify_sendgrid(SESSION, "approval", "x")
-
-    def test_notify_failure_never_propagates(self, monkeypatch):
-        """A SendGrid outage must not fail (or unpause) the run."""
-        from runner import notifications
-
-        monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "sendgrid")
-
-        def boom(*a, **k):
-            raise RuntimeError("sendgrid is down")
-
-        monkeypatch.setattr(notifications, "_notify_sendgrid", boom)
-        notifications.default_notifier(SESSION, "approval", "x")  # swallowed, no raise

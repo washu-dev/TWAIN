@@ -19,16 +19,18 @@ is trivial to fake in tests and swap per deployment. The default dispatches on
   Secrets Manager). Sender in ``TWAIN_NOTIFY_FROM`` (a SendGrid-verified sender).
   No AWS or extra pip dependency — it POSTs with stdlib ``urllib``.
 
-``boto3`` (and, for per-user routing, ``RunnerDB``) are imported lazily, only when
-an AWS backend is selected, so the default ``log`` path keeps the runner
-import-light and dependency-free.
+``boto3`` is imported lazily, only when an AWS backend is selected, so the default
+``log`` path keeps the runner import-light and dependency-free.
 
-Per-user routing: the SES backend emails the *specific* researcher who owns the
-run — resolved from the ``users`` table via the run's conversation — so a
-suspended run reaches the person who left it, not one global inbox. It falls back
-to ``TWAIN_NOTIFY_EMAIL`` when the owner has no email on file (or the lookup
-fails). SNS still publishes to a single topic (``users`` has no phone column yet),
-which is the right fan-out target for SMS until per-user phone numbers exist.
+Per-user routing (Phase 2): the notifier reaches the *specific* researcher who
+owns the run, not one global inbox/topic. :func:`make_notifier` resolves the
+owner's contact (``{"email", "name", "phone"}``) from the ``users`` table via the
+run's conversation and passes it as ``recipient``; each backend then targets it —
+SES/SendGrid email ``recipient["email"]`` and SNS texts ``recipient["phone"]``
+directly. Every target falls back to the configured global address/topic
+(``TWAIN_NOTIFY_EMAIL`` / ``TWAIN_NOTIFY_SNS_TOPIC_ARN``) when the owner has no
+contact on file, and a lookup failure degrades to that fallback rather than
+failing the run.
 """
 import json
 import logging
@@ -60,69 +62,89 @@ def _compose(session_id: str, reason: str, message: str) -> tuple[str, str]:
     return subject, body
 
 
-def default_notifier(session_id: str, reason: str, message: str) -> None:
-    """Dispatch a suspend notification via the configured backend.
+def make_notifier(db):
+    """Build a notifier that targets each run's *owner*, resolved via ``db``.
 
-    Never raises: a notification failure must not fail (or unpause) the run — the
-    user can always come back on their own — so problems are logged, not thrown.
+    Returns a ``(session_id, reason, message) -> None`` callable — the interface
+    the bridges expect — that looks up the owner's contact through
+    ``db.owner_contact(session_id)`` and hands it to :func:`default_notifier` as
+    ``recipient``. A lookup failure degrades to ``recipient=None`` (so the backend
+    uses the configured global fallback): routing must never fail the run.
+    """
+    def _notifier(session_id: str, reason: str, message: str) -> None:
+        try:
+            recipient = db.owner_contact(session_id)
+        except Exception as exc:  # noqa: BLE001 -- routing must never fail the notify
+            logger.warning("[notify] owner lookup failed for %s: %s", session_id, exc)
+            recipient = None
+        default_notifier(session_id, reason, message, recipient=recipient)
+
+    return _notifier
+
+
+def _recipient_email(recipient: dict | None) -> str | None:
+    """The owner's email if on file, else the configured global fallback address."""
+    return (recipient or {}).get("email") or os.getenv("TWAIN_NOTIFY_EMAIL")
+
+
+def default_notifier(
+    session_id: str, reason: str, message: str, recipient: dict | None = None
+) -> None:
+    """Dispatch a suspend notification to the run's owner via the configured backend.
+
+    ``recipient`` is the owner's contact (``{"email", "name", "phone"}``) as
+    resolved by :func:`make_notifier`; any field may be None, in which case the
+    backend falls back to the configured global address/topic. Never raises: a
+    notification failure must not fail (or unpause) the run — the user can always
+    come back on their own — so problems are logged, not thrown.
     """
     backend = os.getenv("TWAIN_NOTIFY_BACKEND", "log").strip().lower()
     try:
         if backend == "sns":
-            _notify_sns(session_id, reason, message)
+            _notify_sns(session_id, reason, message, recipient)
         elif backend == "ses":
-            _notify_ses(session_id, reason, message)
+            _notify_ses(session_id, reason, message, recipient)
         elif backend == "sendgrid":
-            _notify_sendgrid(session_id, reason, message)
+            _notify_sendgrid(session_id, reason, message, recipient)
         else:
             if backend != "log":
                 logger.warning("[notify] unknown TWAIN_NOTIFY_BACKEND %r; logging only", backend)
             subject, body = _compose(session_id, reason, message)
-            logger.info("[notify] %s — %s | %s", session_id, subject, body)
+            to_addr = _recipient_email(recipient)
+            logger.info(
+                "[notify] %s → %s — %s | %s",
+                session_id, to_addr or "<no recipient>", subject, body,
+            )
     except Exception as exc:  # noqa: BLE001 -- notifications are best-effort
         logger.warning("[notify] failed to notify for %s (%s): %s", session_id, reason, exc)
 
 
-def _notify_sns(session_id: str, reason: str, message: str) -> None:
+def _notify_sns(session_id: str, reason: str, message: str, recipient: dict | None = None) -> None:
+    phone = (recipient or {}).get("phone")
     topic = os.getenv("TWAIN_NOTIFY_SNS_TOPIC_ARN")
-    if not topic:
-        raise RuntimeError("TWAIN_NOTIFY_BACKEND=sns but TWAIN_NOTIFY_SNS_TOPIC_ARN is unset")
+    if not phone and not topic:
+        raise RuntimeError(
+            "TWAIN_NOTIFY_BACKEND=sns but no target "
+            "(run owner has no phone and TWAIN_NOTIFY_SNS_TOPIC_ARN is unset)"
+        )
     import boto3  # lazy: only when the SNS backend is actually used
 
     subject, body = _compose(session_id, reason, message)
     client = boto3.client("sns", region_name=os.getenv("AWS_REGION", "us-east-1"))
-    client.publish(TopicArn=topic, Subject=subject[:100], Message=body)
+    if phone:
+        # A known phone wins over the topic: SMS the run's owner directly.
+        client.publish(PhoneNumber=phone, Message=body)
+    else:
+        client.publish(TopicArn=topic, Subject=subject[:100], Message=body)
 
 
-def _owner_email(session_id: str) -> str | None:
-    """Best-effort email of the run's owner, or None. Never raises.
-
-    Lazy-imports ``RunnerDB`` so the ``log`` backend and the unit tests stay
-    DB-free; any lookup failure (unknown session, DB down, non-UUID id) degrades
-    to None so the caller falls back to the configured global address.
-    """
-    try:
-        from runner.db import RunnerDB
-
-        return RunnerDB().get_session_owner_email(session_id)
-    except Exception as exc:  # noqa: BLE001 -- routing must never fail the notify
-        logger.warning("[notify] owner-email lookup failed for %s: %s", session_id, exc)
-        return None
-
-
-def _resolve_recipient(session_id: str) -> str | None:
-    """Who to email for this run: its owner, else the global TWAIN_NOTIFY_EMAIL."""
-    return _owner_email(session_id) or os.getenv("TWAIN_NOTIFY_EMAIL")
-
-
-def _notify_ses(session_id: str, reason: str, message: str) -> None:
-    to_addr = _resolve_recipient(session_id)
-    from_addr = os.getenv("TWAIN_NOTIFY_FROM", to_addr)
+def _notify_ses(session_id: str, reason: str, message: str, recipient: dict | None = None) -> None:
+    to_addr = _recipient_email(recipient)
     if not to_addr:
-        raise RuntimeError(
-            "TWAIN_NOTIFY_BACKEND=ses but no recipient "
-            "(run owner has no email and TWAIN_NOTIFY_EMAIL is unset)"
-        )
+        # No owner email and no configured default: best-effort, so log and skip.
+        logger.info("[notify] SES: no recipient for %s; skipping", session_id)
+        return
+    from_addr = os.getenv("TWAIN_NOTIFY_FROM", to_addr)
     import boto3  # lazy: only when the SES backend is actually used
 
     subject, body = _compose(session_id, reason, message)
@@ -151,10 +173,12 @@ def _ensure_env_loaded() -> None:
         pass
 
 
-def _notify_sendgrid(session_id: str, reason: str, message: str) -> None:
+def _notify_sendgrid(
+    session_id: str, reason: str, message: str, recipient: dict | None = None
+) -> None:
     """Email the run's owner via the SendGrid HTTP API.
 
-    Recipient is the run owner (per-user routing), falling back to
+    Recipient is the run owner (``recipient["email"]``), falling back to
     ``TWAIN_NOTIFY_EMAIL``. Requires ``TWAIN_SENDGRID_API_KEY`` and a
     SendGrid-verified sender in ``TWAIN_NOTIFY_FROM``.
     """
@@ -165,12 +189,11 @@ def _notify_sendgrid(session_id: str, reason: str, message: str) -> None:
             "TWAIN_NOTIFY_BACKEND=sendgrid but TWAIN_SENDGRID_API_KEY is unset "
             "(put it in the repo-root .env, or the deployment's secret store)"
         )
-    to_addr = _resolve_recipient(session_id)
+    to_addr = _recipient_email(recipient)
     if not to_addr:
-        raise RuntimeError(
-            "TWAIN_NOTIFY_BACKEND=sendgrid but no recipient "
-            "(run owner has no email and TWAIN_NOTIFY_EMAIL is unset)"
-        )
+        # No owner email and no configured default: best-effort, so log and skip.
+        logger.info("[notify] SendGrid: no recipient for %s; skipping", session_id)
+        return
     from_addr = os.getenv("TWAIN_NOTIFY_FROM")
     if not from_addr:
         raise RuntimeError(
@@ -191,7 +214,7 @@ def _sendgrid_post(api_key: str, from_addr: str, to_addr: str, subject: str, bod
             "content": [{"type": "text/plain", "value": body}],
         }
     ).encode("utf-8")
-    request = urllib.request.Request(
+    request = urllib.request.Request(  # noqa: S310 (fixed https SendGrid API URL)
         SENDGRID_API_URL,
         data=payload,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},

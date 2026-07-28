@@ -32,7 +32,7 @@ from runner.artifacts import capture_artifacts, rehydrate_artifacts
 from runner.bridges import DbAsk, PgEventSink, consume_approval, post_plan_for_approval
 from runner.db import JobNotifyWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
-from runner.notifications import default_notifier
+from runner.notifications import default_notifier, make_notifier
 from runner.pg_store import PgStore
 
 # Safety-net poll cadence for the loop. With LISTEN/NOTIFY the runner wakes the
@@ -152,13 +152,17 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         raise NotImplementedError(f"job kind '{kind}' is not supported yet")
 
     params = job.get("params") or {}
+    # Owner-targeted notifications (Phase 2): resolve the run's owner via the DB so
+    # a suspend pings the specific researcher who left it. Shared by both suspend
+    # paths — the CLARIFY/heavy-calc ask bridge and the plan-approval gate.
+    notifier = make_notifier(db)
     # On resume the orchestrator rebuilds its state + context from the session
     # store; request/researcher_id are only needed to *start* a run.
     orch = engine.build_orchestrator(
         session_id=session_id,
         researcher_id=params.get("researcher_id", ""),
         request=params.get("request"),
-        ask=DbAsk(db, session_id),
+        ask=DbAsk(db, session_id, notifier=notifier),
         sink=PgEventSink(db, session_id),
         store=PgStore(db),
     )
@@ -169,7 +173,7 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     # stored yet) and on a same-box resume (files already present).
     rehydrate_artifacts(db, session_id, orch)
     try:
-        _drive_run(db, session_id, orch, engine)
+        _drive_run(db, session_id, orch, engine, notifier=notifier)
     finally:
         # Best-effort: persist the specs + generated code so the report can show
         # them (also on a suspend, so partial artifacts are visible while waiting).

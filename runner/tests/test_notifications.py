@@ -5,6 +5,7 @@ the SES/SNS backends, a fake ``boto3`` is installed into ``sys.modules`` so we c
 assert the dispatch targets the run *owner* (their email / phone) and falls back
 to the configured default address when the owner has no contact on file.
 """
+import json
 import sys
 import types
 
@@ -143,3 +144,125 @@ class TestSnsBackend:
         default_notifier(SESSION, "input", "Q", recipient={"phone": None})
         assert fake_boto3.published[0]["TopicArn"] == "arn:aws:sns:us-east-1:1:t"
         assert "PhoneNumber" not in fake_boto3.published[0]
+
+
+# ── SendGrid backend: POST to the owner via the SendGrid HTTP API ─────────────
+class TestSendGridBackend:
+    def _no_env_file(self, monkeypatch):
+        # Don't let a real repo .env leak into the test's env resolution.
+        monkeypatch.setattr(notifications, "_ensure_env_loaded", lambda: None)
+
+    def test_sends_to_owner_with_bearer_key(self, monkeypatch):
+        self._no_env_file(monkeypatch)
+        captured = {}
+
+        class FakeResp:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            captured["url"] = request.full_url
+            captured["auth"] = request.headers["Authorization"]
+            captured["body"] = json.loads(request.data.decode())
+            return FakeResp()
+
+        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
+        monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
+        monkeypatch.setattr(notifications.urllib.request, "urlopen", fake_urlopen)
+
+        notifications._notify_sendgrid(
+            SESSION, "approval", "Your plan is ready.",
+            recipient={"email": "owner@wustl.edu"},
+        )
+
+        assert captured["url"] == notifications.SENDGRID_API_URL
+        assert captured["auth"] == "Bearer SG.secret"
+        assert captured["body"]["personalizations"][0]["to"][0]["email"] == "owner@wustl.edu"
+        assert captured["body"]["from"]["email"] == "twain@twain.dev"
+        assert "waiting for your approval" in captured["body"]["subject"]
+
+    def test_falls_back_to_configured_email(self, monkeypatch):
+        self._no_env_file(monkeypatch)
+        captured = {}
+
+        class FakeResp:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
+        monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
+        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "default@wustl.edu")
+        monkeypatch.setattr(
+            notifications.urllib.request, "urlopen",
+            lambda request, timeout=None: captured.update(
+                body=json.loads(request.data.decode())
+            ) or FakeResp(),
+        )
+        notifications._notify_sendgrid(SESSION, "input", "Q", recipient={"email": None})
+        assert captured["body"]["personalizations"][0]["to"][0]["email"] == "default@wustl.edu"
+
+    def test_dispatch_via_default_notifier(self, monkeypatch):
+        """backend=sendgrid routes default_notifier to the SendGrid path, recipient included."""
+        called = {}
+        monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "sendgrid")
+        monkeypatch.setattr(
+            notifications, "_notify_sendgrid",
+            lambda sid, reason, msg, recipient=None: called.update(
+                sid=sid, reason=reason, recipient=recipient
+            ),
+        )
+        default_notifier(SESSION, "input", "Q", recipient={"email": "owner@wustl.edu"})
+        assert called == {
+            "sid": SESSION, "reason": "input", "recipient": {"email": "owner@wustl.edu"}
+        }
+
+    def test_requires_api_key(self, monkeypatch):
+        self._no_env_file(monkeypatch)
+        monkeypatch.delenv("TWAIN_SENDGRID_API_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="TWAIN_SENDGRID_API_KEY"):
+            notifications._notify_sendgrid(
+                SESSION, "approval", "x", recipient={"email": "owner@wustl.edu"}
+            )
+
+    def test_requires_verified_sender(self, monkeypatch):
+        self._no_env_file(monkeypatch)
+        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
+        monkeypatch.delenv("TWAIN_NOTIFY_FROM", raising=False)
+        with pytest.raises(RuntimeError, match="TWAIN_NOTIFY_FROM"):
+            notifications._notify_sendgrid(
+                SESSION, "approval", "x", recipient={"email": "owner@wustl.edu"}
+            )
+
+    def test_no_recipient_is_skipped_not_raised(self, monkeypatch):
+        self._no_env_file(monkeypatch)
+        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
+        monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
+        monkeypatch.delenv("TWAIN_NOTIFY_EMAIL", raising=False)
+        sent = []
+        monkeypatch.setattr(
+            notifications, "_sendgrid_post", lambda *a, **k: sent.append(a)
+        )
+        # No owner email and no configured default: skipped, not raised, no POST.
+        notifications._notify_sendgrid(SESSION, "input", "Q", recipient=None)
+        assert sent == []
+
+    def test_notify_failure_never_propagates(self, monkeypatch):
+        """A SendGrid outage must not fail (or unpause) the run."""
+        monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "sendgrid")
+
+        def boom(*a, **k):
+            raise RuntimeError("sendgrid is down")
+
+        monkeypatch.setattr(notifications, "_notify_sendgrid", boom)
+        # Swallowed by default_notifier's best-effort guard — no exception here.
+        default_notifier(SESSION, "approval", "x", recipient={"email": "o@wustl.edu"})

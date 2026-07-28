@@ -37,9 +37,14 @@ the `twain_jobs` channel; a trigger (`api/migrations/003_job_notify.sql`)
 `NOTIFY`s it the instant a job is queued, so a released runner wakes immediately.
 A generous fallback poll (`--poll`, default 30s) covers any missed notification.
 
-**Notifications** — on each suspend the run reaches out so the user can return
-when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or `sns`/`ses`);
-see `runner/notifications.py`. `TWAIN_APP_URL` adds a deep link back to the run.
+**Notifications** — on each suspend the run reaches out to the *owner* who left
+it (resolved from `users` via the conversation; see `db.owner_contact`) so they
+can return when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or
+`ses`/`sendgrid` email / `sns` SMS); email targets the owner's address and `sns`
+texts their `phone` (migration `005_user_contact.sql`), each falling back to the
+configured global `TWAIN_NOTIFY_EMAIL` / `TWAIN_NOTIFY_SNS_TOPIC_ARN` when the
+owner has no contact on file. See `runner/notifications.py`. `TWAIN_APP_URL` adds
+a deep link back to the run.
 
 **Resume durability** — a run's state + context resume from the Postgres session
 store, and its stage artifacts (intent_spec, execution_plan, the generated run
