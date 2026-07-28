@@ -372,7 +372,54 @@ class ScriptDoctor:
             diags.append(Diagnostic(
                 "placeholder", "warning",
                 f"unfilled template placeholder {token} left in the script."))
+        for name, line in _stale_ase_filter_imports(source):
+            diags.append(Diagnostic(
+                "ase-filters", "error",
+                f"imports {name} from `ase.constraints`, but in ASE >= 3.23 cell "
+                f"filters live in `ase.filters` (use `from ase.filters import "
+                f"{name}`); the old path raises ImportError at runtime.", line))
+        for line in _fixed_occupations_without_numbers(source):
+            diags.append(Diagnostic(
+                "gpaw-occupations", "error",
+                'uses occupations={"name": "fixed"} without a `numbers` array: '
+                'GPAW\'s "fixed" mode requires explicit per-band occupation '
+                'numbers and raises TypeError at calculator init. For a '
+                'frozen-occupations band-structure pass use '
+                '{"name": "fixed-uniform"} instead.', line))
+        diags.extend(self._primitive_cell_diagnostics(source))
         return diags
+
+    def _primitive_cell_diagnostics(self, source: str) -> List[Diagnostic]:
+        """Flag conventional-cell builds the researcher never asked for.
+
+        Plane-wave DFT cost grows ~cubically with the atom count, so a
+        ``crystal(...)`` call with ``primitive_cell=False`` (or omitted -- ASE
+        defaults to the conventional cell) turns a minutes-long bulk-property
+        run into hours (a 24-atom conventional CaPt2 EOS vs the 6-atom
+        primitive cell). The codegen prompt already demands the primitive
+        cell; this makes the rule mechanical. It stands down whenever the
+        researcher's own request/material mentions the conventional cell or a
+        genuinely bigger system (supercell, surface, defect, ...): an explicit
+        instruction always beats the fast default.
+        """
+        asked = " ".join(
+            str(self.brief.get(k) or "")
+            for k in ("objective", "property", "material_desc")
+        ).lower()
+        if any(word in asked for word in _EXPLICIT_CELL_WORDS):
+            return []
+        return [
+            Diagnostic(
+                "primitive-cell", "error",
+                "builds the CONVENTIONAL cell: this `crystal(...)` call must pass "
+                "`primitive_cell=True` for a bulk property (the researcher did not "
+                "ask for a conventional cell or supercell). Run the calculation on "
+                "the primitive cell and convert any conventional-cell quantity "
+                "(e.g. a cubic lattice parameter) from the primitive result in "
+                "code; update any atom-count self-checks/assertions to the "
+                "primitive count.", line)
+            for line in _conventional_cell_calls(source)
+        ]
 
     def smoke(self, source: str) -> SmokeOutcome:
         """Run ``source`` with ``--smoke`` in the sim env and classify the result.
@@ -569,6 +616,94 @@ def _loads_array(text: str):
         except (ValueError, TypeError):
             return None
     return None
+
+
+# Words in the researcher's own request/material that mean the conventional
+# cell (or a bigger system) was asked for deliberately -- the primitive-cell
+# gate must stand down. Substring-matched, lowercase.
+_EXPLICIT_CELL_WORDS = (
+    "conventional", "supercell", "super-cell", "super cell",
+    "surface", "slab", "interface", "grain",
+    "defect", "vacancy", "interstitial", "dopant", "doped", "adsor",
+)
+
+
+# Cell filters that moved from ase.constraints to ase.filters in ASE 3.23.
+# Importing them from the old path raises ImportError on the cluster env --
+# and typically from INSIDE a function the smoke run never calls, so only a
+# static check catches it before the expensive run.
+_MOVED_ASE_FILTERS = frozenset({
+    "ExpCellFilter", "FrechetCellFilter", "UnitCellFilter", "StrainFilter",
+})
+
+
+def _stale_ase_filter_imports(source: str) -> List[Tuple[str, int]]:
+    """(name, line) pairs importing a moved cell filter from ``ase.constraints``."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    found: List[Tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "ase.constraints":
+            for alias in node.names:
+                if alias.name in _MOVED_ASE_FILTERS:
+                    found.append((alias.name, node.lineno))
+    return found
+
+
+def _fixed_occupations_without_numbers(source: str) -> List[int]:
+    """Lines passing GPAW ``occupations={"name": "fixed"}`` with no ``numbers``.
+
+    GPAW's ``"fixed"`` mode means explicit per-band occupation numbers and
+    requires a ``numbers`` array; the frozen-occupations band-structure mode
+    the scripts actually want is ``"fixed-uniform"``. The wrong name raises
+    TypeError only when the calculator initializes -- after the ground-state
+    SCF was already paid for.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+        vals = {k.value: v for k, v in zip(node.keys, node.values)
+                if isinstance(k, ast.Constant)}
+        name = vals.get("name")
+        if (isinstance(name, ast.Constant) and name.value == "fixed"
+                and "numbers" not in keys):
+            lines.append(node.lineno)
+    return lines
+
+
+def _conventional_cell_calls(source: str) -> List[int]:
+    """Line numbers of ``crystal(...)`` calls that build the conventional cell.
+
+    A call counts when ``primitive_cell`` is ``False`` or omitted (ASE's
+    default is the conventional cell). Only bare ``crystal(...)`` /
+    ``*.crystal(...)`` calls are considered -- the ``ase.spacegroup`` builder
+    the synthesized scripts use.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name != "crystal":
+            continue
+        kw = next((k for k in node.keywords if k.arg == "primitive_cell"), None)
+        if kw is None or (isinstance(kw.value, ast.Constant) and kw.value.value is False):
+            lines.append(node.lineno)
+    return lines
 
 
 def _undefined_names(source: str) -> List[Tuple[str, int]]:

@@ -1,105 +1,63 @@
-# Quick Start Guide - TWAIN API
+# TWAIN API — Quick Start
 
-## Step 1: Install Dependencies
+The FastAPI service behind the web UI (conversations, auth, artifacts). It shares
+a Postgres database with the **runner**; its `id` for each conversation is the
+engine's session id. For the full picture see the repo-root `README.md`
+(the "Deploying to AWS" section is the deployment runbook).
+
+## Easiest: the whole stack locally
+
+From the repo root — starts Postgres, applies migrations, and runs the API,
+runner, and web app together:
+```bash
+./dev.sh
+```
+The API comes up on http://localhost:8000 (docs at `/docs`).
+
+## Just the API
+
 ```bash
 cd api
+python -m venv .venv-api && . .venv-api/bin/activate
 pip install -r requirements.txt
+
+# Point at a Postgres instance (see ../.env.example for all variables):
+export DB_HOST=localhost DB_PORT=5432 DB_NAME=twaindb DB_USER=postgres DB_PASSWORD=postgres
+export AUTH_DISABLED=true        # local dev only — injects a dev admin identity
+
+python main.py                   # applies migrations on startup, serves on :8000
 ```
 
-## Step 2: Configure Database
-Edit `.env` with your PostgreSQL credentials:
+The schema is created automatically on startup from `migrations/*.sql`
+(idempotent). To run migrations by hand instead:
 ```bash
-nano .env
+python migrate.py                # or: python migrate.py --dry-run
 ```
+Disable startup migrations with `RUN_MIGRATIONS_ON_STARTUP=false`.
 
-Expected format:
-```
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=twain_db
-DB_USER=postgres
-DB_PASSWORD=your_password_here
-```
+## Test it
 
-## Step 3: Create Database Table
-Run the SQL setup script:
 ```bash
-psql -U postgres -h localhost -d twain_db -f setup.sql
+curl http://localhost:8000/api/health           # {"status":"ok"}
+python -m pytest -q --import-mode=importlib      # the api test suite
 ```
 
-Or manually:
-```bash
-psql -U postgres -h localhost -d twain_db
-```
-
-Then paste:
-```sql
-CREATE TABLE IF NOT EXISTS greetings (
-    id SERIAL PRIMARY KEY,
-    message VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-INSERT INTO greetings (message) VALUES
-    ('Hello, TWAIN!'),
-    ('Welcome to the API'),
-    ('Greetings from FastAPI'),
-    ('Database connection successful!');
-```
-
-## Step 4: Run the API
-```bash
-python main.py
-```
-
-API will be available at: **http://localhost:8000**
-
-## Step 5: Test the API
-
-### Using curl:
-```bash
-# Health check
-curl http://localhost:8000/api/health
-
-# Get greetings
-curl http://localhost:8000/api/greetings
-```
-
-### Using Python:
-```bash
-python -m pytest test_api.py -v
-```
-
-### Interactive API Docs:
-Open in browser: **http://localhost:8000/docs**
-
-## Troubleshooting
-
-### Database Connection Error
-- Verify PostgreSQL is running: `psql -U postgres`
-- Check .env credentials match your setup
-- Ensure twain_db database exists: `createdb -U postgres twain_db`
-
-### Port 8000 Already in Use
-Change port in `main.py`:
-```python
-uvicorn.run(app, host="0.0.0.0", port=8001, reload=True)
-```
-
-### Missing Dependencies
-Reinstall requirements:
-```bash
-pip install -r requirements.txt --force-reinstall
-```
-
-## Files Overview
+## Files
 
 | File | Purpose |
 |------|---------|
-| `main.py` | FastAPI application & endpoints |
-| `database.py` | PostgreSQL connection logic |
-| `.env` | Database credentials (add to .gitignore) |
-| `requirements.txt` | Python dependencies |
-| `test_api.py` | Test suite (pytest) |
-| `setup.sql` | Database table creation script |
-| `README.md` | Full documentation |
+| `main.py` | FastAPI app, routes, startup migration hook |
+| `conversations.py` | Conversation/message/job data access |
+| `auth.py` | Entra SSO + interim login + role checks |
+| `database.py` | Postgres connection (creds via `.env` or Secrets Manager) |
+| `migrate.py` | Idempotent migration runner (startup + CLI) |
+| `migrations/*.sql` | The schema (applied in filename order) |
+
+## Troubleshooting
+
+- **Can't connect to Postgres** — is it running? `./dev.sh` starts one. Check the
+  `DB_*` env vars. Run `python ../scripts/preflight.py` for a full readiness check.
+- **401s on every route** — auth is on but unconfigured. For local dev set
+  `AUTH_DISABLED=true`; for a deploy see the "Auth for a shared/cloud deploy"
+  section of the repo-root `README.md`.
+- **Port 8000 in use** — `uvicorn main:app --port 8001`.

@@ -13,7 +13,7 @@ when the user replies) drives the run onward.
   answer the user gave.
 * :func:`post_plan_for_approval` / :func:`consume_approval` — the plan-approval
   gate, driven at the runner level: post the plan and release, then consume the
-  approve/reject decision on resume.
+  approve/reject decision (and any Slurm overrides the user edited) on resume.
 * :class:`PgEventSink` — a duck-typed event bus: the orchestrator calls
   ``publish(Event, priority)``; we append to ``run_events`` (tailed by the SSE
   endpoint) and mirror state/status onto the conversation row for the UI.
@@ -107,10 +107,13 @@ class DbAsk:
 
 
 def post_plan_for_approval(
-    db: RunnerDB, session_id: str, plan: dict | None, notifier=default_notifier
+    db: RunnerDB, session_id: str, plan: dict | None, notifier=default_notifier,
+    *, compute_target: str | None = None, slurm_cluster: str | None = None,
 ) -> None:
     """Post the plan for the user's decision, mark the run waiting, and release.
 
+    ``compute_target`` / ``slurm_cluster`` enrich the approval card so the UI can
+    show where the run will execute (and, for Slurm, offer editable resources).
     Idempotent per run: if the plan was already posted (a redundant resume) we
     don't post it again, so the user sees one approval request.
     """
@@ -118,36 +121,91 @@ def post_plan_for_approval(
         db.set_conversation_status(session_id, "awaiting_approval")
         return
     db.add_assistant_message(
-        session_id, json.dumps(_plan_summary(plan)), kind="approval_request", state="PLAN"
+        session_id,
+        json.dumps(_plan_summary(plan, compute_target=compute_target,
+                                 slurm_cluster=slurm_cluster)),
+        kind="approval_request", state="PLAN",
     )
     db.set_conversation_status(session_id, "awaiting_approval")
     notifier(session_id, "approval", "Your plan is ready to review and approve.")
 
 
-def consume_approval(db: RunnerDB, session_id: str) -> str | None:
-    """The user's plan decision ('approve'/'reject') if made, else None.
+def consume_approval(db: RunnerDB, session_id: str) -> tuple[str | None, dict | None]:
+    """The user's plan decision + optional Slurm overrides, or ``(None, None)``.
 
-    None means the gate hasn't been answered yet — no plan posted, or one posted
-    and still awaiting the response.
+    ``(None, None)`` means the gate hasn't been answered yet — no plan posted, or
+    one posted and still awaiting the response. Otherwise returns
+    ``(decision, slurm_overrides)`` where decision is ``'approve'``/``'reject'``
+    and overrides is the plan-unit ``slurm_request`` dict the user edited on the
+    approval card (ram in GB, max_time in hours), or None.
     """
-    decision = _fresh_reply(
+    raw = _fresh_reply(
         db, session_id, question_kind="approval_request", reply_kind="approval_response"
     )
-    return decision.strip().lower() if decision else None
+    if raw is None:
+        return None, None
+    return _parse_approval_reply(raw)
 
 
-def _plan_summary(plan: dict | None) -> dict:
-    """Trim an ExecutionPlan artifact to the fields worth showing for approval."""
+def _parse_approval_reply(raw: str) -> tuple[str, dict | None]:
+    """Accept plain ``approve``/``reject`` or a JSON body with optional overrides."""
+    text = (raw or "").strip()
+    try:
+        body = json.loads(text)
+    except (ValueError, TypeError):
+        return text.lower(), None
+    if isinstance(body, dict) and "decision" in body:
+        decision = str(body.get("decision", "")).strip().lower()
+        overrides = body.get("slurm_request")
+        if not isinstance(overrides, dict):
+            overrides = None
+        return decision, overrides
+    return text.lower(), None
+
+
+def _plan_summary(
+    plan: dict | None,
+    *,
+    compute_target: str | None = None,
+    slurm_cluster: str | None = None,
+) -> dict:
+    """Trim an ExecutionPlan artifact to the fields worth showing for approval.
+
+    Reads the fields where they actually live (goal_id under ``metadata``,
+    ``cost_estimate`` / ``compute_estimate`` / ``safety_notes``), and leads with
+    the plan's plain-language ``summary`` of what the run will do. When the run is
+    Slurm-routed it also carries the cluster + units so the UI can offer editable
+    resources on the approval card.
+    """
     if not plan:
-        return {"note": "No execution plan was produced."}
-    return {
-        "goal_id": plan.get("goal_id"),
+        return {
+            "note": "No execution plan was produced.",
+            "compute_target": compute_target or "local",
+        }
+    target = compute_target or "local"
+    metadata = plan.get("metadata") or {}
+    summary = {
+        "compute_target": target,
+        "summary": plan.get("summary"),
+        "goal_id": metadata.get("goal_id"),
+        "target_system": plan.get("target_system"),
+        "requested_property": plan.get("requested_property"),
         "selected_method": plan.get("selected_method"),
-        "cost": plan.get("cost"),
-        "compute_resources": plan.get("compute_resources"),
-        "risk_assessment": plan.get("risk_assessment"),
+        "cost_estimate": plan.get("cost_estimate"),
+        "compute_estimate": plan.get("compute_estimate"),
+        "slurm_request": plan.get("slurm_request"),
         "acceptance_metrics": plan.get("acceptance_metrics"),
+        "safety_notes": plan.get("safety_notes"),
     }
+    if target == "slurm":
+        summary["slurm_cluster"] = slurm_cluster or "compute2"
+        summary["slurm_units"] = {
+            "ram": "GB",
+            "max_time": "hours",
+            "cpu_count": "cores",
+            "gpu_count": "GPUs",
+        }
+    return summary
 
 
 class PgEventSink:

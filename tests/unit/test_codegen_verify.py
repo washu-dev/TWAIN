@@ -91,6 +91,147 @@ class TestStaticDiagnostics:
         assert [n for n, _ in _undefined_names("print(nope)")] == ["nope"]
 
 
+# A runnable script that builds the conventional cell (`primitive_cell` off /
+# missing) -- the fingerprint of the 24-atom CaPt2 EOS that wasted hours on the
+# cluster when the 6-atom primitive cell answers the same question.
+_CONVENTIONAL = """\
+import matgl
+from ase.spacegroup import crystal
+
+def build():
+    return crystal(("Ca", "Pt"), basis=[(0.125,)*3, (0.5,)*3],
+                   spacegroup=227, cellpar=[7.6]*3 + [90]*3,
+                   primitive_cell={pc})
+
+if __name__ == "__main__":
+    build()
+"""
+
+
+class TestStaleAseFilterImportGate:
+    def test_expcellfilter_from_constraints_is_an_error(self):
+        # The fingerprint of Slurm job 2337355: a lazy `from ase.constraints
+        # import ExpCellFilter` inside a function the smoke run never calls,
+        # exploding with ImportError only in the real run (ASE >= 3.23 moved
+        # cell filters to ase.filters).
+        script = (
+            "import matgl\n"
+            "def relax():\n"
+            "    from ase.constraints import ExpCellFilter\n"
+            "if __name__ == '__main__':\n"
+            "    relax()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "ase-filters" and "ase.filters" in d.message
+                   for d in diags)
+
+    def test_import_from_ase_filters_is_clean(self):
+        script = (
+            "import matgl\n"
+            "def relax():\n"
+            "    from ase.filters import ExpCellFilter\n"
+            "if __name__ == '__main__':\n"
+            "    relax()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "ase-filters" for d in diags)
+
+    def test_other_constraints_imports_are_clean(self):
+        # FixAtoms & friends still legitimately live in ase.constraints.
+        script = (
+            "import matgl\n"
+            "from ase.constraints import FixAtoms\n"
+            "if __name__ == '__main__':\n"
+            "    FixAtoms(indices=[0])\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "ase-filters" for d in diags)
+
+
+class TestGpawFixedOccupationsGate:
+    def test_fixed_without_numbers_is_an_error(self):
+        # Fingerprint of Slurm job 2337668: occupations={"name": "fixed"} with
+        # no numbers array raises TypeError at calculator init, after the
+        # ground-state SCF was already paid for.
+        script = (
+            "import matgl\n"
+            "def bands():\n"
+            "    return {'occupations': {'name': 'fixed'}, 'symmetry': 'off'}\n"
+            "if __name__ == '__main__':\n"
+            "    bands()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "gpaw-occupations" and "fixed-uniform" in d.message
+                   for d in diags)
+
+    def test_fixed_uniform_is_clean(self):
+        script = (
+            "import matgl\n"
+            "def bands():\n"
+            "    return {'occupations': {'name': 'fixed-uniform'}}\n"
+            "if __name__ == '__main__':\n"
+            "    bands()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "gpaw-occupations" for d in diags)
+
+    def test_fixed_with_numbers_is_clean(self):
+        script = (
+            "import matgl\n"
+            "def bands():\n"
+            "    return {'occupations': {'name': 'fixed', 'numbers': [2, 2, 0]}}\n"
+            "if __name__ == '__main__':\n"
+            "    bands()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "gpaw-occupations" for d in diags)
+
+
+class TestPrimitiveCellGate:
+    def test_primitive_cell_false_is_an_error(self):
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(
+            _CONVENTIONAL.format(pc="False"))
+        assert any(d.source == "primitive-cell" and d.severity == "error"
+                   for d in diags)
+
+    def test_omitted_primitive_cell_is_an_error(self):
+        # ASE defaults to the conventional cell, so omission is a violation too.
+        script = (
+            "import matgl\n"
+            "from ase.spacegroup import crystal\n"
+            "def build():\n"
+            "    return crystal(('Ca', 'Pt'), spacegroup=227, cellpar=[7.6]*3+[90]*3)\n"
+            "if __name__ == '__main__':\n"
+            "    build()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "primitive-cell" for d in diags)
+
+    def test_primitive_cell_true_is_clean(self):
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(
+            _CONVENTIONAL.format(pc="True"))
+        assert not any(d.source == "primitive-cell" for d in diags)
+
+    def test_explicit_researcher_request_disables_the_gate(self):
+        # Saying "conventional cell" (or supercell/surface/defect...) in the
+        # request wins: the gate must stand down.
+        brief = {**_brief(),
+                 "objective": "bulk modulus of CaPt2 using the conventional cell"}
+        diags = ScriptDoctor(brief=brief).static_diagnostics(
+            _CONVENTIONAL.format(pc="False"))
+        assert not any(d.source == "primitive-cell" for d in diags)
+
+    def test_surface_property_disables_the_gate(self):
+        brief = {**_brief(), "property": "surface_energy"}
+        diags = ScriptDoctor(brief=brief).static_diagnostics(
+            _CONVENTIONAL.format(pc="False"))
+        assert not any(d.source == "primitive-cell" for d in diags)
+
+    def test_script_without_crystal_call_is_clean(self):
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(GUESS)
+        assert not any(d.source == "primitive-cell" for d in diags)
+
+
 class TestClassifySmoke:
     def setup_method(self):
         self.doctor = ScriptDoctor(brief=_brief())

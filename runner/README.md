@@ -31,15 +31,26 @@ responds. No thread is ever pinned to a waiting run.
    now?" confirmation during EXECUTE suspends/resumes the same way.)
 5. Throughout, an event sink writes `run_events` (tailed by the SSE endpoint)
    and mirrors `current_state` / `status` onto the conversation.
+6. **Terminate** (the button in the chat header) posts
+   `POST /api/conversations/{id}/terminate`, which records a `terminate`
+   control message and flips the status to `cancelling`. The runner polls for
+   it between stages, inside the clarify/approval waits, and between Slurm
+   `squeue` polls (where it also `scancel`s the cluster job), then settles the
+   conversation as `cancelled` instead of `error`.
 
 **Waking the runner** — instead of polling every second, the runner `LISTEN`s on
 the `twain_jobs` channel; a trigger (`api/migrations/003_job_notify.sql`)
 `NOTIFY`s it the instant a job is queued, so a released runner wakes immediately.
 A generous fallback poll (`--poll`, default 30s) covers any missed notification.
 
-**Notifications** — on each suspend the run reaches out so the user can return
-when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or `sns`/`ses`);
-see `runner/notifications.py`. `TWAIN_APP_URL` adds a deep link back to the run.
+**Notifications** — on each suspend the run reaches out to the *owner* who left
+it (resolved from `users` via the conversation; see `db.owner_contact`) so they
+can return when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or
+`ses`/`sendgrid` email / `sns` SMS); email targets the owner's address and `sns`
+texts their `phone` (migration `005_user_contact.sql`), each falling back to the
+configured global `TWAIN_NOTIFY_EMAIL` / `TWAIN_NOTIFY_SNS_TOPIC_ARN` when the
+owner has no contact on file. See `runner/notifications.py`. `TWAIN_APP_URL` adds
+a deep link back to the run.
 
 **Resume durability** — a run's state + context resume from the Postgres session
 store, and its stage artifacts (intent_spec, execution_plan, the generated run
@@ -186,6 +197,102 @@ docker run --rm --platform linux/amd64 twain-runner \
 docker run --rm --platform linux/amd64 --env-file .env -e TWAIN_AUTO_RUN=1 \
   -e DB_HOST=host.docker.internal -v "$PWD/logs:/app/logs" twain-runner
 ```
+
+## Run on the Slurm cluster (WashU RIS Compute2)
+When a run exceeds what your laptop (or the Docker route) should carry, EXECUTE
+can submit the built RunBundle to the school's HPC cluster instead
+(Story 5.4). Pick **"RIS cluster (Slurm)"** in the web app's "Run on" selector
+when starting a run (it rides in the job's `compute_target` param), set
+`TWAIN_EXECUTE_SLURM=1` to make it the runner-wide default, or pass `--slurm`
+to the orchestrator CLI:
+
+```bash
+pixi run python modules/07_runtime_orchestrator/orchestrator.py --slurm
+```
+
+What happens at EXECUTE:
+1. **stage** — the bundle is rsynced to
+   `<storage_root>/twain-runs/<session_id>/` on the cluster
+   (`configs/clusters/compute2.json` points at the writable allocation dir);
+2. **submit** — an `#SBATCH` script is rendered from the plan's `slurm_request`
+   (partition auto-selected from CPU/GPU/wall-time; `ml load ris slurm`) and
+   submitted on a login node over SSH;
+3. **wait** — `squeue`/`sacct` are polled (bounded). If the wait budget expires
+   the job is **left running** and the result says how to check on it
+   (`squeue --job <id>`) — a multi-hour job is never killed just because our
+   wait was shorter;
+4. **fetch** — outputs (`results.csv`, the job log) are rsynced back into the
+   session's artifacts dir, and `sacct` Elapsed/MaxRSS land on the execution
+   result for provenance.
+
+The job builds its own venv from the bundle's `requirements.txt` (compute
+nodes have no TWAIN environment), and the smoke test runs first so a missing
+dependency fails in seconds instead of after a long queue wait.
+
+**Compiled calculators (GPAW, DFTB+) can't be pip-installed by the job** —
+GPAW needs libxc headers the compute nodes don't have. For those, provision a
+shared environment once under the profile's `envs_root`
+(`/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs` on compute2); the
+job automatically prefers `<envs_root>/<calculator>/bin/python` (then
+`<envs_root>/<tool>/`, then `<envs_root>/default/`) over building a venv.
+One-time setup on a login node (micromamba needs no modules or sudo):
+
+```bash
+ssh <wustl-key>@c2-login-001.ris.wustl.edu
+cd /storage2/fs1/mdan/Active/dtrc2026-workshop
+# standalone micromamba binary (no install)
+curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+  | tar -xj bin/micromamba
+# micromamba needs ABSOLUTE prefixes (-p): package post-link scripts fail on
+# relative ones.
+export MAMBA_ROOT_PREFIX=/storage2/fs1/mdan/Active/dtrc2026-workshop/.micromamba
+ROOT=/storage2/fs1/mdan/Active/dtrc2026-workshop
+# conda-forge ships prebuilt linux-64 GPAW with libxc included. Use the
+# openmpi build: the Slurm payload auto-detects the env's mpirun and runs
+# main.py with one MPI rank per allocated CPU (GPAW parallelizes over
+# k-points via MPI — far better scaling than OpenMP threads). Include
+# pymatgen + spglib: crystal plans pair GPAW with them and the job's smoke
+# test fails on any import the env is missing.
+./bin/micromamba create -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
+  python=3.11 "gpaw=*=*mpi_openmpi*" openmpi ase pymatgen spglib numpy pandas pyyaml
+# optional shared fallback env for everything else
+./bin/micromamba create -y -p "$ROOT/twain-envs/default" -c conda-forge \
+  python=3.11 ase pymatgen spglib xtb-python numpy pandas pyyaml
+# verify exactly the way the Slurm job invokes it (no activation).
+# OPAL_PREFIX tells OpenMPI where its runtime data lives when the env is not
+# activated (the Slurm payload sets it too); always use the ABSOLUTE path --
+# a relative mpirun path breaks OpenMPI's prefix auto-detection.
+"$ROOT/twain-envs/gpaw/bin/python" \
+  -c "import gpaw, ase, pymatgen, spglib; print(gpaw.__version__)"
+OPAL_PREFIX="$ROOT/twain-envs/gpaw" \
+  "$ROOT/twain-envs/gpaw/bin/mpirun" --version | head -1
+```
+
+If you already created the env with the `nompi` build, switch it in place:
+
+```bash
+./bin/micromamba install -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
+  "gpaw=*=*mpi_openmpi*" openmpi
+```
+
+To add packages to an existing env later (e.g. a new plan needs something
+the env lacks — the smoke test will name the missing imports in the job log):
+
+```bash
+./bin/micromamba install -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
+  pymatgen spglib
+```
+
+Env names are matched case-insensitively against the plan's calculator /
+tool name, so `twain-envs/gpaw` serves any plan that selects GPAW.
+
+Prerequisites and knobs:
+- WashU VPN (AnyConnect) + Duo, and an SSH key for the login node
+  (`ssh <wustl-key>@c2-login-001.ris.wustl.edu` must work non-interactively).
+- `TWAIN_SLURM_USER` — your WUSTL key (omit if `~/.ssh/config` handles it);
+  `TWAIN_SLURM_HOST` — override the login node, or set it to the empty string
+  when the process already runs *on* a login node (no SSH hop);
+  `TWAIN_SLURM_CLUSTER` / `--cluster` — another `configs/clusters/` profile.
 
 ## Test
 No DB or pixi env needed — the unit tests use in-memory fakes:

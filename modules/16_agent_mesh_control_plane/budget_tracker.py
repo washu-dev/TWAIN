@@ -82,7 +82,9 @@ class ProjectBudget:
         self.run_budgets.append(run_budget)
 
     def check(self):
-        if self.get_cost() > self.max_cost:
+        # ``>=`` matches RunBudget.check / BudgetTracker.budget_exceeded: reaching
+        # the ceiling trips it, so a pre-step gate refuses to start more work.
+        if self.get_cost() >= self.max_cost:
             raise OverBudget(
                 f"Project cost ${self.get_cost():.4f} exceeds limit ${self.max_cost:.4f}"
             )

@@ -1,0 +1,28 @@
+{
+  "name": "compute2",
+  "description": "WashU RIS Compute2 cluster (Slurm 23.02.5). Submit from a login node (c2-login-00N); login nodes are capped at 6GB/user and are not for computation. Values verified via sinfo/sacctmgr on the live cluster.",
+  "login_nodes": [
+    "c2-login-001.ris.wustl.edu",
+    "c2-login-002.ris.wustl.edu",
+    "c2-login-003.ris.wustl.edu"
+  ],
+  "account": "compute2-mdan",
+  "accounts": ["compute2-mdan", "compute2-workshop"],
+  "modules": ["ris", "slurm"],
+  "gpu_modules": ["py-torch"],
+  "gpu_type": null,
+  "storage_root": "/storage2/fs1/mdan/Active/dtrc2026-workshop",
+  "envs_root": "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs",
+  "default_partition": "general-cpu",
+  "gpu_partition": "general-gpu",
+  "short_partition": "general-short",
+  "partitions": [
+    { "name": "general-cpu", "max_minutes": 21600, "gpus": false },
+    { "name": "general-gpu", "max_minutes": 21600, "gpus": true },
+    { "name": "general-bigmem", "max_minutes": 21600, "gpus": false },
+    { "name": "general-interactive", "max_minutes": 7200, "gpus": true },
+    { "name": "general-short", "max_minutes": 30, "gpus": true },
+    { "name": "general-preempt-cpu", "max_minutes": 21600, "gpus": false },
+    { "name": "general-preempt-gpu", "max_minutes": 21600, "gpus": true }
+  ]
+}

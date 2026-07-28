@@ -174,6 +174,38 @@ class RunnerDB:
             (state, session_id),
         )
 
+    def owner_contact(self, session_id: str) -> dict | None:
+        """Contact details of the researcher who owns this run, or None.
+
+        Joins the run's conversation to its owning user (``conversations.id`` is the
+        session_id; ``conversations.user_id`` → ``users``). Returns
+        ``{"email", "name", "phone"}`` so the notifier can reach the *specific*
+        researcher who left the session — by email (SES/SendGrid) or SMS (SNS to
+        their ``phone``) — instead of one global address/topic. Any field may be
+        None (e.g. no phone on file); returns None outright when the session or
+        user is unknown, so the caller can fall back to the configured default.
+        """
+        row = self._query_one(
+            "SELECT u.email, u.name, u.phone FROM conversations c "
+            "JOIN users u ON u.id = c.user_id "
+            "WHERE c.id = %s;",
+            (session_id,),
+        )
+        if not row:
+            return None
+        return {"email": row.get("email"), "name": row.get("name"), "phone": row.get("phone")}
+
+    def run_title(self, session_id: str) -> str | None:
+        """The run's title (its originating request), or None if unknown.
+
+        Used by the notifier to put the prompt in the subject line so a researcher
+        with several runs can tell the emails apart.
+        """
+        row = self._query_one(
+            "SELECT title FROM conversations WHERE id = %s;", (session_id,)
+        )
+        return (row or {}).get("title") if row else None
+
     # ---- messages -------------------------------------------------------------
     def add_assistant_message(
         self, session_id: str, content: str, *, kind: str = "chat", state: str | None = None
@@ -229,8 +261,21 @@ class RunnerDB:
         if kind is not None:
             sql += " AND kind = %s"
             params.append(kind)
+        else:
+            # A terminate request is a control signal, never a chat/clarify answer.
+            sql += " AND kind <> 'terminate'"
         sql += " ORDER BY id;"
         return self._query_all(sql, tuple(params))
+
+    def terminate_requested(self, session_id: str) -> bool:
+        """True once the user asked to terminate this run (kind='terminate')."""
+        row = self._query_one(
+            "SELECT 1 AS t FROM messages "
+            "WHERE conversation_id = %s AND role = 'user' AND kind = 'terminate' "
+            "LIMIT 1;",
+            (session_id,),
+        )
+        return row is not None
 
     # ---- run events -----------------------------------------------------------
     def insert_run_event(
@@ -266,6 +311,13 @@ class RunnerDB:
         """
         return self._query_all(
             "SELECT name, content FROM artifacts WHERE session_id = %s;", (session_id,)
+        )
+
+    def get_artifact(self, session_id: str, name: str) -> dict | None:
+        """Fetch one persisted artifact's content by name (for a rerun's inputs)."""
+        return self._query_one(
+            "SELECT name, kind, content FROM artifacts WHERE session_id = %s AND name = %s;",
+            (session_id, name),
         )
 
     # ---- sessions (backing store for the engine) ------------------------------

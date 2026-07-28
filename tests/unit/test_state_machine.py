@@ -90,6 +90,21 @@ class FakeAgent:
         return {"content": [{"text": self._intent_json}]}
 
 
+class TruncatingAgent(FakeAgent):
+    """First reply is cut mid-string (the 1024-token truncation failure mode);
+    subsequent replies are whole."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.calls = 0
+
+    def call_agent(self, prompt, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {"content": [{"text": self._intent_json[:80]}]}
+        return super().call_agent(prompt, **kwargs)
+
+
 def _offline_machine(tmp_path, *, agent=None, **ctx_overrides) -> StateMachine:
     """A StateMachine wired with a fake agent + tmp artifacts dir, so the
     interactive intake/clarify handlers run fully offline (still needs
@@ -383,6 +398,23 @@ class TestExecuteRunsBundle:
 # 4. Guard rejection (invalid context)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+class TestAgentJsonRobustness:
+    def test_intake_retries_truncated_agent_json(self, tmp_path):
+        # A reply cut mid-string (token-cap truncation) must trigger one clean
+        # retry instead of surfacing JSONDecodeError from the stage handler.
+        agent = TruncatingAgent()
+        m = _offline_machine(tmp_path, agent=agent)
+        with patch("builtins.input", return_value="predict solubility"):
+            assert m.intake() == State.CLARIFY
+        assert agent.calls == 2
+        assert m._load_artifact("intent_spec")["objective"] == VALID_INTENT["objective"]
+
+    def test_agent_json_raises_after_retries_exhausted(self, tmp_path):
+        m = _offline_machine(tmp_path, agent=lambda prompt: '{"unterminated": "trunca')
+        with pytest.raises(json.JSONDecodeError):
+            m._agent_json("prompt", retries=1)
+
+
 class TestGuardRejection:
     def test_clarify_loops_when_not_confident(self, tmp_path):
         # Low-confidence intent: clarify() must stay in the CLARIFY Q&A loop
@@ -407,13 +439,32 @@ class TestGuardRejection:
             assert m.clarify() == State.DECOMPOSE    # round 2 hits the bound
         assert m.context.clarified is True
 
-    def test_plan_to_build_blocked_without_plan_approved(self, tmp_path):
+    def test_plan_to_build_allowed_without_approval(self, tmp_path):
+        # PLAN->BUILD only *reaches* the approval-gate state (plan generated,
+        # nothing built), so it needs no approval; the real gate is BUILD->REPAIR.
+        # With no intent_spec, plan() no-ops straight to BUILD.
         m = _make_machine(tmp_path, clarified=True, plan_approved=False,
                           execution_status=True, validation_result="accepted")
         m.current_state = State.PLAN
         with patch.object(m.storage, "commit"):
+            m.run()
+        assert m.current_state == State.BUILD
+
+    def test_execution_gate_requires_real_approval(self, tmp_path):
+        # The core guarantee: a run cannot cross BUILD->REPAIR (and so can never
+        # reach EXECUTE) until plan_approved is set by an explicit approve_plan().
+        m = _make_machine(tmp_path, clarified=True, plan_approved=False,
+                          execution_status=True, validation_result="accepted")
+        with patch.object(m, "build", return_value=State.REPAIR), \
+                patch.object(m.storage, "commit"):
+            m.current_state = State.BUILD
             with pytest.raises(GuardsBroken):
-                m.run()
+                m.run()                      # not approved -> blocked before REPAIR
+            m.approve_plan()                 # researcher approves the plan
+            m.current_state = State.BUILD
+            m.run()                          # now the guard passes
+        assert m.context.plan_approved is True
+        assert m.current_state == State.REPAIR
 
     def test_build_to_repair_blocked_without_plan_approved(self, tmp_path):
         m = _make_machine(tmp_path, clarified=True, plan_approved=False,
@@ -666,3 +717,164 @@ class TestSystemRepresentation:
     def test_discovery_input_format_smiles_for_molecule(self, tmp_path):
         m = _make_machine(tmp_path)
         assert m._discovery_query(VALID_INTENT).input_format == "SMILES"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9. Rewind / re-run from an earlier stage
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestRewind:
+    """rewind_to() switches the machine to an earlier stage so it can be re-run,
+    discarding exactly that stage's + every later stage's output while keeping the
+    upstream work (its artifacts) as input."""
+
+    def _seed_full_run(self, tmp_path):
+        m = _make_machine(tmp_path, clarified=True, plan_approved=True,
+                          execution_status=True, validation_result="accepted")
+        m.context.artifacts.update({
+            "intent_spec": "/x/intent_spec.json",       # INTAKE
+            "goal_graph": "/x/goal_graph.json",         # DECOMPOSE
+            "discovery": "/x/discovery.json",           # DISCOVER
+            "execution_plan": "/x/execution_plan.json",  # PLAN
+            "run_bundle": "/x/run_bundle",              # BUILD
+            "script": "/x/run_bundle/main.py",          # BUILD
+            "repair_report": "/x/repair_report.json",   # REPAIR (folded into BUILD)
+            "execution_result": "/x/execution_result.json",  # EXECUTE
+        })
+        m.current_state = State.TERMINATE
+        return m
+
+    def test_rewind_to_clarify_keeps_intake_output_drops_the_rest(self, tmp_path):
+        m = self._seed_full_run(tmp_path)
+        m.rewind_to(State.CLARIFY)
+        assert m.current_state == State.CLARIFY
+        assert m.context.clarified is False                 # CLARIFY's flag reset
+        assert m.context.plan_approved is False             # must re-approve on re-run
+        assert m.context.artifacts == {"intent_spec": "/x/intent_spec.json"}
+
+    def test_rewind_to_intake_drops_intent_spec_too(self, tmp_path):
+        m = self._seed_full_run(tmp_path)
+        m.rewind_to(State.INTAKE)
+        assert m.current_state == State.INTAKE
+        assert m.context.artifacts == {}
+
+    def test_rewind_to_plan_keeps_decompose_and_discover(self, tmp_path):
+        m = self._seed_full_run(tmp_path)
+        m.rewind_to(State.PLAN)
+        assert set(m.context.artifacts) == {"intent_spec", "goal_graph", "discovery"}
+
+    def test_rewind_to_execute_keeps_build_but_resets_execution(self, tmp_path):
+        m = self._seed_full_run(tmp_path)
+        m.rewind_to(State.EXECUTE)
+        # BUILD/REPAIR ran before EXECUTE, so their artifacts survive ...
+        assert m.context.artifacts["run_bundle"] == "/x/run_bundle"
+        assert m.context.artifacts["repair_report"] == "/x/repair_report.json"
+        # ... but EXECUTE's own output + guard flag are cleared for the re-run.
+        assert "execution_result" not in m.context.artifacts
+        assert m.context.execution_status is None
+        # BUILD ran before EXECUTE, so the plan stays approved (no re-approval
+        # needed to re-run only the calculation).
+        assert m.context.plan_approved is True
+
+    def test_rewind_resets_clarify_round_counter(self, tmp_path):
+        m = self._seed_full_run(tmp_path)
+        m._clarify_rounds = 3
+        m.rewind_to(State.DISCOVER)
+        assert m._clarify_rounds == 0
+
+    def test_rewind_persists_new_state_to_storage(self, tmp_path):
+        m = self._seed_full_run(tmp_path)
+        m.rewind_to(State.DISCOVER)
+        state, ctx = m.storage.load()   # crash-recovery file now reflects the rewind
+        assert state == State.DISCOVER
+        assert "discovery" not in ctx.artifacts
+
+    @pytest.mark.parametrize("bad", [State.TERMINATE, State.REPAIR, State.CORRECT, State.REPLAN])
+    def test_rewind_to_non_rewindable_state_raises(self, bad, tmp_path):
+        m = self._seed_full_run(tmp_path)
+        with pytest.raises(InvalidTransition):
+            m.rewind_to(bad)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10. CLARIFY asks as few, targeted, concise questions as possible
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _RecordingAgent:
+    """Captures the clarification prompt and returns a scripted questions reply.
+
+    Any prompt mentioning "questions" is the clarification prompt (records it +
+    returns ``questions``); every other prompt (intake / rewrite) returns the
+    canned IntentSpec so the offline handlers run end to end.
+    """
+
+    def __init__(self, questions="What temperature and solvent?", low_confidence=True):
+        intent = copy.deepcopy(VALID_INTENT)
+        if low_confidence:
+            intent["metadata"]["confidence_scores"]["SMILES_confidence"] = 0.4
+        self._intent_json = json.dumps(intent)
+        self._questions = questions
+        self.clarification_prompt = None
+
+    def call_agent(self, prompt, **kwargs):
+        text = str(prompt)
+        if "questions" in text.lower():
+            self.clarification_prompt = text
+            return {"content": [{"text": self._questions}]}
+        return {"content": [{"text": self._intent_json}]}
+
+
+class TestClarifyConcise:
+    """CLARIFY targets only genuinely-uncertain fields and asks the fewest,
+    most concise questions -- and skips the exchange entirely when nothing needs
+    clarifying."""
+
+    def test_uncertain_fields_lists_low_scores_most_uncertain_first(self, tmp_path):
+        m = _make_machine(tmp_path)
+        intent = copy.deepcopy(VALID_INTENT)
+        intent["metadata"]["confidence_scores"]["SMILES_confidence"] = 0.4
+        intent["metadata"]["confidence_scores"]["formula_confidence"] = 0.2
+        # both below 0.8; formula (0.2) is more uncertain than SMILES (0.4) -> first.
+        # Confident fields (objective/domain/name at 0.95) are excluded.
+        assert m._uncertain_fields(intent) == ["formula", "SMILES"]
+
+    def test_uncertain_fields_confident_spec_is_empty(self, tmp_path):
+        m = _make_machine(tmp_path)
+        assert m._uncertain_fields(VALID_INTENT) == []
+
+    def test_uncertain_fields_crystal_ignores_smiles(self, tmp_path):
+        # A stray low SMILES score on a crystal is irrelevant and must never be
+        # asked about; the real gap (phase) is what surfaces.
+        m = _make_machine(tmp_path)
+        intent = copy.deepcopy(CRYSTAL_INTENT)
+        intent["metadata"]["confidence_scores"]["phase_confidence"] = 0.3
+        intent["metadata"]["confidence_scores"]["SMILES_confidence"] = 0.1
+        fields = m._uncertain_fields(intent)
+        assert "phase" in fields
+        assert "SMILES" not in fields
+
+    def test_clarify_prompt_is_scoped_to_the_uncertain_field(self, tmp_path):
+        agent = _RecordingAgent(low_confidence=True)  # SMILES below threshold
+        m = _offline_machine(tmp_path, agent=agent)
+        m._request = "predict the aqueous solubility of aspirin"
+        with patch("builtins.input", return_value="aspirin, SMILES CC(=O)Oc1ccccc1C(=O)O"):
+            m.intake()
+            m.clarify()
+        assert agent.clarification_prompt is not None
+        instruction = agent.clarification_prompt.split("IntentSpec:")[0]
+        # the field list drives the questions, and it names only the uncertain field
+        assert "unresolved fields" in instruction
+        assert "most important first: SMILES" in instruction
+        # the confident objective is NOT injected into the ask list
+        assert "objective" not in instruction.lower()
+
+    def test_clarify_advances_when_agent_asks_nothing(self, tmp_path):
+        # "No questions." means no genuine gap: clarify must advance without
+        # prompting the researcher (input() would raise if it tried).
+        agent = _RecordingAgent(questions="No questions.", low_confidence=True)
+        m = _offline_machine(tmp_path, agent=agent)
+        m._request = "predict the aqueous solubility of aspirin"
+        with patch("builtins.input", side_effect=AssertionError("clarify must not prompt")):
+            m.intake()
+            assert m.clarify() == State.DECOMPOSE
+        assert m.context.clarified is True

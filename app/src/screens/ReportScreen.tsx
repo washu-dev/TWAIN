@@ -68,18 +68,15 @@ export const ReportScreen: React.FC = () => {
             </View>
           </View>
 
+          {(report.result || report.results_dir) && (
+            <ResultCard result={report.result ?? {}} resultsDir={report.results_dir} />
+          )}
+
           <SummaryCard report={report} />
 
-          <Text style={styles.sectionHeading}>Files</Text>
-          <Text style={styles.sectionHint}>
-            Tap to expand. {`run_bundle/main.py`} is the generated pymatgen script.
-          </Text>
-          {report.artifacts.length === 0 && (
-            <Text style={styles.empty}>No files were produced for this run yet.</Text>
-          )}
-          {report.artifacts.map((a) => (
-            <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
-          ))}
+          <BudgetCard report={report} />
+
+          <Files report={report} />
         </ScrollView>
       )}
     </SafeAreaView>
@@ -109,17 +106,65 @@ const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
   const execText = exec
     ? String(exec['status'] ?? (exec['succeeded'] ? 'succeeded' : 'failed'))
     : 'not run locally (execution disabled)';
+  // Slurm runs carry their job identity in install_log (see
+  // SlurmExecutionAdapter): show which cluster/job produced the result.
+  const slurmInfo = exec?.['install_log'] as
+    | { job_id?: string; cluster?: string }
+    | undefined;
+  const slurmText = slurmInfo?.job_id
+    ? `${slurmInfo.cluster ?? 'Slurm'} — job ${slurmInfo.job_id}`
+    : null;
+
+  const summary = typeof plan?.['summary'] === 'string' ? (plan['summary'] as string) : null;
 
   return (
     <View style={styles.card}>
       <Text style={styles.cardTitle}>Summary</Text>
+      {summary ? <Text style={styles.summaryText}>{summary}</Text> : null}
       <Row label="Selected method" value={methodText} />
       <Row label="Estimated cost" value={costParts.length ? costParts.join(' + ') : '—'} />
       <Row label="Execution" value={execText} />
+      {slurmText && <Row label="Ran on" value={slurmText} />}
       {!plan && (
         <Text style={styles.note}>
           No execution plan was produced (the run stopped before planning). The raw specs are below.
         </Text>
+      )}
+    </View>
+  );
+};
+
+// Actual spend for the run, from the budget.json artifact the orchestrator writes
+// each step. Renders nothing until a budget snapshot exists (e.g. very early runs).
+const BudgetCard: React.FC<{ report: Report }> = ({ report }) => {
+  const budget = typeof report.budget === 'object' && report.budget ? report.budget : null;
+  const run = budget?.run;
+  if (!run) return null;
+
+  const used = Number(run.cost ?? 0);
+  const max = Number(run.max_cost ?? 0);
+  const remaining = Math.max(max - used, 0);
+  const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
+  const overBudget = max > 0 && used >= max;
+  const mins = (secs?: number) => (secs != null ? `${(Number(secs) / 60).toFixed(1)} min` : '—');
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>Budget</Text>
+      <View style={styles.meterTrack}>
+        <View
+          style={[styles.meterFill, { width: `${pct}%` }, overBudget && styles.meterFillOver]}
+        />
+      </View>
+      <Row label="LLM cost used" value={`$${used.toFixed(4)} / $${max.toFixed(2)}`} />
+      <Row label="Remaining" value={`$${remaining.toFixed(4)}`} />
+      <Row label="Iterations" value={`${run.iterations ?? 0} / ${run.max_iterations ?? 0}`} />
+      <Row
+        label="Elapsed"
+        value={`${mins(run.elapsed_seconds)} / ${mins(run.wall_time_limit_seconds)}`}
+      />
+      {overBudget && (
+        <Text style={styles.note}>This run reached its cost budget and was stopped.</Text>
       )}
     </View>
   );
@@ -189,6 +234,90 @@ const ArtifactRow: React.FC<{ conversationId: string; meta: ArtifactMeta }> = ({
   );
 };
 
+function formatValue(v: unknown): string {
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(4)));
+  }
+  return String(v);
+}
+
+// Headline scientific result: the property + value the run computed, plus where
+// the output files are stored. Falls back gracefully for arbitrary result shapes.
+const ResultCard: React.FC<{ result: Record<string, unknown>; resultsDir?: string | null }> = ({
+  result,
+  resultsDir,
+}) => {
+  const propName = typeof result['property'] === 'string' ? (result['property'] as string) : null;
+  const headline = propName ? result[propName] : undefined;
+  const unit = propName ? result[`${propName}_unit`] : undefined;
+
+  const hidden = new Set<string>(['property', 'smoke', 'output_file']);
+  if (propName) {
+    hidden.add(propName);
+    hidden.add(`${propName}_unit`);
+  }
+  const rows = Object.entries(result).filter(
+    ([k, v]) =>
+      !hidden.has(k) &&
+      (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'),
+  );
+
+  return (
+    <View style={styles.resultCard}>
+      <Text style={styles.resultCardTitle}>Result</Text>
+      {propName && headline != null && (
+        <Text style={styles.resultHeadline}>
+          {propName}: {formatValue(headline)}
+          {unit ? ` ${String(unit)}` : ''}
+        </Text>
+      )}
+      {rows.map(([k, v]) => (
+        <Row key={k} label={k} value={formatValue(v)} />
+      ))}
+      {resultsDir ? (
+        <View style={styles.resultPathBox}>
+          <Text style={styles.resultPathLabel}>Results stored at</Text>
+          <Text style={styles.resultPath} selectable>
+            {resultsDir}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
+// Artifacts split into what the run produced (output/…) vs. specs + the bundle.
+const Files: React.FC<{ report: Report }> = ({ report }) => {
+  const outputs = report.artifacts.filter((a) => a.name.startsWith('output/'));
+  const details = report.artifacts.filter((a) => !a.name.startsWith('output/'));
+  return (
+    <>
+      {outputs.length > 0 && (
+        <>
+          <Text style={styles.sectionHeading}>Output files</Text>
+          <Text style={styles.sectionHint}>
+            The files your run produced — results and solver logs.
+          </Text>
+          {outputs.map((a) => (
+            <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
+          ))}
+        </>
+      )}
+
+      <Text style={styles.sectionHeading}>Run details</Text>
+      <Text style={styles.sectionHint}>
+        Specs and the generated run bundle. run_bundle/main.py is the generated script.
+      </Text>
+      {report.artifacts.length === 0 && (
+        <Text style={styles.empty}>No files were produced for this run yet.</Text>
+      )}
+      {details.map((a) => (
+        <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
+      ))}
+    </>
+  );
+};
+
 const mono = Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' });
 
 const styles = StyleSheet.create({
@@ -223,6 +352,41 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   cardTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: Spacing.one },
+  meterTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: C.backgroundElement,
+    overflow: 'hidden',
+    marginBottom: Spacing.two,
+  },
+  meterFill: { height: 8, borderRadius: 4, backgroundColor: C.washuGreen },
+  meterFillOver: { backgroundColor: C.washuRed },
+  summaryText: { fontSize: 14, color: C.text, lineHeight: 20, marginBottom: Spacing.two },
+  resultCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.washuGreen,
+    borderLeftWidth: 4,
+    padding: Spacing.three,
+    gap: Spacing.one,
+    backgroundColor: C.washuWhite,
+  },
+  resultCardTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.washuGreen,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  resultHeadline: { fontSize: 22, fontWeight: '700', color: C.text, marginVertical: Spacing.one },
+  resultPathBox: { marginTop: Spacing.two, gap: 2 },
+  resultPathLabel: {
+    fontSize: 11,
+    color: C.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  resultPath: { fontSize: 12, color: C.text, fontFamily: mono },
   row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3, gap: Spacing.three },
   rowLabel: { color: C.textSecondary, fontSize: 14 },
   rowValue: { color: C.text, fontSize: 14, fontWeight: '600', flexShrink: 1, textAlign: 'right' },

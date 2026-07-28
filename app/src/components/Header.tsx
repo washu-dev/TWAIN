@@ -5,18 +5,13 @@ import { APP_STRINGS, Spacing } from '@/constants/theme';
 interface HeaderProps {
   onTestPress?: () => void;
   onLoginPress?: () => void;
-  onLogoutPress?: () => void;
-  isAuthenticated?: boolean;
-  /** Display name of the signed-in user, if known. */
-  userName?: string;
+  loginLabel?: string;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   onTestPress,
   onLoginPress,
-  onLogoutPress,
-  isAuthenticated = false,
-  userName,
+  loginLabel = APP_STRINGS.loginButton,
 }) => {
   return (
     <View style={styles.container}>
@@ -41,27 +36,15 @@ export const Header: React.FC<HeaderProps> = ({
             <Text style={styles.buttonOutlineText}>{APP_STRINGS.testButton}</Text>
           </TouchableOpacity>
 
-          {isAuthenticated ? (
-            <TouchableOpacity
-              style={styles.buttonSolid}
-              onPress={onLogoutPress}
-              accessible={true}
-              accessibilityLabel={userName ? `${APP_STRINGS.logoutButton} (${userName})` : APP_STRINGS.logoutButton}
-              accessibilityRole="button"
-            >
-              <Text style={styles.buttonSolidText}>{APP_STRINGS.logoutButton}</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={styles.buttonSolid}
-              onPress={onLoginPress}
-              accessible={true}
-              accessibilityLabel={APP_STRINGS.loginButton}
-              accessibilityRole="button"
-            >
-              <Text style={styles.buttonSolidText}>{APP_STRINGS.loginButton}</Text>
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity
+            style={styles.buttonSolid}
+            onPress={onLoginPress}
+            accessible={true}
+            accessibilityLabel={loginLabel}
+            accessibilityRole="button"
+          >
+            <Text style={styles.buttonSolidText}>{loginLabel}</Text>
+          </TouchableOpacity>
         </View>
       </View>
     </View>

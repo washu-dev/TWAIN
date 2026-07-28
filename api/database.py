@@ -14,7 +14,7 @@ Access model:
 """
 
 import os
-from functools import lru_cache
+from functools import cache, lru_cache
 
 import boto3
 import psycopg2
@@ -60,6 +60,18 @@ def _secrets_client():
     return boto3.client("secretsmanager", region_name=AWS_REGION)
 
 
+@cache
+def get_secret(secret_id: str) -> str:
+    """Read a single ``SecretString`` from Secrets Manager (cached per id).
+
+    Used for config identifiers stored outside the DB group — e.g. the public
+    Entra tenant/app ids under ``TWAIN/sso/*`` that ``auth.py`` needs — using the
+    same task-role / assume-role credentials as the DB secrets. Raises on failure
+    so callers can decide whether a missing secret is fatal.
+    """
+    return _secrets_client().get_secret_value(SecretId=secret_id)["SecretString"]
+
+
 @lru_cache(maxsize=1)
 def _load_db_config() -> dict:
     """Resolve DB connection properties once and cache them for the process."""
@@ -99,19 +111,6 @@ def read_secret(secret_id: str) -> str:
 def get_connection():
     """Create and return a database connection using the resolved credentials."""
     return psycopg2.connect(**_load_db_config())
-
-
-def query_greetings():
-    try:
-        conn = get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT message FROM greetings;")
-        results = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return results
-    except Exception as e:
-        raise Exception(f"Database query failed: {e}") from e
 
 
 ALLOWED_ROLES = ("user", "admin")

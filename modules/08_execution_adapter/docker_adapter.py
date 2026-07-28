@@ -138,6 +138,12 @@ class DockerExecutionAdapter:
             # resolves .skf files even if activation is bypassed. Path is the
             # image's baked-in slako dir (runner/Dockerfile fetch-slako layer).
             extra_env.setdefault("DFTB_PREFIX", "/app/slako/")
+            # Use every core Docker gives the container: OpenMP calculators
+            # (e.g. GPAW) run single-threaded unless OMP_NUM_THREADS is set.
+            cpus = str(os.cpu_count() or 1)
+            for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                        "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+                extra_env.setdefault(var, cpus)
 
             # 2) smoke tests before the real run (optional) ------------------
             smoke_log = None

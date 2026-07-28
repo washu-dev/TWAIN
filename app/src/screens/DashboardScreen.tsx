@@ -11,11 +11,11 @@ import { useRouter } from 'expo-router';
 import { Header, Footer, TileButton, MessageModal, IssueModal } from '@/components';
 import { APP_STRINGS, Spacing } from '@/constants/theme';
 import { apiClient } from '@/api/client';
-import { useAuth } from '@/auth/AuthProvider';
+import { useAuth } from '@/hooks/useAuth';
 
-export const HomeScreen: React.FC = () => {
+export const DashboardScreen: React.FC = () => {
   const router = useRouter();
-  const { isAuthenticated, account, login, logout } = useAuth();
+  const { signOut, user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [modalTitle, setModalTitle] = useState('');
@@ -31,10 +31,8 @@ export const HomeScreen: React.FC = () => {
   const handleTestPress = async () => {
     setLoading(true);
     try {
-      const response = await apiClient.getGreetings();
-      const items: { message: string }[] = response?.data ?? [];
-      const messages = items.map((item) => item.message);
-      showModal('Greetings from API', messages);
+      const { status } = await apiClient.health();
+      showModal('API status', [`status: ${status}`]);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error';
       showModal('Error', [msg]);
@@ -43,34 +41,12 @@ export const HomeScreen: React.FC = () => {
     }
   };
 
-  const handleLoginPress = async () => {
-    try {
-      await login();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      showModal('Sign in unavailable', [msg]);
-    }
-  };
-
-  const handleLogoutPress = async () => {
-    try {
-      await logout();
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      showModal('Sign out failed', [msg]);
-    }
-  };
-
-  const userName = account?.name ?? account?.username ?? undefined;
-
   return (
     <SafeAreaView style={styles.container} edges={['left', 'right', 'bottom']}>
       <Header
         onTestPress={handleTestPress}
-        onLoginPress={handleLoginPress}
-        onLogoutPress={handleLogoutPress}
-        isAuthenticated={isAuthenticated}
-        userName={userName}
+        onLoginPress={signOut}
+        loginLabel={APP_STRINGS.signOutButton}
       />
 
       <ScrollView
@@ -124,7 +100,7 @@ export const HomeScreen: React.FC = () => {
 
       <IssueModal
         visible={issueModalVisible}
-        submitterEmail={account?.username}
+        submitterEmail={user?.email}
         onSubmit={(title, body) => apiClient.createIssue(title, body)}
         onClose={() => setIssueModalVisible(false)}
       />

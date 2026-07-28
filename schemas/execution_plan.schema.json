@@ -39,6 +39,7 @@
           "type": "number"
         },
         "ram": {
+          "description": "Requested memory in gigabytes (floor 4 at synthesize/submit).",
           "type": "integer"
         }
       }
@@ -95,6 +96,10 @@
       "items": {
         "type": "string"
       }
+    },
+    "summary": {
+      "description": "Plain-language description of what the run will do (property, system, toolset, approach).",
+      "type": ["string", "null"]
     }
   }
 }

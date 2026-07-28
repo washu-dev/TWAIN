@@ -38,7 +38,7 @@ import error_handler  # noqa: E402
 from error_handler import (  # noqa: E402
     ErrorCategory, classify, AgentTimeout, PolicyError, ConfigError, LLMError,
 )
-from orchestrator import Orchestrator  # noqa: E402
+from orchestrator import Orchestrator, RunCancelled  # noqa: E402
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -318,6 +318,42 @@ class TestErrorHandling:
         assert o.run_session.correct_count == 3
         assert o.last_error.category == ErrorCategory.POLICY
 
+    def test_cancel_between_stages_raises_run_cancelled(self, env):
+        # The Terminate button: cancel_check flips to True after two stages;
+        # the next loop turn must raise RunCancelled (for the runner to mark
+        # the conversation 'cancelled') instead of finishing or erroring.
+        fired = {"n": 0}
+
+        def cancel():
+            fired["n"] += 1
+            return fired["n"] > 2
+
+        o = build(env, "cancelme", cancel_check=cancel)
+        with pytest.raises(RunCancelled):
+            o.run()
+        assert env["notes"] == []                    # no error card for a cancel
+        assert "run.cancelled" in env["bus"].types()
+        assert o.run_session.get_status() == RunStatus.PAUSED
+
+    def test_failure_while_cancelled_surfaces_as_cancel_not_error(self, env):
+        # A stage failure caused by the termination (aborted wait, scancelled
+        # job) must not be classified as a run error: with the cancel flag set,
+        # _handle_error re-raises RunCancelled instead.
+        aborted = {"flag": False}
+
+        def boom():
+            # terminate lands mid-DISCOVER: the flag is set and the blocking
+            # call aborts by raising, exactly like an interrupted wait.
+            aborted["flag"] = True
+            raise RuntimeError("wait aborted")
+
+        sm = make_sm(env["tmp"], discover=boom)
+        o = build(env, "cancelfail", sm=sm, cancel_check=lambda: aborted["flag"])
+        with pytest.raises(RunCancelled):
+            o.run()
+        assert env["notes"] == []
+        assert o.last_error is None
+
     def test_handler_failure_stops_with_actionable_error(self, env):
         def boom():
             raise RuntimeError("registry unreachable")
@@ -349,6 +385,66 @@ class TestErrorHandling:
         transitions = o.run_session.transition_count
         assert o.run() == RunStatus.COMPLETED          # re-run is a no-op
         assert o.run_session.transition_count == transitions
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3b. Cost budget: tracking, enforcement, and configurability
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CostingAgent:
+    """A ``prompt -> str`` agent (like ``fake_llm``) that also books a fixed cost
+    per call, so the orchestrator's cost sync + budget gate run end to end."""
+
+    def __init__(self, per_call=0.5):
+        self.per_call = per_call
+        self.total_cost = 0.0
+        self.call_count = 0
+        self.api_quota_prior = None
+        self.api_quota_remaining = None
+
+    def __call__(self, _prompt):
+        self.total_cost += self.per_call
+        self.call_count += 1
+        return _SPEC_JSON
+
+
+class TestBudget:
+    def test_run_max_cost_stops_the_run(self, env):
+        # A tiny budget with a costing agent: the first stage's LLM spend blows the
+        # cap, so the run stops with a POLICY (budget) error rather than completing.
+        # Proves cost is actually tracked AND the gate fires.
+        agent = CostingAgent(per_call=0.5)
+        o = build(env, "overbudget", agent=agent, run_max_cost=0.1)
+        assert o.run() == RunStatus.ERROR
+        assert o.last_error.category == ErrorCategory.POLICY
+        assert "budget" in json.dumps(o.run_session.error).lower()
+        assert o.run_budget.cost >= 0.5      # the agent's spend was synced in
+
+    def test_generous_budget_completes_and_tracks_cost(self, env):
+        # With headroom the run completes, the actual spend is tracked on the run
+        # budget (non-zero), and the budget.json artifact mirrors it exactly.
+        agent = CostingAgent(per_call=0.5)
+        o = build(env, "underbudget", agent=agent, run_max_cost=100.0)
+        assert o.run() == RunStatus.COMPLETED
+        assert o.run_budget.cost > 0
+        assert agent.call_count > 0
+        budget_path = o.sm.context.artifacts.get("budget")
+        assert budget_path and Path(budget_path).is_file()
+        snap = json.loads(Path(budget_path).read_text())
+        assert snap["run"]["cost"] == o.run_budget.cost
+        assert snap["run"]["max_cost"] == 100.0
+
+    def test_default_budget_when_unset(self, env):
+        # No run_max_cost passed => the orchestrator's documented $1.00 default,
+        # and the (per-run) global tracker ceiling matches it.
+        o = build(env, "defaultbudget")
+        assert o.run_budget.max_cost == 1.0
+        assert o.budget_tracker.global_budget == 1.0
+
+    def test_configured_budget_flows_to_tracker(self, env):
+        o = build(env, "configured", run_max_cost=7.5)
+        assert o.run_budget.max_cost == 7.5
+        assert o.budget_tracker.global_budget == 7.5
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -415,7 +511,9 @@ class TestAgentRunner:
             run_agent(lambda _s: {"x": 1}, {}, timeout=None, validator=lambda o: "y" in o)
 
     def test_timeout_table_matches_criteria(self):
-        assert agent_runner.timeout_for("EXECUTE") == 20 * 60
+        # EXECUTE was raised from the criteria's 20 min to 2 h: real runs
+        # (local DFT, bounded Slurm polling) routinely exceed 20 minutes.
+        assert agent_runner.timeout_for("EXECUTE") == 2 * 60 * 60
         assert agent_runner.timeout_for("CLARIFY") == 5 * 60
 
 
