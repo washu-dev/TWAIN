@@ -41,10 +41,14 @@ logger = logging.getLogger("twain.runner.notify")
 
 SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
 
-# A short, human-facing reason label per suspend reason, used in the message.
+# A short, human-facing reason label per reason. The first two are *suspend*
+# reasons (the run needs the user); "completed"/"failed" are terminal reasons
+# (the run finished) — see _drive_run in runner.py.
 _REASON_LABEL = {
     "input": "needs your input",
     "approval": "is waiting for your approval",
+    "completed": "has finished",
+    "failed": "failed",
 }
 
 
@@ -54,11 +58,27 @@ def _resume_hint(session_id: str) -> str:
     return f" Open {base}/conversations/{session_id} to continue." if base else ""
 
 
-def _compose(session_id: str, reason: str, message: str) -> tuple[str, str]:
-    """Return a (subject, body) pair for the notification."""
+def _short_id(session_id: str) -> str:
+    """The leading segment of the session UUID — enough to tell two runs apart."""
+    return session_id.split("-", 1)[0] if session_id else session_id
+
+
+def _compose(
+    session_id: str, reason: str, message: str, request: str | None = None
+) -> tuple[str, str]:
+    """Return a (subject, body) pair for the notification.
+
+    ``request`` is the run's title (its originating prompt); when present it and a
+    short run id go into the subject so a researcher with several runs can tell
+    the emails apart (otherwise every run of the same prompt looks identical).
+    """
     label = _REASON_LABEL.get(reason, "needs your attention")
-    subject = f"TWAIN run {label}"
-    body = f"Your TWAIN run {label}.\n\n{message}{_resume_hint(session_id)}"
+    req = (request or "").strip()
+    if len(req) > 60:
+        req = req[:57] + "…"
+    tag = f' "{req}"' if req else ""
+    subject = f"TWAIN run{tag} {label} ({_short_id(session_id)})"
+    body = f"Your TWAIN run{tag} {label}.\n\n{message}{_resume_hint(session_id)}"
     return subject, body
 
 
@@ -77,7 +97,12 @@ def make_notifier(db):
         except Exception as exc:  # noqa: BLE001 -- routing must never fail the notify
             logger.warning("[notify] owner lookup failed for %s: %s", session_id, exc)
             recipient = None
-        default_notifier(session_id, reason, message, recipient=recipient)
+        try:
+            request = db.run_title(session_id)
+        except Exception as exc:  # noqa: BLE001 -- a missing title must not fail the notify
+            logger.warning("[notify] title lookup failed for %s: %s", session_id, exc)
+            request = None
+        default_notifier(session_id, reason, message, recipient=recipient, request=request)
 
     return _notifier
 
@@ -88,7 +113,8 @@ def _recipient_email(recipient: dict | None) -> str | None:
 
 
 def default_notifier(
-    session_id: str, reason: str, message: str, recipient: dict | None = None
+    session_id: str, reason: str, message: str, recipient: dict | None = None,
+    request: str | None = None,
 ) -> None:
     """Dispatch a suspend notification to the run's owner via the configured backend.
 
@@ -101,15 +127,15 @@ def default_notifier(
     backend = os.getenv("TWAIN_NOTIFY_BACKEND", "log").strip().lower()
     try:
         if backend == "sns":
-            _notify_sns(session_id, reason, message, recipient)
+            _notify_sns(session_id, reason, message, recipient, request)
         elif backend == "ses":
-            _notify_ses(session_id, reason, message, recipient)
+            _notify_ses(session_id, reason, message, recipient, request)
         elif backend == "sendgrid":
-            _notify_sendgrid(session_id, reason, message, recipient)
+            _notify_sendgrid(session_id, reason, message, recipient, request)
         else:
             if backend != "log":
                 logger.warning("[notify] unknown TWAIN_NOTIFY_BACKEND %r; logging only", backend)
-            subject, body = _compose(session_id, reason, message)
+            subject, body = _compose(session_id, reason, message, request)
             to_addr = _recipient_email(recipient)
             logger.info(
                 "[notify] %s → %s — %s | %s",
@@ -119,7 +145,10 @@ def default_notifier(
         logger.warning("[notify] failed to notify for %s (%s): %s", session_id, reason, exc)
 
 
-def _notify_sns(session_id: str, reason: str, message: str, recipient: dict | None = None) -> None:
+def _notify_sns(
+    session_id: str, reason: str, message: str, recipient: dict | None = None,
+    request: str | None = None,
+) -> None:
     phone = (recipient or {}).get("phone")
     topic = os.getenv("TWAIN_NOTIFY_SNS_TOPIC_ARN")
     if not phone and not topic:
@@ -129,7 +158,7 @@ def _notify_sns(session_id: str, reason: str, message: str, recipient: dict | No
         )
     import boto3  # lazy: only when the SNS backend is actually used
 
-    subject, body = _compose(session_id, reason, message)
+    subject, body = _compose(session_id, reason, message, request)
     client = boto3.client("sns", region_name=os.getenv("AWS_REGION", "us-east-1"))
     if phone:
         # A known phone wins over the topic: SMS the run's owner directly.
@@ -138,7 +167,10 @@ def _notify_sns(session_id: str, reason: str, message: str, recipient: dict | No
         client.publish(TopicArn=topic, Subject=subject[:100], Message=body)
 
 
-def _notify_ses(session_id: str, reason: str, message: str, recipient: dict | None = None) -> None:
+def _notify_ses(
+    session_id: str, reason: str, message: str, recipient: dict | None = None,
+    request: str | None = None,
+) -> None:
     to_addr = _recipient_email(recipient)
     if not to_addr:
         # No owner email and no configured default: best-effort, so log and skip.
@@ -147,7 +179,7 @@ def _notify_ses(session_id: str, reason: str, message: str, recipient: dict | No
     from_addr = os.getenv("TWAIN_NOTIFY_FROM", to_addr)
     import boto3  # lazy: only when the SES backend is actually used
 
-    subject, body = _compose(session_id, reason, message)
+    subject, body = _compose(session_id, reason, message, request)
     client = boto3.client("ses", region_name=os.getenv("AWS_REGION", "us-east-1"))
     client.send_email(
         Source=from_addr,
@@ -174,7 +206,8 @@ def _ensure_env_loaded() -> None:
 
 
 def _notify_sendgrid(
-    session_id: str, reason: str, message: str, recipient: dict | None = None
+    session_id: str, reason: str, message: str, recipient: dict | None = None,
+    request: str | None = None,
 ) -> None:
     """Email the run's owner via the SendGrid HTTP API.
 
@@ -200,7 +233,7 @@ def _notify_sendgrid(
             "TWAIN_NOTIFY_BACKEND=sendgrid but TWAIN_NOTIFY_FROM is unset "
             "(SendGrid requires a verified sender address)"
         )
-    subject, body = _compose(session_id, reason, message)
+    subject, body = _compose(session_id, reason, message, request)
     _sendgrid_post(api_key, from_addr, to_addr, subject, body)
 
 

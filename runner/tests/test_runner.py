@@ -88,6 +88,9 @@ class FakeDB:
     def owner_contact(self, sid):
         return self.owner
 
+    def run_title(self, sid):
+        return "Predict the band gap of silicon"
+
     def insert_run_event(self, sid, event_type, payload, seq=None):
         self.events.append({"event_type": event_type, "payload": payload})
 
@@ -431,6 +434,38 @@ class TestProcessJob:
         runner.process_job(self._job(max_cost=1.0), db, engine)
         assert not any("heads up" in m["content"].lower() for m in db.messages)
         assert db.status == "awaiting_approval"
+
+    def test_completion_fires_a_notification(self):
+        # A run that reaches TERMINATE notifies the owner it finished (not just a
+        # suspend). Drive _drive_run directly so we can inject a recording notifier.
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        orch = engine.build_orchestrator(
+            session_id=SESSION, researcher_id="", request="r",
+            ask=DbAsk(db, SESSION), sink=PgEventSink(db, SESSION), store=None,
+        )
+        notes = RecordingNotifier()
+        runner._drive_run(db, SESSION, orch, engine, notifier=notes)
+        assert "completed" in [reason for _sid, reason, _msg in notes.calls]
+
+    def test_failure_fires_a_notification(self):
+        db = FakeDB()
+        notes = RecordingNotifier()
+
+        class FailOrch:
+            def __init__(self):
+                self.sm = types.SimpleNamespace(
+                    context=types.SimpleNamespace(artifacts={}),
+                    current_state=types.SimpleNamespace(name="INTAKE"),
+                )
+
+            def run(self, until=None):
+                self.sm.current_state = types.SimpleNamespace(name="DISCOVER")
+                return "error"
+
+        runner._drive_run(db, SESSION, FailOrch(), FakeEngine(), notifier=notes)
+        assert "failed" in [reason for _sid, reason, _msg in notes.calls]
 
 
 # ── run_loop ──────────────────────────────────────────────────────────────────

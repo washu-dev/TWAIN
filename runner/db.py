@@ -195,6 +195,17 @@ class RunnerDB:
             return None
         return {"email": row.get("email"), "name": row.get("name"), "phone": row.get("phone")}
 
+    def run_title(self, session_id: str) -> str | None:
+        """The run's title (its originating request), or None if unknown.
+
+        Used by the notifier to put the prompt in the subject line so a researcher
+        with several runs can tell the emails apart.
+        """
+        row = self._query_one(
+            "SELECT title FROM conversations WHERE id = %s;", (session_id,)
+        )
+        return (row or {}).get("title") if row else None
+
     # ---- messages -------------------------------------------------------------
     def add_assistant_message(
         self, session_id: str, content: str, *, kind: str = "chat", state: str | None = None

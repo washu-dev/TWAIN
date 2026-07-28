@@ -122,17 +122,19 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
         if status == "paused":
             return  # suspended for user input (clarify / heavy-calc); released
         if status == "completed":
-            db.add_assistant_message(
-                session_id, engine.final_summary(orch), kind="chat", state="TERMINATE"
-            )
+            summary = engine.final_summary(orch)
+            db.add_assistant_message(session_id, summary, kind="chat", state="TERMINATE")
+            notifier(session_id, "completed", summary)
             return
         if status == "error":
-            db.add_assistant_message(
-                session_id, "The run failed — see the run log for details.", kind="chat"
-            )
+            fail_msg = "The run failed — see the run log for details."
+            db.add_assistant_message(session_id, fail_msg, kind="chat")
+            notifier(session_id, "failed", fail_msg)
             return
         # Reached a terminal state without pausing (e.g. empty discovery).
-        db.add_assistant_message(session_id, engine.final_summary(orch), kind="chat")
+        summary = engine.final_summary(orch)
+        db.add_assistant_message(session_id, summary, kind="chat")
+        notifier(session_id, "completed", summary)
         return
 
 

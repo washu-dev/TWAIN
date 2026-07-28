@@ -17,17 +17,50 @@ from runner.notifications import default_notifier, make_notifier
 SESSION = "conv-1"
 
 
-class FakeContactDB:
-    """Minimal RunnerDB stand-in: just the owner_contact lookup the notifier uses."""
+# ── _compose: subject carries the request + a short run id ────────────────────
+class TestCompose:
+    def test_subject_includes_request_and_short_id(self):
+        subject, body = notifications._compose(
+            "68566684-9121-4d90-a59d-e669c8ce63a8", "approval", "Plan ready",
+            request="Predict the band gap of silicon",
+        )
+        # The prompt + a short id let a researcher tell same-prompt runs apart.
+        assert "Predict the band gap of silicon" in subject
+        assert "68566684" in subject
+        assert "waiting for your approval" in subject
+        assert "Predict the band gap of silicon" in body
 
-    def __init__(self, owner=None, raises=False):
+    def test_completed_and_failed_reasons(self):
+        done, _ = notifications._compose("s-1", "completed", "All done")
+        failed, _ = notifications._compose("s-1", "failed", "Boom")
+        assert "finished" in done
+        assert "failed" in failed
+
+    def test_long_request_is_truncated(self):
+        subject, _ = notifications._compose("s-1", "input", "Q", request="x" * 200)
+        assert "…" in subject and len(subject) < 130
+
+    def test_no_request_still_composes(self):
+        subject, _ = notifications._compose("abcd1234-0000", "input", "Q")
+        assert "needs your input" in subject
+        assert "abcd1234" in subject
+
+
+class FakeContactDB:
+    """Minimal RunnerDB stand-in: the owner_contact + run_title lookups the notifier uses."""
+
+    def __init__(self, owner=None, raises=False, title="Predict the band gap of silicon"):
         self._owner = owner
         self._raises = raises
+        self._title = title
 
     def owner_contact(self, session_id):
         if self._raises:
             raise RuntimeError("db down")
         return self._owner
+
+    def run_title(self, session_id):
+        return self._title
 
 
 class FakeSnsSes:
@@ -59,22 +92,23 @@ class TestMakeNotifier:
         seen = {}
         monkeypatch.setattr(
             notifications, "default_notifier",
-            lambda sid, reason, msg, recipient=None: seen.update(
-                sid=sid, reason=reason, msg=msg, recipient=recipient
+            lambda sid, reason, msg, recipient=None, request=None: seen.update(
+                sid=sid, reason=reason, msg=msg, recipient=recipient, request=request
             ),
         )
         owner = {"email": "researcher@wustl.edu", "name": "R", "phone": None}
         make_notifier(FakeContactDB(owner))(SESSION, "input", "Which solvent?")
         assert seen["recipient"] == owner
         assert seen == {
-            "sid": SESSION, "reason": "input", "msg": "Which solvent?", "recipient": owner
+            "sid": SESSION, "reason": "input", "msg": "Which solvent?", "recipient": owner,
+            "request": "Predict the band gap of silicon",  # forwarded for the subject line
         }
 
     def test_lookup_failure_falls_back_to_no_recipient(self, monkeypatch):
         seen = {}
         monkeypatch.setattr(
             notifications, "default_notifier",
-            lambda sid, reason, msg, recipient=None: seen.update(recipient=recipient),
+            lambda sid, reason, msg, recipient=None, request=None: seen.update(recipient=recipient),
         )
         # A DB error must not raise out of the notifier (best-effort).
         make_notifier(FakeContactDB(raises=True))(SESSION, "input", "Q")
@@ -217,7 +251,7 @@ class TestSendGridBackend:
         monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "sendgrid")
         monkeypatch.setattr(
             notifications, "_notify_sendgrid",
-            lambda sid, reason, msg, recipient=None: called.update(
+            lambda sid, reason, msg, recipient=None, request=None: called.update(
                 sid=sid, reason=reason, recipient=recipient
             ),
         )
