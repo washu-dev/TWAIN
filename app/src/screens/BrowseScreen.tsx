@@ -16,7 +16,7 @@ import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
-const TERMINAL_STATUSES = ['completed', 'error', 'rejected'];
+const TERMINAL_STATUSES = ['completed', 'error', 'rejected', 'cancelled'];
 
 type Group = 'attention' | 'running' | 'done';
 

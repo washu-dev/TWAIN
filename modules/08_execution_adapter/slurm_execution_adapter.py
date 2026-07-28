@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import time
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -100,6 +101,10 @@ def _maxrss_mb(text: str) -> Optional[float]:
     return round(value * factor[match.group(2).upper()], 3)
 
 
+class _AbortRequested(Exception):
+    """Internal: the terminate seam fired while polling a Slurm job."""
+
+
 class SlurmExecutionAdapter:
     """Stage, submit, poll, and fetch one RunBundle as a Slurm job."""
 
@@ -117,12 +122,20 @@ class SlurmExecutionAdapter:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         cluster_runner: Optional[Runner] = None,
         transfer_runner: Optional[Runner] = None,
+        env_pythons: Optional[List[str]] = None,
         sleep=None,
+        should_abort=None,
     ):
         """``cluster_runner`` executes sbatch/squeue/sacct (defaults to SSH to the
         profile's first login node, or locally when ``host`` is falsy -- i.e. the
         process already runs on a login node). ``transfer_runner`` executes the
-        rsync/ssh staging commands locally. Both are injectable for tests."""
+        rsync/ssh staging commands locally. Both are injectable for tests.
+
+        ``env_pythons`` lists pre-provisioned interpreters on cluster storage
+        (e.g. ``<envs_root>/gpaw/bin/python``), tried in order at job start;
+        the first that exists is used instead of building a venv -- required
+        for compiled calculators (GPAW needs libxc headers) that pip cannot
+        build on bare compute nodes."""
         self.profile = profile or ClusterProfile.load("compute2")
         # Default resource ask when the plan carries none: a small CPU job.
         self.request = request or SlurmRequest(
@@ -134,7 +147,11 @@ class SlurmExecutionAdapter:
         self.partition = partition
         self.max_wait = max_wait
         self.poll_interval = poll_interval
+        self.env_pythons = list(env_pythons or [])
         self._sleep = sleep
+        # Terminate seam: zero-arg callable polled between squeue checks; True
+        # means the researcher pressed Terminate -> scancel the job and return.
+        self.should_abort = should_abort
 
         if cluster_runner is None:
             cluster_runner = ssh_runner(self.host, user=user) if self.host \
@@ -209,22 +226,46 @@ class SlurmExecutionAdapter:
             )
 
         # 3) wait (bounded) -----------------------------------------------------
+        # Sleep between polls through an abort-aware wrapper: when the
+        # researcher presses Terminate, stop waiting, scancel the job, and
+        # report a clean "terminated" result instead of burning the wall time.
+        base_sleep = self._sleep if self._sleep is not None else time.sleep
+
+        def _abortable_sleep(seconds: float) -> None:
+            if self.should_abort is not None and self.should_abort():
+                raise _AbortRequested()
+            base_sleep(seconds)
+
         try:
-            wait_kwargs = dict(poll_interval=self.poll_interval, max_wait=max_wait)
-            if self._sleep is not None:
-                wait_kwargs["sleep"] = self._sleep
+            wait_kwargs = dict(poll_interval=self.poll_interval, max_wait=max_wait,
+                               sleep=_abortable_sleep)
             state = self.slurm.wait(job_id, **wait_kwargs)
-        except SlurmError:
-            # Budget expired with the job still queued/running: leave it alone
-            # (a multi-hour DFT run must not die because our wait was shorter)
-            # and tell the researcher exactly how to follow up.
+        except _AbortRequested:
+            try:
+                self.slurm.cancel(job_id)
+                note = f"Slurm job {job_id} was cancelled (scancel)"
+            except SlurmError as exc:
+                note = (f"cancelling Slurm job {job_id} failed ({exc}) -- "
+                        f"cancel it manually with `scancel {job_id}`")
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                message=f"run terminated by the researcher; {note}",
+                tool_name=tool_name,
+                command=["sbatch", f"{remote_dir}/job.slurm"],
+                artifacts_dir=local_dir if keep_artifacts else None,
+            )
+        except SlurmError as exc:
+            # Budget expired (or contact with the cluster stayed lost) with the
+            # job still queued/running: leave it alone (a multi-hour DFT run
+            # must not die because our wait was shorter) and tell the researcher
+            # exactly how to follow up.
             return ExecutionResult(
                 status=ExecutionStatus.TIMEOUT,
                 message=(
                     f"the Slurm job is still running on {self.profile.name} "
                     f"(job id {job_id}); it was NOT cancelled. Check it with "
                     f"`squeue --job {job_id}` and fetch outputs from {remote_dir} "
-                    f"when it completes."
+                    f"when it completes. (wait ended because: {exc})"
                 ),
                 tool_name=tool_name,
                 command=["sbatch", f"{remote_dir}/job.slurm"],
@@ -281,12 +322,17 @@ class SlurmExecutionAdapter:
     def _payload(self, local_dir, *, install_deps: bool, run_smoke: bool) -> str:
         """The shell payload the batch script runs inside the remote run dir.
 
-        Containers bring their own stack (pyxis mounts the run dir); otherwise a
-        venv from requirements.txt makes the job self-contained on compute nodes
-        that have no TWAIN environment. Smoke tests (inline_tests.py) run first
-        so a missing dependency fails in seconds, not after queueing the real run.
+        Containers bring their own stack (pyxis mounts the run dir). Otherwise
+        the job prefers a pre-provisioned environment from ``env_pythons``
+        (checked in order at runtime -- compiled calculators like GPAW can't be
+        pip-built on compute nodes), falling back to a venv from
+        requirements.txt. Smoke tests (inline_tests.py) run first so a missing
+        dependency fails in seconds, not after queueing the real run.
         """
         bundle = Path(local_dir)
+        if not self.container_image and self.env_pythons:
+            return self._env_payload(bundle, install_deps=install_deps,
+                                     run_smoke=run_smoke)
         steps: List[str] = []
         if self.container_image:
             python = "python3"
@@ -301,6 +347,69 @@ class SlurmExecutionAdapter:
             steps.append(f"{python} inline_tests.py")
         steps.append(f"{python} main.py")
         return " && ".join(steps)
+
+    def _env_payload(self, bundle: Path, *, install_deps: bool,
+                     run_smoke: bool) -> str:
+        """Multi-line payload: pick the first existing env python, else venv.
+
+        Existence is checked on the compute node at job start (``[ -x ... ]``)
+        because the adapter can't cheaply stat cluster storage from here.
+        ``set -e`` keeps the fail-fast behavior of the ``&&`` chain.
+        """
+        candidates = " ".join(shlex.quote(p) for p in self.env_pythons)
+        lines = [
+            "set -e",
+            'PY=""',
+            f"for CAND in {candidates}; do "
+            'if [ -x "$CAND" ]; then PY="$CAND"; break; fi; done',
+            'if [ -z "$PY" ]; then',
+        ]
+        if install_deps and (bundle / "requirements.txt").is_file():
+            lines += [
+                "  python3 -m venv .venv",
+                "  .venv/bin/python -m pip install -q --upgrade pip",
+                "  .venv/bin/python -m pip install -q -r requirements.txt",
+                '  PY=".venv/bin/python"',
+            ]
+        else:
+            lines.append('  PY="python3"')
+        lines.append("fi")
+        if run_smoke and (bundle / "inline_tests.py").is_file():
+            lines.append('"$PY" inline_tests.py')
+        # Run the real payload under MPI when the selected env ships mpirun
+        # (e.g. the openmpi GPAW build): DFT engines parallelize over k-points
+        # via MPI ranks, which scales far better than OpenMP threading. One
+        # thread per rank so ranks*threads never oversubscribes the allocation.
+        lines += [
+            'BIN="$(dirname "$PY")"',
+            'if [ -x "$BIN/mpirun" ]; then',
+            '  export OMP_NUM_THREADS=1',
+            # conda-forge OpenMPI finds its runtime data (PMIx/PRRTE help
+            # files, plugins) via OPAL_PREFIX, normally set by env activation
+            # -- we invoke by path without activating, so set it explicitly.
+            '  export OPAL_PREFIX="$(dirname "$BIN")"',
+            '  export PMIX_PREFIX="$OPAL_PREFIX"',
+            # The sbatch asks for --ntasks=1 --cpus-per-task=N (the right shape
+            # for threaded serial runs), so OpenMPI sees ONE slot and refuses
+            # -np N. Oversubscribe the slot count: the job's cgroup still pins
+            # us to the N allocated cores, one rank per core in practice.
+            # GPAW refuses a plain interpreter with >1 ranks ("Please use
+            # gpaw python to run in parallel"). `$PY -m gpaw python` is the
+            # wrapper's documented equivalent (gpaw/__main__.py selects the
+            # cgpaw MPI backend) and, unlike the $BIN/gpaw entry script, can't
+            # be broken by a stale relative shebang in the cluster env.
+            '  if [ -x "$BIN/gpaw" ]; then LAUNCH="$PY -m gpaw python";'
+            ' else LAUNCH="$PY"; fi',
+            # --bind-to none: with OVERSUBSCRIBE over one nominal slot, OpenMPI
+            # otherwise stacks every rank on the same core (observed ~40x
+            # slowdown); unbound ranks spread over the cgroup's real cores.
+            '  "$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"'
+            ' --map-by :OVERSUBSCRIBE --bind-to none $LAUNCH main.py',
+            "else",
+            '  "$PY" main.py',
+            "fi",
+        ]
+        return "\n".join(lines)
 
     def _read_log(self, local_dir, job_name: str, job_id: str) -> str:
         path = Path(local_dir) / f"{job_name}-{job_id}.log"
@@ -325,7 +434,13 @@ class SlurmExecutionAdapter:
                     f"Slurm job {job_id} hit its wall-clock limit and was killed")
         if state is JobState.CANCELLED:
             return ExecutionStatus.FAILED, f"Slurm job {job_id} was cancelled"
+        # OUT_OF_MEMORY maps to FAILED in parse_slurm_state; surface it clearly
+        # (sacct often reports ExitCode 0:125 which looks like success otherwise).
         blob = (stdout or "").lower()
+        if "oom" in blob or "out_of_memory" in blob or "oom_kill" in blob:
+            return (ExecutionStatus.FAILED,
+                    f"Slurm job {job_id} was killed (out of memory) — "
+                    f"raise RAM on the approval card (floor is 4 GB) and retry")
         # The smoke script exits 2 on a missing dependency; the payload chain
         # propagates it as the job's exit code.
         if exit_code == 2 or any(marker in blob for marker in _DEP_ERROR_MARKERS):

@@ -159,6 +159,14 @@ class LocalExecutionAdapter:
             _bindir = str(Path(run_python).parent)
             run_env["PATH"] = _bindir + os.pathsep + run_env.get("PATH", "")
 
+            # Use every available core: OpenMP-based calculators (e.g. GPAW)
+            # run single-threaded unless OMP_NUM_THREADS is set. Only defaults —
+            # anything already in the environment or caller ``env`` wins.
+            _cpus = str(os.cpu_count() or 1)
+            for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                         "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+                run_env.setdefault(_var, _cpus)
+
             # DFTB+ locates its Slater-Koster (.skf) parameter files via
             # DFTB_PREFIX. pixi's [activation.env] sets it, but if the runner was
             # launched outside pixi it may be unset -- fall back to the repo's

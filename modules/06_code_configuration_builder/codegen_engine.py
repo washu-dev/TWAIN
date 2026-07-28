@@ -306,7 +306,23 @@ would come out wrong, the fix is to CORRECT the structure-building code so it pr
 right cell -- never to bolt on a validator that halts execution. You may print the \
 composition, cell, and minimum interatomic distance for visibility, but a mismatch must \
 never stop the computation.
-{structure_note}
+- Keep the space-group ORIGIN SETTING and the Wyckoff coordinates consistent: origin \
+choice 1 and origin choice 2 place the same site at DIFFERENT fractional coordinates, and \
+a mismatch silently builds the wrong occupancy/stoichiometry (in Fd-3m origin choice 2, \
+8a is (1/8,1/8,1/8) and 16d is (1/2,1/2,1/2); (0,0,0) is the 16c site there, whereas 8a \
+is (0,0,0) only in origin choice 1). Because this is easy to get wrong from memory, \
+SELF-CHECK it at runtime: after building, derive the element counts from the structure, \
+and if their reduced ratio does not match the target formula, REBUILD with the same \
+Wyckoff coordinates under the other `setting=` value and use whichever cell matches. \
+This rebuild-on-mismatch is required; aborting on mismatch is forbidden.
+- Import from the CURRENT module layout of the pinned library versions -- do not use \
+import paths that only worked in older releases, and NEVER invent a module path that \
+merely sounds plausible. In ASE >= 3.23, cell-relaxation filters live in `ase.filters` \
+(`from ase.filters import FrechetCellFilter`), NOT `ase.constraints`. The band-gap \
+helper is `from ase.dft.bandgap import bandgap` (pass it the attached calculator); \
+there is NO `gpaw.bandgap` module. In GPAW, occupations={{"name": "fixed"}} requires an \
+explicit per-band `numbers` array -- for a frozen-occupations band-structure pass use \
+{{"name": "fixed-uniform"}}.
 - Attach the {calculator} calculator (`{calculator_import}`) and compute {property}. \
 Do NOT invent model, dataset, or parameter-set identifiers -- a name you guess may \
 not exist. If the calculator loads a named pretrained model, discover the valid \
@@ -318,14 +334,41 @@ or averaging scheme (e.g. an elastic-tensor-derived modulus and its averaging \
 convention, a specific gap type, a named ensemble), compute THAT quantity by its proper \
 method -- do not report a cheaper proxy under the requested name -- and add a comment \
 stating how the number you print maps to {property}.
-- If {property} is only defined for an equilibrium structure, RELAX the geometry first \
-(atomic positions, and the cell when the property depends on it) to converged \
-forces/stress, and compute from the relaxed structure -- not from an arbitrary \
-unrelaxed guess.
+- Default to the FASTEST protocol that answers the question. Unless the researcher \
+explicitly asked for a relaxed/optimized structure, do NOT run any geometry or cell \
+optimization: evaluate the property directly at the standard reference structure \
+(experimental lattice parameters) -- a band gap, band structure, DOS, or single-point \
+energy needs no relaxation step. Relax first ONLY when {property} is undefined without \
+equilibrium (e.g. an equation-of-state minimum, elastic response, adsorption geometry), \
+and then relax only the degrees of freedom the property depends on, to converged \
+forces/stress -- never from an arbitrary unrelaxed guess.
 - In the real (non-smoke) run, use numerical settings converged well enough for \
 {property} (adequate k-point density, plane-wave/basis cutoff, SCF tolerance, sampling); \
 use the library's documented production defaults when unsure, and do not carry any \
 reduced settings from the --smoke check into the full run.
+- Do NOT pay for atoms the property does not need: for a bulk crystal property \
+(lattice parameter, bulk modulus, cohesive/formation energy, band property) run the \
+calculation on the PRIMITIVE cell, converting any conventional-cell quantity (like a \
+cubic lattice parameter) from the primitive-cell result at the end. This must happen \
+IN CODE, not in a comment: with `ase.spacegroup.crystal` actually pass \
+`primitive_cell=True` in the call, and SELF-CHECK by printing the atom count (diamond \
+Si primitive = 2 atoms, not the 8-atom conventional cube; C15 CaPt2 primitive = 6 \
+atoms, not 24). Plane-wave DFT cost grows roughly with the CUBE of the atom count, so \
+a conventional cell wastes an order of magnitude or more. Use the full conventional \
+cell only when the property genuinely requires it (e.g. a defect or surface supercell).
+- Keep sampling scans minimal-but-sufficient: an equation-of-state fit needs 5-7 \
+volume points around the reference cell -- only widen or rescan if the minimum is not \
+bracketed.
+- For a band structure / band path, NEVER hardcode special-point letters: which \
+letters exist (W, L, M, R, ...) depends on the Bravais lattice ASE detects from the \
+actual cell, and a wrong guess raises KeyError after the whole SCF has already been \
+paid for. Use the cell's own default path (e.g. \
+`atoms.cell.bandpath(npoints=..., pbc=atoms.pbc)` with no path string), or build the \
+path only from letters present in `atoms.cell.bandpath().special_points`.
+- Make output MPI-safe: when the calculator can run under MPI, every rank executes the \
+script, so write files and print through rank-0-only helpers (e.g. \
+`ase.parallel.parprint` and `ase.parallel.paropen`, or an explicit \
+`world.rank == 0` guard). These are no-ops in serial runs, so use them unconditionally.
 - Print every metric WITH its physical unit, and for any fitted or derived value also \
 print a fit-quality / convergence diagnostic (e.g. fit residual, R^2, number of sample \
 points) so the result's reliability is visible.
@@ -380,9 +423,12 @@ file. For a molecule, build from its formula/SMILES with the library's own tools
 crystal, build the EXACT phase/polymorph named -- if a space group is given, construct \
 THAT structure and never substitute a different or more common polymorph; its standard \
 reference lattice parameters are structural INPUTS, not the {property} you compute. \
-Optimize the geometry first if the property needs a relaxed structure, using numerical \
-settings converged well enough for {property} in the real run. Do NOT hardcode the \
-{property} value or any other result you are meant to calculate.
+Default to the FASTEST protocol that answers the question: unless the researcher \
+explicitly asked for a relaxed/optimized structure, compute directly at the standard \
+reference geometry with NO optimization step; optimize first only when {property} is \
+undefined without equilibrium, using numerical settings converged well enough for \
+{property} in the real run. Do NOT hardcode the {property} value or any other result \
+you are meant to calculate.
 - Build the structure CORRECTLY rather than defensively: use the standard reference cell \
 for the named polymorph (correct lattice parameters, Wyckoff positions, and stoichiometric \
 ratio for the formula). Do NOT write runtime guards that raise or exit when the \
@@ -398,6 +444,10 @@ printed number maps to {property}. Do NOT invent method, basis-set, functional, 
 parameter identifiers -- a name you guess may not exist. Use documented defaults or \
 discover valid identifiers at runtime, and call every API with the argument types it \
 documents.
+- Do NOT pay for atoms the property does not need: compute bulk crystal properties on \
+the PRIMITIVE cell (converting conventional-cell quantities from it at the end), and \
+keep sampling scans minimal-but-sufficient (an equation-of-state fit needs 5-7 volume \
+points; widen only if the minimum is not bracketed).
 - Keep the heavy import (`{library_import}`) INSIDE functions so the module still \
 imports where it is not installed.
 - First thing in the `if __name__ == "__main__":` block, anchor the working \
@@ -819,6 +869,9 @@ class CodegenEngine:
             main_filename="main.py",
             output_filename="results.csv",
             run_smoke=True,
+            # A load-only smoke (heavy calculator) constructs the calculator and
+            # exits without computing, so no results file is owed.
+            require_output=bool(brief.get("smoke_compute")),
         )
         # A calculator run executes in the heavy sim env; a library-only run runs on
         # the default interpreter (where its library is installed) -- record that so

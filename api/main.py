@@ -128,6 +128,9 @@ async def admin_set_user_role(user_id: str, body: RoleUpdate, _admin: AdminUser)
 class CreateConversation(BaseModel):
     request: str
     title: str | None = None
+    # Where EXECUTE runs: 'slurm' submits to the RIS cluster, 'local' runs on
+    # the runner host, None keeps the runner's env-configured default.
+    compute_target: Literal["local", "slurm"] | None = None
     # Optional per-run LLM cost cap (USD). None => deployment default (the runner
     # falls back to TWAIN_RUN_MAX_COST). Must be positive when supplied.
     max_cost: float | None = None
@@ -139,6 +142,8 @@ class SendMessage(BaseModel):
 
 class SendApproval(BaseModel):
     decision: Literal["approve", "reject"]
+    # Optional plan-unit overrides (ram GB, max_time hours) from the approval card.
+    slurm_request: dict | None = None
 
 
 class RerunConversation(BaseModel):
@@ -162,7 +167,8 @@ async def start_conversation(body: CreateConversation, user: CurrentUser):
     if body.max_cost is not None and body.max_cost <= 0:
         raise HTTPException(status_code=422, detail="max_cost must be a positive number.")
     conversation = convo.create_conversation(
-        user["id"], body.request, body.title, max_cost=body.max_cost
+        user["id"], body.request, body.title,
+        compute_target=body.compute_target, max_cost=body.max_cost
     )
     return {"data": conversation}
 
@@ -202,7 +208,25 @@ async def post_message(conversation_id: str, body: SendMessage, user: CurrentUse
 async def post_approval(conversation_id: str, body: SendApproval, user: CurrentUser):
     """Answer a plan-approval gate ('approve' resumes the run, 'reject' stops it)."""
     _require_own_conversation(conversation_id, user)
-    return {"data": convo.add_approval_response(conversation_id, body.decision)}
+    return {
+        "data": convo.add_approval_response(
+            conversation_id, body.decision, slurm_request=body.slurm_request
+        )
+    }
+
+
+@app.post("/api/conversations/{conversation_id}/terminate")
+async def post_terminate(conversation_id: str, user: CurrentUser):
+    """Ask the runner to stop this run at the next opportunity.
+
+    Records a 'terminate' control message and flips the conversation to
+    'cancelling'; the runner notices between stages / polls, cancels any
+    in-flight Slurm job, and settles the conversation as 'cancelled'.
+    """
+    conversation = _require_own_conversation(conversation_id, user)
+    if conversation["status"] in convo.TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="Run already finished.")
+    return {"data": convo.request_termination(conversation_id)}
 
 
 @app.post("/api/conversations/{conversation_id}/rerun")

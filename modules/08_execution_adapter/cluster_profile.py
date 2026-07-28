@@ -74,6 +74,10 @@ class ClusterProfile:
     gpu_modules: List[str] = field(default_factory=list)
     gpu_type: Optional[str] = None
     storage_root: Optional[str] = None
+    # Root of pre-provisioned Python environments on cluster storage
+    # (<envs_root>/<tool>/bin/python). Jobs prefer these over building a venv,
+    # which is how compiled calculators (GPAW needs libxc) run on compute nodes.
+    envs_root: Optional[str] = None
     default_partition: Optional[str] = None
     gpu_partition: Optional[str] = None
     short_partition: Optional[str] = None
@@ -110,6 +114,8 @@ class ClusterProfile:
                 raise ValueError(f"ClusterProfile {attr} must be a list of str")
         if self.gpu_type is not None and type(self.gpu_type) is not str:
             raise ValueError("ClusterProfile gpu_type must be a str or None")
+        if self.envs_root is not None and type(self.envs_root) is not str:
+            raise ValueError("ClusterProfile envs_root must be a str or None")
 
         # Named partitions, when set, must actually exist in the partition list.
         for attr in ("default_partition", "gpu_partition", "short_partition"):

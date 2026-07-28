@@ -261,8 +261,21 @@ class RunnerDB:
         if kind is not None:
             sql += " AND kind = %s"
             params.append(kind)
+        else:
+            # A terminate request is a control signal, never a chat/clarify answer.
+            sql += " AND kind <> 'terminate'"
         sql += " ORDER BY id;"
         return self._query_all(sql, tuple(params))
+
+    def terminate_requested(self, session_id: str) -> bool:
+        """True once the user asked to terminate this run (kind='terminate')."""
+        row = self._query_one(
+            "SELECT 1 AS t FROM messages "
+            "WHERE conversation_id = %s AND role = 'user' AND kind = 'terminate' "
+            "LIMIT 1;",
+            (session_id,),
+        )
+        return row is not None
 
     # ---- run events -----------------------------------------------------------
     def insert_run_event(

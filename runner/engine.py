@@ -82,7 +82,8 @@ class _RealEngine:
         self.STATE_BUILD = self._State.BUILD
 
     def build_orchestrator(
-        self, *, session_id, researcher_id, request, ask, sink, store, max_cost=None,
+        self, *, session_id, researcher_id, request, ask, sink, store,
+        compute_target=None, cancel=None, max_cost=None,
     ):
         # Real execution is env-gated so the SAME image works everywhere: set
         # TWAIN_EXECUTE_LOCALLY=1 (local `docker run -e ...` or the ECS task
@@ -96,13 +97,19 @@ class _RealEngine:
         # confirmation gates (the heavy-calc prompt here; the plan-approval gate in
         # runner._drive_run). TWAIN_EXECUTE_LOCALLY=1 executes but still asks.
         auto = _env_flag("TWAIN_AUTO_RUN")
-        # TWAIN_EXECUTE_SLURM=1 submits the built bundle to the Slurm cluster
-        # (TWAIN_SLURM_CLUSTER names the configs/clusters/ profile; default
-        # compute2) instead of running it locally/in Docker. Requires reachable
-        # login nodes (VPN + SSH key) or running on a login node itself
-        # (TWAIN_SLURM_HOST="").
-        slurm = _env_flag("TWAIN_EXECUTE_SLURM")
-        execute = auto or slurm or _env_flag("TWAIN_EXECUTE_LOCALLY")
+        # Slurm submission (instead of running locally/in Docker): the per-run
+        # choice made in the UI (`compute_target` on the job) wins; when the UI
+        # didn't pick, TWAIN_EXECUTE_SLURM=1 sets the fleet-wide default.
+        # TWAIN_SLURM_CLUSTER names the configs/clusters/ profile (default
+        # compute2). Requires reachable login nodes (VPN + SSH key) or running
+        # on a login node itself (TWAIN_SLURM_HOST="").
+        if compute_target is not None:
+            slurm = compute_target == "slurm"
+        else:
+            slurm = _env_flag("TWAIN_EXECUTE_SLURM")
+        # An explicit UI choice always executes; otherwise env-gated as before.
+        execute = auto or slurm or _env_flag("TWAIN_EXECUTE_LOCALLY") \
+            or compute_target == "local"
         # Budget caps: a per-run ``max_cost`` (from the user) overrides the
         # deployment default (TWAIN_RUN_MAX_COST); iteration/wall-time rails are
         # deployment-wide. Without this wiring the orchestrator silently fell back
@@ -133,11 +140,22 @@ class _RealEngine:
             # catches it, checkpoints PAUSED, and returns so the runner releases
             # the process. A ``resume`` job continues the run when the user replies.
             suspend_exc=SuspendRun,
+            # Terminate button: True once the user asked to stop. The orchestrator
+            # checks it between stages (raising RunCancelled) and the Slurm poll
+            # loop checks it between squeue polls (scancelling the job).
+            cancel_check=cancel,
         )
 
     def current_state_name(self, orch) -> str:
         """The pipeline state the orchestrator is parked in (e.g. 'CLARIFY', 'BUILD')."""
         return orch.sm.current_state.name
+
+    def compute_target_of(self, orch) -> str:
+        """``'slurm'`` or ``'local'`` for the orchestrator the runner built."""
+        return "slurm" if getattr(orch.sm, "execute_slurm", False) else "local"
+
+    def slurm_cluster_of(self, orch) -> str | None:
+        return getattr(orch.sm, "slurm_cluster", None)
 
     def rewind(self, orch, target_state: str) -> None:
         """Rewind a resumed orchestrator to ``target_state`` so it re-runs from there.
@@ -164,6 +182,34 @@ class _RealEngine:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
         return None
+
+    def apply_slurm_overrides(self, orch, overrides: dict) -> None:
+        """Patch ``slurm_request`` on the on-disk execution plan (plan-unit fields).
+
+        ``overrides`` uses the plan contract: ``ram`` in GB, ``max_time`` in hours.
+        Values are clamped to the same floors the synthesizer applies.
+        """
+        from plan_synthesizer.plan_synthesizer import MIN_RAM_GB, MIN_WALL_MINUTES
+
+        path = orch.sm.context.artifacts.get("execution_plan")
+        if not path or not os.path.isfile(path):
+            return
+        with open(path, encoding="utf-8") as f:
+            plan = json.load(f)
+        current = dict(plan.get("slurm_request") or {})
+        if "cpu_count" in overrides:
+            current["cpu_count"] = max(1, int(overrides["cpu_count"]))
+        if "gpu_count" in overrides:
+            current["gpu_count"] = max(0, int(overrides["gpu_count"]))
+        if "ram" in overrides:
+            current["ram"] = max(MIN_RAM_GB, int(overrides["ram"]))
+        if "max_time" in overrides:
+            # Plan stores hours; floor is MIN_WALL_MINUTES expressed in hours.
+            hours = float(overrides["max_time"])
+            current["max_time"] = max(MIN_WALL_MINUTES / 60.0, hours)
+        plan["slurm_request"] = current
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(plan, f, indent=2)
 
     def final_summary(self, orch) -> str:
         state = getattr(getattr(orch, "sm", None), "current_state", None)

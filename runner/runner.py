@@ -19,6 +19,11 @@ store, and stage artifacts (intent_spec, the run bundle, …) are made durable t
 run. So any runner can resume any run, even on a fresh box or after ``logs/`` was
 cleaned; no shared ``logs/`` volume is required.
 
+Terminate: pressing Terminate posts a ``kind='terminate'`` message; the
+orchestrator checks it between stages (raising RunCancelled) and the Slurm poll
+loop scancels the job. process_job treats a run that ends while terminate is set
+as *cancelled* (not failed).
+
 Usage::
 
     pixi run python -m runner.runner            # loop forever (LISTEN/NOTIFY)
@@ -95,6 +100,36 @@ def _budget_warning(plan: dict | None, run_budget) -> str | None:
     )
 
 
+def _cancel_check(db: RunnerDB, session_id: str):
+    """Zero-arg callable: True once the user pressed Terminate for this run."""
+    return lambda: db.terminate_requested(session_id)
+
+
+def _finalize_cancelled(db: RunnerDB, session_id: str) -> None:
+    db.set_conversation_status(session_id, "cancelled")
+    db.add_assistant_message(
+        session_id,
+        "Run terminated by user. Nothing further will be built or executed.",
+        kind="chat",
+    )
+
+
+def _announce_compute_target(db: RunnerDB, session_id: str, engine, orch) -> None:
+    """Announce the backend early so the chat shows RIS vs local before planning."""
+    if engine.compute_target_of(orch) == "slurm":
+        cluster = engine.slurm_cluster_of(orch) or "compute2"
+        db.add_assistant_message(
+            session_id,
+            f"Compute target: RIS cluster via Slurm ({cluster}). "
+            "The run will be submitted to the HPC queue after you approve the plan.",
+            kind="chat",
+        )
+    else:
+        db.add_assistant_message(
+            session_id, "Compute target: this server (local / Docker).", kind="chat",
+        )
+
+
 def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_notifier) -> None:
     """Advance the run until it completes, errors, or suspends for the user.
 
@@ -103,6 +138,8 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
     ``resume`` job — enqueued by the API when the user responds — continues it.
     The loop lets a single resume cross the approval gate straight into execution
     (e.g. an already-approved plan, or unattended mode) without a second job.
+    A terminate request surfaces as RunCancelled from ``orch.run`` and propagates
+    to ``process_job``, which records the cancellation.
     """
     build_state = _state_name(engine.STATE_BUILD)
     while True:
@@ -142,12 +179,11 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
     """Handle the BUILD approval gate. True to proceed into execution, else release.
 
     Unattended mode (TWAIN_AUTO_RUN) approves automatically. Otherwise: consume
-    the user's decision if it's in; if not, post the plan (with a budget heads-up
-    when the estimate is over the run's cap) and release; a 'reject' stops the run.
-    Either way, crossing the gate records a real plan approval
-    (``engine.approve_plan``) so the BUILD→REPAIR / REPAIR→EXECUTE guards let the
-    run proceed — execution truly requires an explicit approval, not merely that
-    the runner reached this point.
+    the user's decision if it's in; if not, post the plan (with the compute target
+    + any budget heads-up) and release; a 'reject' stops the run. Crossing the gate
+    records a real plan approval (``engine.approve_plan``) so the BUILD→REPAIR /
+    REPAIR→EXECUTE guards let the run proceed, and applies any Slurm resource
+    overrides the user edited on the approval card.
     """
     if _env_flag("TWAIN_AUTO_RUN"):
         engine.approve_plan(orch)
@@ -157,7 +193,7 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
         )
         return True
 
-    decision = consume_approval(db, session_id)
+    decision, slurm_overrides = consume_approval(db, session_id)
     if decision is None:
         # No decision yet: show the plan (idempotently) with any budget warning,
         # mark awaiting, release.
@@ -165,7 +201,11 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
         warning = _budget_warning(plan, getattr(orch, "run_budget", None))
         if warning:
             db.add_assistant_message(session_id, warning, kind="chat", state="PLAN")
-        post_plan_for_approval(db, session_id, plan, notifier=notifier)
+        post_plan_for_approval(
+            db, session_id, plan, notifier=notifier,
+            compute_target=engine.compute_target_of(orch),
+            slurm_cluster=engine.slurm_cluster_of(orch),
+        )
         return False
     if decision != "approve":
         db.set_conversation_status(session_id, "rejected")
@@ -178,13 +218,20 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
         )
         return False
     engine.approve_plan(orch)
-    db.add_assistant_message(
-        session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
-    )
+    if slurm_overrides:
+        engine.apply_slurm_overrides(orch, slurm_overrides)
+        db.add_assistant_message(
+            session_id, "Plan approved with updated Slurm settings. Building and executing…",
+            kind="chat", state="BUILD",
+        )
+    else:
+        db.add_assistant_message(
+            session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
+        )
     return True
 
 
-def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier):
+def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier, cancel):
     """Wire an orchestrator for this session with the chat/event/store bridges."""
     return engine.build_orchestrator(
         session_id=session_id,
@@ -193,6 +240,11 @@ def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, not
         ask=DbAsk(db, session_id, notifier=notifier),
         sink=PgEventSink(db, session_id),
         store=PgStore(db),
+        # Per-run execution backend picked in the UI ('local' | 'slurm');
+        # None falls back to the runner's env-configured default.
+        compute_target=params.get("compute_target"),
+        # Terminate button: checked between stages (raises RunCancelled).
+        cancel=cancel,
         # Per-run budget override (falls back to the deployment default in engine).
         max_cost=params.get("max_cost"),
     )
@@ -215,12 +267,13 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
 
     params = job.get("params") or {}
     # Owner-targeted notifications (Phase 2): resolve the run's owner via the DB so
-    # a suspend pings the specific researcher who left it. Shared by both suspend
-    # paths — the CLARIFY/heavy-calc ask bridge and the plan-approval gate.
+    # a suspend pings the specific researcher who left it. Terminate seam: a
+    # zero-arg callable that's True once the user pressed Terminate for this run.
     notifier = make_notifier(db)
+    cancel = _cancel_check(db, session_id)
     # On resume/rerun the orchestrator rebuilds its state + context from the session
     # store; request/researcher_id are only needed to *start* a run.
-    orch = _build_orchestrator(engine, db, session_id, params, notifier)
+    orch = _build_orchestrator(engine, db, session_id, params, notifier, cancel)
 
     if kind == "rerun":
         target = params.get("target_state")
@@ -235,6 +288,9 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
             session_id, f"↩︎ Re-running from {target}…", kind="chat", state=target,
         )
     else:
+        # A fresh start announces where it will execute (RIS vs local) up front.
+        if kind == "start":
+            _announce_compute_target(db, session_id, engine, orch)
         # Resume-safety: the orchestrator restored state + context (artifact *paths*)
         # from Postgres, but the files themselves may be absent on this box (fresh
         # runner, or logs/ was cleaned). Restore them from the DB before driving so
@@ -244,6 +300,18 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
 
     try:
         _drive_run(db, session_id, orch, engine, notifier=notifier)
+        if cancel():
+            # Terminate arrived too late to interrupt anything; still record it.
+            _finalize_cancelled(db, session_id)
+    except Exception as exc:  # noqa: BLE001 -- cancelled runs end via exceptions
+        # A terminate request aborts stages by raising RunCancelled from the
+        # orchestrator. Whatever the exception type, if the user asked to stop,
+        # this is a cancellation -- not a run failure -- so don't let the loop
+        # dead-letter it.
+        if not cancel():
+            raise
+        print(f"[runner] run {session_id} terminated by user ({exc})")
+        _finalize_cancelled(db, session_id)
     finally:
         # Best-effort: persist the specs + generated code so the report can show
         # them (also on a suspend, so partial artifacts are visible while waiting).

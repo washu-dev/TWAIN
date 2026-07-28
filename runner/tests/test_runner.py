@@ -44,6 +44,7 @@ class FakeDB:
         self.owner = None  # {"email", "name", "phone"} that owner_contact returns
         self._reap_batches = []  # each run_loop reap() call pops one batch of dead jobs
         self._next_id = 1
+        self.terminate = False  # flip True to simulate the user pressing Terminate
 
     # -- message helpers --------------------------------------------------------
     def _add(self, role, content, kind, state=None):
@@ -90,6 +91,9 @@ class FakeDB:
 
     def run_title(self, sid):
         return "Predict the band gap of silicon"
+
+    def terminate_requested(self, sid):
+        return self.terminate
 
     def insert_run_event(self, sid, event_type, payload, seq=None):
         self.events.append({"event_type": event_type, "payload": payload})
@@ -200,21 +204,28 @@ class FakeOrchestrator:
 class FakeEngine:
     STATE_BUILD = "BUILD"
 
-    def __init__(self, plan=None, clarifies=False, heavy=False):
+    def __init__(self, plan=None, clarifies=False, heavy=False,
+                 compute_target="local", slurm_cluster="compute2"):
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
         self._clarifies = clarifies
         self._heavy = heavy
-        self.built_with = None  # records build_orchestrator kwargs for assertions
-        self.rewound_to = None  # records the rewind target for rerun assertions
-        self.approved = False   # set when approve_plan() is called
+        self._compute_target = compute_target
+        self._slurm_cluster = slurm_cluster
+        self.built_with = None       # records build_orchestrator kwargs for assertions
+        self.compute_targets = []    # what process_job forwarded from job params
+        self.applied_overrides = []  # slurm overrides applied on approve
+        self.rewound_to = None       # records the rewind target for rerun assertions
+        self.approved = False        # set when approve_plan() is called
 
     def build_orchestrator(
-        self, *, session_id, researcher_id, request, ask, sink, store, max_cost=None,
+        self, *, session_id, researcher_id, request, ask, sink, store,
+        compute_target=None, cancel=None, max_cost=None,
     ):
         self.built_with = {
             "session_id": session_id, "researcher_id": researcher_id,
-            "request": request, "max_cost": max_cost,
+            "request": request, "compute_target": compute_target, "max_cost": max_cost,
         }
+        self.compute_targets.append(compute_target)
         return FakeOrchestrator(
             ask, sink, clarifies=self._clarifies, heavy=self._heavy,
             max_cost=max_cost if max_cost is not None else 1.0,
@@ -222,6 +233,15 @@ class FakeEngine:
 
     def current_state_name(self, orch):
         return orch.sm.current_state.name
+
+    def compute_target_of(self, orch):
+        return self._compute_target
+
+    def slurm_cluster_of(self, orch):
+        return self._slurm_cluster
+
+    def apply_slurm_overrides(self, orch, overrides):
+        self.applied_overrides.append(overrides)
 
     def rewind(self, orch, target_state):
         # A real rewind resets the run to `target_state`; the fake just records it
@@ -302,9 +322,9 @@ class TestApprovalGate:
         assert db.status == "awaiting_approval"
         assert db.kinds() == ["approval_request"]
         assert notifier.calls and notifier.calls[0][1] == "approval"
-        assert consume_approval(db, SESSION) is None  # no decision yet
+        assert consume_approval(db, SESSION) == (None, None)  # no decision yet
         db.add_user("approve", kind="approval_response")
-        assert consume_approval(db, SESSION) == "approve"
+        assert consume_approval(db, SESSION) == ("approve", None)
 
     def test_post_is_idempotent(self):
         db = FakeDB()
@@ -316,7 +336,7 @@ class TestApprovalGate:
         db = FakeDB()
         post_plan_for_approval(db, SESSION, {"cost": 1.0})
         db.add_user("APPROVE", kind="approval_response")
-        assert consume_approval(db, SESSION) == "approve"
+        assert consume_approval(db, SESSION) == ("approve", None)
 
 
 # ── process_job / the drive loop ──────────────────────────────────────────────
@@ -466,6 +486,59 @@ class TestProcessJob:
 
         runner._drive_run(db, SESSION, FailOrch(), FakeEngine(), notifier=notes)
         assert "failed" in [reason for _sid, reason, _msg in notes.calls]
+
+    # ── Slurm / compute target ────────────────────────────────────────────────
+    def test_compute_target_forwarded_and_announced(self):
+        # A per-run compute_target reaches build_orchestrator, and a fresh start
+        # announces where it will execute (RIS vs local) up front.
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(self._job(compute_target="slurm"), db, engine)
+        assert engine.compute_targets == ["slurm"]
+        assert any("RIS cluster" in m["content"] for m in db.messages)
+
+    def test_slurm_overrides_applied_on_approve(self):
+        # The approval reply carries edited Slurm resources; the gate applies them
+        # (engine.apply_slurm_overrides) and says so in chat.
+        overrides = {"cpu_count": 16, "ram": 32, "max_time": 1.0, "gpu_count": 0}
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        db.add_user(
+            json.dumps({"decision": "approve", "slurm_request": overrides}),
+            kind="approval_response",
+        )
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(self._job(compute_target="slurm"), db, engine)
+        assert engine.applied_overrides == [overrides]
+        assert any("updated Slurm settings" in m["content"] for m in db.messages)
+
+    # ── Terminate ─────────────────────────────────────────────────────────────
+    def test_terminate_during_run_settles_cancelled_not_error(self):
+        # Terminate pressed: the orchestrator aborts a stage by raising; because
+        # the cancel flag is set, process_job records a cancellation (not a failure)
+        # and the conversation settles as 'cancelled'.
+        class RaisingOrch:
+            def __init__(self):
+                self.sm = types.SimpleNamespace(
+                    context=types.SimpleNamespace(artifacts={}),
+                    current_state=types.SimpleNamespace(name="INTAKE"),
+                )
+
+            def run(self, until=None):
+                raise RuntimeError("aborted between stages")
+
+        class CancellingEngine(FakeEngine):
+            def build_orchestrator(self, **kwargs):
+                super().build_orchestrator(**kwargs)  # record compute_target etc.
+                return RaisingOrch()
+
+        db = FakeDB()
+        db.terminate = True
+        runner.process_job(self._job(), db, CancellingEngine())
+        assert db.status == "cancelled"
+        assert "terminated by user" in db.messages[-1]["content"].lower()
+        assert not any(e["event_type"] == "run.completed" for e in db.events)
 
 
 # ── run_loop ──────────────────────────────────────────────────────────────────

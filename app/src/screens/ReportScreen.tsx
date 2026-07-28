@@ -106,6 +106,14 @@ const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
   const execText = exec
     ? String(exec['status'] ?? (exec['succeeded'] ? 'succeeded' : 'failed'))
     : 'not run locally (execution disabled)';
+  // Slurm runs carry their job identity in install_log (see
+  // SlurmExecutionAdapter): show which cluster/job produced the result.
+  const slurmInfo = exec?.['install_log'] as
+    | { job_id?: string; cluster?: string }
+    | undefined;
+  const slurmText = slurmInfo?.job_id
+    ? `${slurmInfo.cluster ?? 'Slurm'} — job ${slurmInfo.job_id}`
+    : null;
 
   const summary = typeof plan?.['summary'] === 'string' ? (plan['summary'] as string) : null;
 
@@ -116,6 +124,7 @@ const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
       <Row label="Selected method" value={methodText} />
       <Row label="Estimated cost" value={costParts.length ? costParts.join(' + ') : '—'} />
       <Row label="Execution" value={execText} />
+      {slurmText && <Row label="Ran on" value={slurmText} />}
       {!plan && (
         <Text style={styles.note}>
           No execution plan was produced (the run stopped before planning). The raw specs are below.

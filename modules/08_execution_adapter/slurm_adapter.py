@@ -291,6 +291,14 @@ class SlurmAdapter:
             modules += [m for m in self.profile.gpu_modules if m not in modules]
         if modules:
             lines.append(f"ml load {' '.join(modules)}")
+        # Use every allocated core: scientific Python parallelizes through
+        # OpenMP/BLAS threading, but those libraries default to 1 thread (or to
+        # the node's full core count, oversubscribing a shared node) unless told
+        # otherwise. Job-specific env can still override any of these.
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            if var not in job.env:
+                lines.append(f'export {var}="${{SLURM_CPUS_PER_TASK:-1}}"')
         for key, value in job.env.items():
             lines.append(f"export {key}={shlex.quote(str(value))}")
         if job.workdir:
@@ -348,6 +356,13 @@ class SlurmAdapter:
             return parse_slurm_state(first[0])
         return JobState.UNKNOWN
 
+    #: Seconds of *consecutive* failed polls tolerated before giving up.
+    #: A poll runs squeue/sacct over SSH, so a VPN drop or login-node blip
+    #: makes it fail while the job itself keeps running on the cluster -- one
+    #: bad poll must not abort a multi-hour wait. Submission already proved the
+    #: SSH path works, so sustained failure here means lost connectivity.
+    CONTACT_LOSS_TOLERANCE = 30 * 60.0
+
     def wait(
         self,
         job_id: str,
@@ -362,19 +377,41 @@ class SlurmAdapter:
         ``max_wait`` (seconds) bounds the loop; on expiry the job is left running
         and a :class:`SlurmError` is raised so the caller can checkpoint a
         "running on cluster" state and poll again on resume rather than blocking
-        forever. ``on_state`` is called on every observed state (progress
-        events); ``sleep`` is injectable so tests run instantly.
+        forever. Transient poll failures (e.g. the VPN dropped, so squeue over
+        SSH fails) are tolerated for up to :data:`CONTACT_LOSS_TOLERANCE`
+        consecutive seconds before raising. ``on_state`` is called on every
+        observed state (progress events); ``sleep`` is injectable so tests run
+        instantly.
         """
         waited = 0.0
+        contact_lost = 0.0
+        last_state: Optional[JobState] = None
         while True:
-            state = self.poll(job_id)
-            if on_state is not None:
-                on_state(state)
-            if state.is_terminal:
-                return state
+            try:
+                state = self.poll(job_id)
+                contact_lost = 0.0
+            except SlurmError as exc:
+                # Job status unknown, not bad: keep waiting on the assumption
+                # the job is still running, unless contact stays lost too long.
+                contact_lost += poll_interval
+                if contact_lost > self.CONTACT_LOSS_TOLERANCE:
+                    raise SlurmError(
+                        f"lost contact with the cluster while polling job "
+                        f"{job_id} (polls failing for {int(contact_lost)}s, "
+                        f"last error: {exc}); the job was NOT cancelled -- "
+                        f"reconnect (VPN?) and check it with squeue"
+                    ) from exc
+                state = None
+            if state is not None:
+                last_state = state
+                if on_state is not None:
+                    on_state(state)
+                if state.is_terminal:
+                    return state
             if max_wait is not None and waited >= max_wait:
+                seen = last_state.value if last_state is not None else "unknown"
                 raise SlurmError(
-                    f"job {job_id} still {state.value} after {int(waited)}s; "
+                    f"job {job_id} still {seen} after {int(waited)}s; "
                     f"checkpoint and poll again later (the job keeps running)"
                 )
             sleep(poll_interval)

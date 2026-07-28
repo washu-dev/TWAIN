@@ -40,6 +40,22 @@ class TestStart:
         assert response.status_code == 422
 
     @patch("conversations.create_conversation", return_value=CONVERSATION)
+    def test_start_forwards_compute_target(self, mock_create):
+        response = client.post(
+            "/api/conversations",
+            json={"request": "band gap of silicon", "compute_target": "slurm"},
+        )
+        assert response.status_code == 200
+        assert mock_create.call_args.kwargs["compute_target"] == "slurm"
+
+    def test_start_rejects_unknown_compute_target(self):
+        response = client.post(
+            "/api/conversations",
+            json={"request": "band gap of silicon", "compute_target": "mainframe"},
+        )
+        assert response.status_code == 422
+
+    @patch("conversations.create_conversation", return_value=CONVERSATION)
     def test_start_forwards_max_cost(self, mock_create):
         response = client.post(
             "/api/conversations", json={"request": "predict solubility", "max_cost": 2.5}
@@ -103,12 +119,44 @@ class TestMessagesAndApproval:
     def test_post_approval(self, _mock_conv, mock_add):
         response = client.post("/api/conversations/conv-1/approval", json={"decision": "approve"})
         assert response.status_code == 200
-        mock_add.assert_called_once_with("conv-1", "approve")
+        mock_add.assert_called_once_with("conv-1", "approve", slurm_request=None)
+
+    @patch("conversations.add_approval_response", return_value={**MESSAGE, "kind": "approval_response"})
+    @patch("conversations.get_conversation", return_value=CONVERSATION)
+    def test_post_approval_with_slurm_overrides(self, _mock_conv, mock_add):
+        body = {
+            "decision": "approve",
+            "slurm_request": {"cpu_count": 16, "gpu_count": 0, "ram": 32, "max_time": 1.0},
+        }
+        response = client.post("/api/conversations/conv-1/approval", json=body)
+        assert response.status_code == 200
+        assert mock_add.call_args.kwargs["slurm_request"]["ram"] == 32
 
     @patch("conversations.get_conversation", return_value=CONVERSATION)
     def test_post_approval_rejects_bad_decision(self, _mock_conv):
         response = client.post("/api/conversations/conv-1/approval", json={"decision": "maybe"})
         assert response.status_code == 422
+
+
+class TestTerminate:
+    @patch("conversations.request_termination", return_value={**MESSAGE, "kind": "terminate"})
+    @patch("conversations.get_conversation", return_value=CONVERSATION)
+    def test_terminate_records_request(self, _mock_conv, mock_term):
+        response = client.post("/api/conversations/conv-1/terminate")
+        assert response.status_code == 200
+        assert response.json()["data"]["kind"] == "terminate"
+        mock_term.assert_called_once_with("conv-1")
+
+    @patch("conversations.get_conversation",
+           return_value={**CONVERSATION, "status": "completed"})
+    def test_terminate_conflicts_when_already_finished(self, _mock_conv):
+        response = client.post("/api/conversations/conv-1/terminate")
+        assert response.status_code == 409
+
+    @patch("conversations.get_conversation", return_value=None)
+    def test_terminate_404_when_not_owner(self, _mock_conv):
+        response = client.post("/api/conversations/x/terminate")
+        assert response.status_code == 404
 
 
 class TestRerun:

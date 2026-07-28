@@ -129,6 +129,33 @@ def test_wait_raises_when_budget_expires_without_cancelling():
     assert not any(argv[0] == "scancel" for argv in runner.calls)
 
 
+def test_wait_survives_transient_poll_failures():
+    # A VPN drop makes squeue-over-SSH fail; the loop must keep polling (the
+    # job is still running on the cluster) and pick up the terminal state once
+    # contact returns.
+    runner = ScriptedRunner()
+    runner.on(_is("squeue"), [CommandResult(0, "RUNNING\n"),
+                              CommandResult(255, "", "ssh: connect timed out"),
+                              CommandResult(255, "", "ssh: connect timed out"),
+                              CommandResult(0, "")])
+    runner.on(_sacct_state, CommandResult(0, "COMPLETED\n"))
+    adapter = SlurmAdapter(_profile(), runner=runner)
+
+    state = adapter.wait("42", poll_interval=10.0, sleep=lambda _s: None)
+    assert state == JobState.COMPLETED
+
+
+def test_wait_raises_lost_contact_after_tolerance_without_cancelling():
+    runner = ScriptedRunner()
+    runner.on(_is("squeue"), CommandResult(255, "", "ssh: connect timed out"))
+    adapter = SlurmAdapter(_profile(), runner=runner)
+    adapter.CONTACT_LOSS_TOLERANCE = 25.0  # ~2 failed polls at 10s
+
+    with pytest.raises(SlurmError, match="lost contact"):
+        adapter.wait("42", poll_interval=10.0, sleep=lambda _s: None)
+    assert not any(argv[0] == "scancel" for argv in runner.calls)
+
+
 def test_accounting_and_exit_code_parse_sacct():
     runner = ScriptedRunner()
     runner.on(_is("sacct"), CommandResult(0, "FAILED|2:0|00:01:23|123456K|general-cpu\n"))
@@ -284,6 +311,45 @@ def test_payload_without_deps_or_smoke_is_bare_python(tmp_path):
     assert adapter._payload(bundle, install_deps=True, run_smoke=True) == "python3 main.py"
 
 
+def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
+    # env_pythons are tried in order at job start; only if none exists does the
+    # payload build a venv (which can't handle compiled calculators like GPAW).
+    adapter = _exec_adapter(
+        tmp_path, _happy_cluster_runner(),
+        env_pythons=["/envs/gpaw/bin/python", "/envs/default/bin/python"],
+    )
+    bundle = _bundle(tmp_path)
+    payload = adapter._payload(bundle, install_deps=True, run_smoke=True)
+    assert payload.startswith("set -e")
+    assert 'for CAND in /envs/gpaw/bin/python /envs/default/bin/python' in payload
+    assert '[ -x "$CAND" ]' in payload
+    assert "python3 -m venv .venv" in payload      # fallback still present
+    assert '"$PY" inline_tests.py' in payload
+    # main.py runs under mpirun when the env ships it (openmpi GPAW build) --
+    # one rank per allocated CPU, single-threaded -- else plain python.
+    # GPAW's parallel guard requires launching through its `gpaw python`
+    # equivalent (`-m gpaw python`) under MPI; other envs use the plain
+    # interpreter. -m avoids the entry script's (possibly broken) shebang.
+    assert 'if [ -x "$BIN/gpaw" ]; then LAUNCH="$PY -m gpaw python";' in payload
+    assert ('"$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"'
+            ' --map-by :OVERSUBSCRIBE --bind-to none $LAUNCH main.py') in payload
+    assert "export OMP_NUM_THREADS=1" in payload
+    # OpenMPI needs OPAL_PREFIX when invoked by path without env activation.
+    assert 'export OPAL_PREFIX="$(dirname "$BIN")"' in payload
+    assert '  "$PY" main.py' in payload            # serial fallback branch
+
+
+def test_env_payload_without_requirements_falls_back_to_system_python(tmp_path):
+    adapter = _exec_adapter(
+        tmp_path, _happy_cluster_runner(), env_pythons=["/envs/xtb/bin/python"],
+    )
+    bundle = _bundle(tmp_path, with_requirements=False, with_smoke=False)
+    payload = adapter._payload(bundle, install_deps=True, run_smoke=True)
+    assert "venv" not in payload
+    assert 'PY="python3"' in payload
+    assert '"$PY" main.py' in payload
+
+
 def test_execute_reads_job_log_as_stdout(tmp_path):
     cluster = _happy_cluster_runner()
     adapter = _exec_adapter(tmp_path, cluster)
@@ -319,6 +385,22 @@ def test_execute_leaves_long_job_running_on_wait_expiry(tmp_path):
     assert "NOT cancelled" in result.message
     assert "44" in result.message
     assert not any(argv[0] == "scancel" for argv in cluster.calls)
+
+
+def test_execute_terminate_scancels_job_and_reports_cleanly(tmp_path):
+    # The researcher pressed Terminate mid-poll: the adapter must scancel the
+    # job and return a clean "terminated" result instead of polling on.
+    cluster = ScriptedRunner()
+    cluster.on(_is("sbatch"), CommandResult(0, "Submitted batch job 45\n"))
+    cluster.on(_is("squeue"), CommandResult(0, "RUNNING\n"))
+    cluster.on(_is("scancel"), CommandResult(0, ""))
+    adapter = _exec_adapter(tmp_path, cluster, should_abort=lambda: True)
+
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s")
+    assert result.status == ExecutionStatus.FAILED
+    assert "terminated by the researcher" in result.message
+    assert "45" in result.message
+    assert any(argv[0] == "scancel" for argv in cluster.calls)
 
 
 def test_execute_submit_failure_is_setup_failed(tmp_path):
@@ -389,8 +471,9 @@ def test_execute_skips_gracefully_when_profile_unusable(machine, tmp_path):
 
 
 def test_build_slurm_adapter_uses_plan_request(machine, tmp_path):
+    # Plan contract: ram in GB, max_time in hours. Adapter receives MB + minutes.
     plan = {"slurm_request": {"cpu_count": 16, "gpu_count": 1,
-                              "max_time": 90, "ram": 32000}}
+                              "max_time": 1.5, "ram": 32}}
     path = tmp_path / "execution_plan_seed.json"
     path.write_text(json.dumps(plan))
     machine.context.artifacts["execution_plan"] = str(path)
@@ -399,7 +482,40 @@ def test_build_slurm_adapter_uses_plan_request(machine, tmp_path):
     assert adapter is not None
     assert adapter.request.cpu_count == 16
     assert adapter.request.gpu_count == 1
+    assert adapter.request.ram == 32 * 1024  # GB -> MB
+    assert adapter.request.max_time == 90.0  # hours -> minutes
     assert adapter.workspace_root == str(tmp_path)
+
+
+def test_build_slurm_adapter_wires_env_candidates_from_profile(machine, tmp_path):
+    # calculator first, then tool_name, then the shared default env.
+    plan = {"selected_method": {"tool_name": "ASE", "calculator": "GPAW"},
+            "slurm_request": {"cpu_count": 4, "gpu_count": 0,
+                              "max_time": 0.5, "ram": 8}}
+    path = tmp_path / "execution_plan_seed.json"
+    path.write_text(json.dumps(plan))
+    machine.context.artifacts["execution_plan"] = str(path)
+
+    adapter = machine._build_slurm_adapter()
+    root = "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs"
+    assert adapter.env_pythons == [
+        f"{root}/gpaw/bin/python",
+        f"{root}/ase/bin/python",
+        f"{root}/default/bin/python",
+    ]
+
+
+def test_build_slurm_adapter_applies_ram_floor(machine, tmp_path):
+    # A planner that asks for 1 GB must still submit with the 4 GB floor.
+    plan = {"slurm_request": {"cpu_count": 4, "gpu_count": 0,
+                              "max_time": 0.05, "ram": 1}}
+    path = tmp_path / "execution_plan_seed.json"
+    path.write_text(json.dumps(plan))
+    machine.context.artifacts["execution_plan"] = str(path)
+
+    adapter = machine._build_slurm_adapter()
+    assert adapter.request.ram == 4 * 1024
+    assert adapter.request.max_time == 10.0  # MIN_WALL_MINUTES
 
 
 def test_execute_slurm_off_keeps_execute_a_noop(tmp_path):
