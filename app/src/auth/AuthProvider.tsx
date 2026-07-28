@@ -23,6 +23,7 @@ import {
   type AuthenticationResult,
 } from '@azure/msal-browser';
 import { MsalProvider, useIsAuthenticated, useMsal } from '@azure/msal-react';
+import { apiClient } from '@/api/client';
 import { isAuthConfigured, loginRequest, msalConfig } from './msalConfig';
 
 export interface AuthContextValue {
@@ -61,6 +62,27 @@ const WebAuthBridge: React.FC<{ children: React.ReactNode }> = ({ children }) =>
   const { instance, accounts } = useMsal();
   const isAuthenticated = useIsAuthenticated();
   const account = accounts[0] ?? null;
+
+  // Feed the API client a per-request token provider so every call carries a
+  // fresh Entra bearer. We send the ID token (ID-token mode: its `aud` is the
+  // SPA client id, which the API validates as ENTRA_API_AUDIENCE — no exposed
+  // API scope needed). acquireTokenSilent refreshes transparently when expired.
+  useEffect(() => {
+    if (!isAuthenticated || !account) {
+      apiClient.setTokenProvider(null);
+      return;
+    }
+    apiClient.setTokenProvider(async () => {
+      try {
+        const result = await instance.acquireTokenSilent({ ...loginRequest, account });
+        return result.idToken;
+      } catch (err) {
+        console.error('[MSAL] silent token acquisition failed', err);
+        return null;
+      }
+    });
+    return () => apiClient.setTokenProvider(null);
+  }, [instance, isAuthenticated, account]);
 
   const login = useCallback(async () => {
     await instance.loginRedirect(loginRequest);
