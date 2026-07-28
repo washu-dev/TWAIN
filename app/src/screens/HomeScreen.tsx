@@ -8,7 +8,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Header, Footer, TileButton, MessageModal } from '@/components';
+import { Header, Footer, TileButton, MessageModal, IssueModal } from '@/components';
 import { APP_STRINGS, Spacing } from '@/constants/theme';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/auth/AuthProvider';
@@ -20,6 +20,7 @@ export const HomeScreen: React.FC = () => {
   const [modalVisible, setModalVisible] = useState(false);
   const [modalTitle, setModalTitle] = useState('');
   const [modalMessages, setModalMessages] = useState<string[]>([]);
+  const [issueModalVisible, setIssueModalVisible] = useState(false);
 
   const showModal = (title: string, messages: string[]) => {
     setModalTitle(title);
@@ -98,6 +99,13 @@ export const HomeScreen: React.FC = () => {
           onPress={() => router.push('/browse')}
         />
 
+        <TileButton
+          title={APP_STRINGS.createIssue}
+          description={APP_STRINGS.createIssueDesc}
+          accentColor="#215732"
+          onPress={() => setIssueModalVisible(true)}
+        />
+
         {loading && (
           <View style={styles.loading}>
             <ActivityIndicator size="large" color="#BA0C2F" accessibilityLabel="Loading" />
@@ -112,6 +120,13 @@ export const HomeScreen: React.FC = () => {
         title={modalTitle}
         messages={modalMessages}
         onClose={() => setModalVisible(false)}
+      />
+
+      <IssueModal
+        visible={issueModalVisible}
+        submitterEmail={account?.username}
+        onSubmit={(title, body) => apiClient.createIssue(title, body)}
+        onClose={() => setIssueModalVisible(false)}
       />
     </SafeAreaView>
   );

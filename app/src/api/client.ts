@@ -57,6 +57,12 @@ export interface Report {
   artifacts: ArtifactMeta[];
 }
 
+export interface CreatedIssue {
+  number: number;
+  url: string;
+  repo: string;
+}
+
 class APIClient {
   private client: AxiosInstance;
   private token: string | null = null;
@@ -129,6 +135,14 @@ class APIClient {
   // match the API's {name:path} route.
   async getArtifact(id: string, name: string): Promise<ArtifactContent> {
     const response = await this.client.get(`/api/conversations/${id}/artifacts/${name}`);
+    return response.data.data;
+  }
+
+  // ── GitHub issues ──────────────────────────────────────────────────────────
+  // Opens an issue on the TWAIN repo. The submitter's email is added server-side
+  // from the validated token, so it is not sent from here.
+  async createIssue(title: string, body: string): Promise<CreatedIssue> {
+    const response = await this.client.post('/api/issues', { title, body });
     return response.data.data;
   }
 }
