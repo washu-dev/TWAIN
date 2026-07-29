@@ -78,6 +78,7 @@ _deploy.yaml
 app.yaml.bak
 # API Key
 .env
+.env.ris
 
 # StateMachine.intake() scratch output
 ExampleFileTest.txt

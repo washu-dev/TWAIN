@@ -294,6 +294,70 @@ Prerequisites and knobs:
   when the process already runs *on* a login node (no SSH hop);
   `TWAIN_SLURM_CLUSTER` / `--cluster` — another `configs/clusters/` profile.
 
+## Deploy the backend ON RIS (runner on the login node)
+
+Instead of running the runner on your laptop (VPN required, laptop must stay
+awake), deploy it to the cluster itself. It polls the same shared Postgres on
+AWS RDS, so the web UI and API stay exactly where they are — only the runner
+moves. On the login node it submits `sbatch` directly (no SSH hop, no VPN in
+the loop) and stages bundles with plain local copies.
+
+One-time, from your workstation (on the VPN):
+
+```bash
+cp scripts/ris/env.ris.example .env.ris   # fill in LLM creds + the RDS password
+RIS_USER=<your-wustl-key> scripts/ris/deploy.sh
+```
+
+This rsyncs the repo to `<team storage>/twain-backend`, installs pixi + the
+default env there, and verifies connectivity (RDS :5432, LLM gateway, sbatch).
+Then start the runner in a tmux session on the login node:
+
+```bash
+ssh <your-wustl-key>@c2-login-001.ris.wustl.edu
+tmux new -s twain-runner
+bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/start_runner.sh
+```
+
+Detach with `Ctrl-B d`; the runner keeps running and auto-restarts on crashes.
+Redeploy code changes by re-running `deploy.sh` and restarting the loop.
+
+Notes and limits:
+- The runner itself is light (DB polling + LLM calls) and fits the login
+  node's 6 GB/user cap; all real computation goes to compute nodes via Slurm.
+- Jobs whose compute target is **local** would execute on the login node —
+  fine for light library runs, but heavy calculators should use the Slurm
+  target (the default here).
+- If the AWS ECS runner (`twain-runner` service) is also running, both
+  runners compete to claim jobs — whichever claims first wins. Scale the ECS
+  service to 0 if RIS should handle everything.
+
+### Which account should the runner run under?
+
+Today it runs under a personal WUSTL account, which is fine as a proof of
+concept but wrong long-term:
+
+- **Account lifecycle** — when that person graduates or their credentials
+  expire, the runner dies, and nobody else can read the chmod-600 `.env` or
+  restart their tmux session.
+- **Attribution** — every Slurm job from every teammate's UI run is submitted
+  as that one user; RIS admins investigating a misbehaving job come to them.
+- **Single point of restart** — only the account owner can redeploy, restart,
+  or rotate the DB password.
+
+Preferred fix, in order:
+
+1. **RIS service/lab account.** Ask the PI who owns the `compute2-mdan`
+   allocation to request a project-level account from RIS. Migration is just
+   re-running `deploy.sh` as that user (the code doesn't care whose account
+   it is) and moving the `.env` secrets.
+2. **Per-member runner instances.** Until then, any team member can run their
+   *own* runner: copy `scripts/ris/env.ris.example` to `.env.ris`, fill in
+   the LLM creds + RDS password, and run `deploy.sh` under their account.
+   Multiple runners are safe — they share the jobs queue and claiming is
+   atomic, so each job runs exactly once. This also removes the
+   one-person-restart problem.
+
 ## Test
 No DB or pixi env needed — the unit tests use in-memory fakes:
 
