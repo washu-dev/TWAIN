@@ -283,6 +283,32 @@ Notes and limits:
   runners compete to claim jobs — whichever claims first wins. Scale the ECS
   service to 0 if RIS should handle everything.
 
+### Which account should the runner run under?
+
+Today it runs under a personal WUSTL account, which is fine as a proof of
+concept but wrong long-term:
+
+- **Account lifecycle** — when that person graduates or their credentials
+  expire, the runner dies, and nobody else can read the chmod-600 `.env` or
+  restart their tmux session.
+- **Attribution** — every Slurm job from every teammate's UI run is submitted
+  as that one user; RIS admins investigating a misbehaving job come to them.
+- **Single point of restart** — only the account owner can redeploy, restart,
+  or rotate the DB password.
+
+Preferred fix, in order:
+
+1. **RIS service/lab account.** Ask the PI who owns the `compute2-mdan`
+   allocation to request a project-level account from RIS. Migration is just
+   re-running `deploy.sh` as that user (the code doesn't care whose account
+   it is) and moving the `.env` secrets.
+2. **Per-member runner instances.** Until then, any team member can run their
+   *own* runner: copy `scripts/ris/env.ris.example` to `.env.ris`, fill in
+   the LLM creds + RDS password, and run `deploy.sh` under their account.
+   Multiple runners are safe — they share the jobs queue and claiming is
+   atomic, so each job runs exactly once. This also removes the
+   one-person-restart problem.
+
 ## Test
 No DB or pixi env needed — the unit tests use in-memory fakes:
 

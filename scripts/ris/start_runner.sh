@@ -12,6 +12,8 @@ set -euo pipefail
 RIS_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$RIS_DIR"
 export PATH="$HOME/.pixi/bin:$PATH"
+# Unbuffered so `tail -f runner-ris.log` shows activity in real time.
+export PYTHONUNBUFFERED=1
 
 # sbatch/squeue for the runner's own submissions (jobs load modules themselves).
 module load ris slurm 2>/dev/null || true
