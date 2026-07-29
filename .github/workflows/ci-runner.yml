@@ -104,7 +104,24 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
+      - name: Check the twain-runner ECS service exists
+        # The service is one-time infra that hasn't been provisioned yet (and
+        # the task def still has -REPLACE secret placeholders until
+        # scripts/aws/setup_secrets.sh --apply is run). Until then, push the
+        # image but skip the service deploy instead of failing the workflow.
+        id: svc
+        run: |
+          active=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --region "$AWS_REGION" --query "length(services[?status=='ACTIVE'])" --output text 2>/dev/null || echo 0)
+          if [ "$active" = "1" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ECS service '$ECS_SERVICE' not found on '$ECS_CLUSTER' -- image pushed to ECR, service deploy skipped. One-time provisioning: scripts/aws/setup_secrets.sh --apply, then scripts/aws/provision.sh --apply (see runner/README.md)."
+          fi
+
       - name: Render task definition with the new image
+        if: steps.svc.outputs.exists == 'true'
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
@@ -113,6 +130,7 @@ jobs:
           image: ${{ steps.build-image.outputs.image }}
 
       - name: Deploy to ECS
+        if: steps.svc.outputs.exists == 'true'
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
