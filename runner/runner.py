@@ -416,11 +416,14 @@ def run_loop(
     ``max_attempts`` times, then the conversation is failed.
     """
     db = db or RunnerDB()
-    last_reap = 0.0
+    # None forces a reap on the first iteration. (time.monotonic() is seconds
+    # since an arbitrary epoch -- boot on Linux -- so seeding with 0.0 skips
+    # the first reap on a freshly booted machine, e.g. a CI VM.)
+    last_reap = None
     reap_interval = max(heartbeat_seconds, 1.0)
     while True:
         now = time.monotonic()
-        if now - last_reap >= reap_interval:
+        if last_reap is None or now - last_reap >= reap_interval:
             _reap_orphans(db, lease_seconds, max_attempts)
             last_reap = now
 

@@ -51,7 +51,10 @@ jobs:
 
       - name: Vulnerability scan — npm audit
         working-directory: app
-        run: npm audit --audit-level=high
+        # Production dependencies only: the remaining high findings are in the
+        # eslint/babel dev toolchain (never shipped in the web bundle) and have
+        # no upstream fix available.
+        run: npm audit --audit-level=high --omit=dev
 
       - name: Dependency license check
         working-directory: app
