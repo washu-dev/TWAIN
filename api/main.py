@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 import auth
 import conversations as convo
+import github_issues
 import migrate
 from auth import AdminUser, CurrentUser
 from database import list_users, set_user_role, upsert_user
@@ -122,6 +123,36 @@ async def admin_set_user_role(user_id: str, body: RoleUpdate, _admin: AdminUser)
     if updated is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return {"data": updated}
+
+
+# ── GitHub issue submission ───────────────────────────────────────────────────
+class CreateIssue(BaseModel):
+    title: str
+    body: str = ""
+
+
+@app.post("/api/issues", status_code=201)
+async def create_issue(body: CreateIssue, user: CurrentUser):
+    """Open a GitHub issue on the TWAIN repo for the signed-in user.
+
+    Issues are created by a single service PAT, so the caller's email — taken
+    from their validated token, not the request body — is embedded in the issue
+    for attribution.
+    """
+    if not body.title.strip():
+        raise HTTPException(status_code=422, detail="title must not be empty.")
+    try:
+        result = github_issues.create_issue(
+            title=body.title,
+            body=body.body,
+            email=user.get("email", ""),
+            name=user.get("name"),
+        )
+    except github_issues.GitHubError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Could not create GitHub issue: {exc}"
+        ) from exc
+    return {"data": result}
 
 
 # ── Conversations / chat (Phase 1) ────────────────────────────────────────────

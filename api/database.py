@@ -95,6 +95,19 @@ def _load_db_config() -> dict:
         ) from e
 
 
+def read_secret(secret_id: str) -> str:
+    """Read a single Secrets Manager secret string by its full id.
+
+    For features that store one opaque value (e.g. the GitHub issue PAT) rather
+    than the grouped DB connection properties. Honors the same assume-role
+    access model as the DB config loader.
+    """
+    try:
+        return _secrets_client().get_secret_value(SecretId=secret_id)["SecretString"]
+    except (ClientError, BotoCoreError) as e:
+        raise RuntimeError(f"Failed to load secret '{secret_id}': {e}") from e
+
+
 def get_connection():
     """Create and return a database connection using the resolved credentials."""
     return psycopg2.connect(**_load_db_config())

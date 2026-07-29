@@ -26,6 +26,10 @@ cd "$REPO"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-twaindb}"
+# Use the DB_* env vars below for the API's connection, not AWS Secrets Manager
+# (which has no credentials locally). Without this the API 500s on every
+# DB-backed request. See api/database.py:_load_db_config.
+TWAIN_DB_FROM_ENV="${TWAIN_DB_FROM_ENV:-true}"
 API_PORT="${API_PORT:-8000}"
 AUTH_DISABLED="${AUTH_DISABLED:-true}"
 PG_CONTAINER="${PG_CONTAINER:-twain-pg}"
