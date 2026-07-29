@@ -8,8 +8,10 @@ vars, with the password resolved from AWS Secrets Manager in the cloud and from
 """
 import json
 import os
+import select
 
 import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import Json, RealDictCursor
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -18,6 +20,11 @@ DB_NAME = os.getenv("DB_NAME", "twaindb")
 DB_USER = os.getenv("DB_USER", "postgres")
 
 RESUMABLE_STATUSES = ("running", "paused", "error")
+
+# Postgres channel the jobs-insert trigger NOTIFYs (see migration 003). The runner
+# LISTENs on it so a newly queued job wakes it immediately instead of on the next
+# poll tick — no always-on 1s spin (Phase 2).
+JOBS_CHANNEL = "twain_jobs"
 
 
 def _resolve_db_password() -> str:
@@ -49,23 +56,46 @@ class RunnerDB:
 
     # ---- jobs -----------------------------------------------------------------
     def claim_job(self) -> dict | None:
-        """Atomically claim the oldest queued job (FOR UPDATE SKIP LOCKED)."""
+        """Atomically claim the oldest queued job (FOR UPDATE SKIP LOCKED).
+
+        Serialized per session: a job is skipped while another job for the *same*
+        session is already claimed/running, so at most one runner drives a session
+        at a time. That keeps a redundant ``resume`` (e.g. the user replied twice)
+        from racing a live run on the same checkpoint. A duplicate that does slip
+        through is a safe no-op — DbAsk finds no new answer and re-suspends.
+
+        Claiming stamps ``heartbeat_at`` and bumps ``attempts``; the runner keeps
+        the heartbeat fresh while it works so :meth:`reap_stale_jobs` can tell a
+        healthy long slice from a crashed one. The returned dict carries the new
+        ``attempts`` so the loop can decide retry-vs-dead-letter. The per-session
+        skip above is therefore never permanent: a crashed session's stuck job is
+        re-queued by the reaper once its lease expires.
+        """
         conn = self._connect()
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(
                 """
                 SELECT id, session_id, kind, params FROM jobs
-                WHERE status = 'queued' ORDER BY id
+                WHERE status = 'queued'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs active
+                      WHERE active.session_id = jobs.session_id
+                        AND active.status IN ('claimed', 'running')
+                  )
+                ORDER BY id
                 FOR UPDATE SKIP LOCKED LIMIT 1;
                 """
             )
             job = cursor.fetchone()
             if job is not None:
                 cursor.execute(
-                    "UPDATE jobs SET status = 'claimed', claimed_at = now() WHERE id = %s;",
+                    "UPDATE jobs SET status = 'claimed', claimed_at = now(), "
+                    "heartbeat_at = now(), attempts = attempts + 1 "
+                    "WHERE id = %s RETURNING attempts;",
                     (job["id"],),
                 )
+                job["attempts"] = cursor.fetchone()["attempts"]
             conn.commit()
             cursor.close()
             return job
@@ -74,6 +104,62 @@ class RunnerDB:
 
     def mark_job(self, job_id: int, status: str) -> None:
         self._execute("UPDATE jobs SET status = %s WHERE id = %s;", (status, job_id))
+
+    def heartbeat_job(self, job_id: int) -> None:
+        """Refresh a claimed job's lease so the reaper doesn't reclaim a healthy,
+        long-running slice (e.g. a multi-hour EXECUTE). A no-op once the job leaves
+        the in-flight states, so a late beat can't resurrect a finished or
+        re-queued job."""
+        self._execute(
+            "UPDATE jobs SET heartbeat_at = now() "
+            "WHERE id = %s AND status IN ('claimed', 'running');",
+            (job_id,),
+        )
+
+    def reap_stale_jobs(self, lease_seconds: float, max_attempts: int) -> list:
+        """Recover jobs orphaned by a dead runner (heartbeat older than the lease).
+
+        A claimed/running job whose heartbeat has gone stale is presumed abandoned
+        — the runner crashed, was OOM-killed, or redeployed mid-slice. Re-queue it
+        so another runner re-drives it from its checkpoint, unless it has already
+        been attempted ``max_attempts`` times, in which case dead-letter it
+        (``status='error'``) and return it so the caller can fail the conversation.
+
+        Safe to run from several runners at once: the UPDATEs are atomic and the
+        under- vs. at/over-``max_attempts`` sets are disjoint. Returns the
+        dead-lettered rows ``[{id, session_id, attempts}]`` (empty when none).
+        """
+        conn = self._connect()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            # Dead-letter the exhausted ones first, RETURNING them so the caller
+            # can post a failure message and mark the conversation errored.
+            cursor.execute(
+                """
+                UPDATE jobs SET status = 'error'
+                WHERE status IN ('claimed', 'running')
+                  AND COALESCE(heartbeat_at, claimed_at) < now() - make_interval(secs => %s)
+                  AND attempts >= %s
+                RETURNING id, session_id, attempts;
+                """,
+                (lease_seconds, max_attempts),
+            )
+            dead = cursor.fetchall()
+            # Re-queue the recoverable ones for another attempt.
+            cursor.execute(
+                """
+                UPDATE jobs SET status = 'queued'
+                WHERE status IN ('claimed', 'running')
+                  AND COALESCE(heartbeat_at, claimed_at) < now() - make_interval(secs => %s)
+                  AND attempts < %s;
+                """,
+                (lease_seconds, max_attempts),
+            )
+            conn.commit()
+            cursor.close()
+            return dead
+        finally:
+            conn.close()
 
     # ---- conversations --------------------------------------------------------
     def set_conversation_status(self, session_id: str, status: str) -> None:
@@ -87,6 +173,38 @@ class RunnerDB:
             "UPDATE conversations SET current_state = %s, updated_at = now() WHERE id = %s;",
             (state, session_id),
         )
+
+    def owner_contact(self, session_id: str) -> dict | None:
+        """Contact details of the researcher who owns this run, or None.
+
+        Joins the run's conversation to its owning user (``conversations.id`` is the
+        session_id; ``conversations.user_id`` → ``users``). Returns
+        ``{"email", "name", "phone"}`` so the notifier can reach the *specific*
+        researcher who left the session — by email (SES/SendGrid) or SMS (SNS to
+        their ``phone``) — instead of one global address/topic. Any field may be
+        None (e.g. no phone on file); returns None outright when the session or
+        user is unknown, so the caller can fall back to the configured default.
+        """
+        row = self._query_one(
+            "SELECT u.email, u.name, u.phone FROM conversations c "
+            "JOIN users u ON u.id = c.user_id "
+            "WHERE c.id = %s;",
+            (session_id,),
+        )
+        if not row:
+            return None
+        return {"email": row.get("email"), "name": row.get("name"), "phone": row.get("phone")}
+
+    def run_title(self, session_id: str) -> str | None:
+        """The run's title (its originating request), or None if unknown.
+
+        Used by the notifier to put the prompt in the subject line so a researcher
+        with several runs can tell the emails apart.
+        """
+        row = self._query_one(
+            "SELECT title FROM conversations WHERE id = %s;", (session_id,)
+        )
+        return (row or {}).get("title") if row else None
 
     # ---- messages -------------------------------------------------------------
     def add_assistant_message(
@@ -115,6 +233,24 @@ class RunnerDB:
             (session_id,),
         )
         return row["m"] if row else 0
+
+    def last_question_id(
+        self, session_id: str, kinds: tuple[str, ...] = ("clarification",)
+    ) -> int | None:
+        """Id of the most recent assistant *question* of the given kind(s).
+
+        Used by the bridges to pair an answer with its question: the user's reply
+        to a question is a later user message; if none exists yet the run is still
+        awaiting input. Returns None when no such question has been asked.
+        """
+        placeholders = ", ".join(["%s"] * len(kinds))
+        row = self._query_one(
+            "SELECT MAX(id) AS m FROM messages "
+            "WHERE conversation_id = %s AND role = 'assistant' "
+            f"AND kind IN ({placeholders});",
+            (session_id, *kinds),
+        )
+        return row["m"] if row and row["m"] is not None else None
 
     def user_replies_after(self, session_id: str, after_id: int, kind: str | None = None) -> list:
         sql = (
@@ -163,6 +299,18 @@ class RunnerDB:
                 kind = EXCLUDED.kind, content = EXCLUDED.content, created_at = now();
             """,
             (session_id, name, kind, content),
+        )
+
+    def get_artifacts(self, session_id: str) -> list:
+        """Every stored artifact (name + content) for a session.
+
+        The read side of :meth:`upsert_artifact`: on resume the runner rehydrates
+        these back onto local disk (see ``runner.artifacts.rehydrate_artifacts``)
+        so a run can continue on any box even though the state machine reads its
+        stage artifacts from files.
+        """
+        return self._query_all(
+            "SELECT name, content FROM artifacts WHERE session_id = %s;", (session_id,)
         )
 
     def get_artifact(self, session_id: str, name: str) -> dict | None:
@@ -238,3 +386,49 @@ class RunnerDB:
             return rows
         finally:
             conn.close()
+
+
+class JobNotifyWaiter:
+    """Blocks until a job is queued, using Postgres LISTEN/NOTIFY (Phase 2).
+
+    Holds one long-lived autocommit connection that ``LISTEN``s on
+    :data:`JOBS_CHANNEL`; the jobs-insert trigger (migration 003) ``NOTIFY``s it.
+    :meth:`wait` sleeps on the socket and returns the moment a job arrives —
+    replacing the old always-on ``sleep(poll)`` spin. The ``timeout`` is only a
+    safety-net poll cadence (so a missed NOTIFY still gets picked up eventually),
+    so it can be generous rather than 1s.
+
+    Use as a context manager so the dedicated connection is always closed::
+
+        with JobNotifyWaiter(db) as waiter:
+            waiter.wait(timeout=30.0)
+    """
+
+    def __init__(self, db: RunnerDB, channel: str = JOBS_CHANNEL):
+        self.db = db
+        self.channel = channel
+        self._conn = None
+
+    def __enter__(self) -> "JobNotifyWaiter":
+        self._conn = self.db._connect()
+        self._conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cur = self._conn.cursor()
+        cur.execute(f"LISTEN {self.channel};")
+        cur.close()
+        return self
+
+    def wait(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for a NOTIFY. True if one arrived."""
+        if self._conn is None:
+            raise RuntimeError("JobNotifyWaiter must be used as a context manager")
+        if select.select([self._conn], [], [], timeout) == ([], [], []):
+            return False  # timed out; caller re-polls as a safety net
+        self._conn.poll()
+        notified = bool(self._conn.notifies)
+        self._conn.notifies.clear()
+        return notified
+
+    def __exit__(self, *exc) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None

@@ -92,6 +92,7 @@ export interface AuthUser {
 class APIClient {
   private client: AxiosInstance;
   private token: string | null = null;
+  private tokenProvider: (() => Promise<string | null>) | null = null;
   private onUnauthorized: (() => void) | null = null;
 
   constructor() {
@@ -100,11 +101,15 @@ class APIClient {
       timeout: API_CONFIG.timeout,
       headers: { 'Content-Type': 'application/json' },
     });
-    // Attach the Entra access token when one is set. In AUTH_DISABLED dev the API
-    // ignores it, so this stays harmless when the app runs without login.
-    this.client.interceptors.request.use((config) => {
-      if (this.token) {
-        config.headers.Authorization = `Bearer ${this.token}`;
+    // Attach the Entra bearer token to every request. `AuthProvider` registers a
+    // token provider once MSAL has a signed-in account; the provider re-runs per
+    // request so MSAL can refresh a token that has expired mid-session (long
+    // Runner jobs). Falls back to a statically-set token, then to none (which the
+    // API accepts only when AUTH_DISABLED is on).
+    this.client.interceptors.request.use(async (config) => {
+      const token = this.tokenProvider ? await this.tokenProvider() : this.token;
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
       }
       return config;
     });
@@ -118,6 +123,14 @@ class APIClient {
         return Promise.reject(error);
       },
     );
+  }
+
+  /**
+   * Register a callback that yields a fresh bearer token per request (preferred),
+   * or `null` to clear it. Takes precedence over {@link setAuthToken}.
+   */
+  setTokenProvider(provider: (() => Promise<string | null>) | null) {
+    this.tokenProvider = provider;
   }
 
   setAuthToken(token: string | null) {
@@ -221,6 +234,15 @@ class APIClient {
   async getArtifact(id: string, name: string): Promise<ArtifactContent> {
     const response = await this.client.get(`/api/conversations/${id}/artifacts/${name}`);
     return response.data.data;
+  }
+
+  // Absolute URL for the SSE progress stream. `EventSource` can't set an
+  // Authorization header, so under auth this connection is rejected and
+  // `useConversationStream` falls back to interval polling (which does carry the
+  // bearer token via the axios interceptor), so the view still converges.
+  streamUrl(id: string): string {
+    const base = this.client.defaults.baseURL ?? '';
+    return `${base}/api/conversations/${id}/stream`;
   }
 }
 

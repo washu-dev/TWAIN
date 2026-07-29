@@ -7,17 +7,28 @@ API reads. See `docs/architecture/web_ui_plan.md` §4.
 
 Why a separate service (not the API): the pipeline needs the heavy pixi
 environment (`pymatgen`, `ase`, …), the WashU LLM credentials, and runs for
-minutes — and it **blocks** on the user during CLARIFY and at the plan-approval
-gate. One job == one run; run several runner processes for more concurrency.
+minutes. When it needs the researcher it **suspends** rather than blocks — the
+run is checkpointed and the process is released — so one runner serves many runs
+and nothing spins waiting on a human.
 
-## How a run flows
+## How a run flows (async suspend/resume)
+A *job* is one slice of a run, not a whole run. A run advances until it needs the
+user, then releases the process; a `resume` job continues it when the user
+responds. No thread is ever pinned to a waiting run.
+
 1. API `POST /api/conversations` inserts a conversation + first message + a
    `start` job.
 2. The runner claims the job and runs `orchestrator.run(until=BUILD)` — intake,
-   clarify (blocking on the user via `messages`), decompose, discover, plan.
-3. It pauses at BUILD (plan generated, nothing built), posts the plan as an
-   `approval_request`, and blocks for the user's `POST /approval`.
-4. On **approve** it runs to completion; on **reject** it stops before building.
+   clarify, decompose, discover, plan.
+3. If CLARIFY needs an answer, the `ask` bridge posts the question, marks the run
+   `awaiting_input`, **suspends** (raises `SuspendRun`), and the runner returns.
+   The user's `POST /messages` reply enqueues a `resume` job that re-drives the
+   run — the same `ask` now returns the answer and the pipeline continues.
+4. At BUILD (plan generated, nothing built) it posts the plan as an
+   `approval_request`, marks the run `awaiting_approval`, and releases. The
+   user's `POST /approval` enqueues a `resume`: **approve** crosses the gate and
+   runs to completion; **reject** stops before building. (The heavy-calc "run it
+   now?" confirmation during EXECUTE suspends/resumes the same way.)
 5. Throughout, an event sink writes `run_events` (tailed by the SSE endpoint)
    and mirrors `current_state` / `status` onto the conversation.
 6. **Terminate** (the button in the chat header) posts
@@ -26,6 +37,44 @@ gate. One job == one run; run several runner processes for more concurrency.
    it between stages, inside the clarify/approval waits, and between Slurm
    `squeue` polls (where it also `scancel`s the cluster job), then settles the
    conversation as `cancelled` instead of `error`.
+
+**Waking the runner** — instead of polling every second, the runner `LISTEN`s on
+the `twain_jobs` channel; a trigger (`api/migrations/003_job_notify.sql`)
+`NOTIFY`s it the instant a job is queued, so a released runner wakes immediately.
+A generous fallback poll (`--poll`, default 30s) covers any missed notification.
+
+**Notifications** — on each suspend the run reaches out to the *owner* who left
+it (resolved from `users` via the conversation; see `db.owner_contact`) so they
+can return when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or
+`ses`/`sendgrid` email / `sns` SMS); email targets the owner's address and `sns`
+texts their `phone` (migration `005_user_contact.sql`), each falling back to the
+configured global `TWAIN_NOTIFY_EMAIL` / `TWAIN_NOTIFY_SNS_TOPIC_ARN` when the
+owner has no contact on file. See `runner/notifications.py`. `TWAIN_APP_URL` adds
+a deep link back to the run.
+
+**Resume durability** — a run's state + context resume from the Postgres session
+store, and its stage artifacts (intent_spec, execution_plan, the generated run
+bundle, …) are durable too: `capture_artifacts` writes their contents to the
+`artifacts` table every slice, and `rehydrate_artifacts` restores them to local
+disk before a resume drives the run (see `runner/artifacts.py`). So any runner
+can resume any run — even on a fresh box, or after `logs/` was cleaned — with no
+shared `logs/` volume required. (Outputs produced within the final, non-suspending
+slice aren't needed to resume.) Concurrency is safe regardless — `claim_job`
+serializes jobs per session and a redundant `resume` is a no-op.
+
+**Crash recovery** — a claimed job is kept alive by a heartbeat (`jobs.heartbeat_at`)
+while the runner works. If a runner dies mid-slice (OOM, redeploy, SIGKILL) its
+heartbeat goes stale; after the lease (`TWAIN_JOB_LEASE_SECONDS`, default 600s)
+any runner's reaper re-queues the job so it re-drives from the checkpoint, or
+dead-letters it once it has been attempted `TWAIN_JOB_MAX_ATTEMPTS` times (default
+3) and posts a failure message. The lease only has to outlast a few missed
+heartbeats (`TWAIN_JOB_HEARTBEAT_SECONDS`, default 60s), **not** the longest slice
+— a healthy multi-hour EXECUTE keeps beating — so recovery after a real crash
+takes about one lease, not hours. In-process failures (a VPN/LLM blip, a stage
+timeout) are retried the same way before the run is failed. Without this, a
+crashed runner left its job stuck `running` forever and, because of the
+per-session serialization above, permanently blocked every future `resume` for
+that session.
 
 ## Run locally
 Requires a reachable Postgres with the schema from `api/migrations/001_web_ui.sql`

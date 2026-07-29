@@ -19,6 +19,8 @@ import os
 import pathlib
 import sys
 
+from runner.suspend import SuspendRun
+
 # Guard inputs for stages whose handlers are still stubs (INTERPRET/VALIDATE) and
 # for EXECUTE when execution is disabled (planning-only runs). ``plan_approved``
 # is intentionally absent -- see the module docstring; it is set only by a real
@@ -133,11 +135,20 @@ class _RealEngine:
             # run so API errors are caught; default on whenever we execute.
             verify_codegen=_env_flag("TWAIN_VERIFY_CODEGEN", default=execute),
             auto_approve=auto,
+            # Let the pipeline pause (rather than block or error) when the ask
+            # bridge needs the user: DbAsk raises SuspendRun, orchestrator.run()
+            # catches it, checkpoints PAUSED, and returns so the runner releases
+            # the process. A ``resume`` job continues the run when the user replies.
+            suspend_exc=SuspendRun,
             # Terminate button: True once the user asked to stop. The orchestrator
             # checks it between stages (raising RunCancelled) and the Slurm poll
             # loop checks it between squeue polls (scancelling the job).
             cancel_check=cancel,
         )
+
+    def current_state_name(self, orch) -> str:
+        """The pipeline state the orchestrator is parked in (e.g. 'CLARIFY', 'BUILD')."""
+        return orch.sm.current_state.name
 
     def compute_target_of(self, orch) -> str:
         """``'slurm'`` or ``'local'`` for the orchestrator the runner built."""
