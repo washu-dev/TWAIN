@@ -320,7 +320,31 @@ bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/start
 ```
 
 Detach with `Ctrl-B d`; the runner keeps running and auto-restarts on crashes.
-Redeploy code changes by re-running `deploy.sh` and restarting the loop.
+Redeploy code changes by re-running `deploy.sh` and restarting the loop — or
+turn on auto-update (below) and never do it by hand again.
+
+### Auto-update from master (cron)
+
+GitHub's hosted Actions runners can't reach RIS (campus network only), so the
+cluster updates itself by *pulling*: a cron job polls `origin/master` every 10
+minutes and, when it moves, resets the deploy dir to it, refreshes the pixi
+env, and restarts the runner tmux session. The repo is public, so no
+credentials are needed. Updates are **deferred while a run is in flight**
+(any `claimed`/`running` row in the jobs table, or a Slurm job in the queue)
+and retried on the next cycle, so a run is never interrupted.
+
+One-time install on the login node:
+
+```bash
+bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/auto_update.sh --install-cron
+```
+
+On its first real run the script converts the rsync-deployed dir into a git
+clone in place (`.env` and logs are untracked and survive). Activity is logged
+to `twain-backend/auto-update.log`; remove the crontab line (`crontab -e`) to
+turn it off. Note the deploy then tracks **master only** — feature-branch
+testing on RIS still goes through `deploy.sh`, which will be overwritten at
+the next master merge.
 
 Notes and limits:
 - The runner itself is light (DB polling + LLM calls) and fits the login
