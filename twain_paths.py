@@ -29,9 +29,6 @@ CONFIGS_DIR = REPO_ROOT / "configs"
 # can fall back to it when DFTB_PREFIX is unset in the environment.
 SLAKO_DIR = REPO_ROOT / "slako"
 
-# Prompt/constraint text + scratch data used by the semantic-parsing layer.
-INTELLIGENCE_DIR = REPO_ROOT / "Intelligence Layer"
-
 # The one place all runtime output goes.
 LOGS_ROOT = REPO_ROOT / "logs"
 

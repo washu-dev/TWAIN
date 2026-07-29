@@ -1,6 +1,6 @@
 # TWAIN runner service — the pipeline engine + web-UI job loop.
 # BUILD CONTEXT IS THE REPO ROOT (the runner imports modules/, twain_paths.py,
-# schemas/, configs/, "Intelligence Layer/"), so build with:
+# schemas/, configs/), so build with:
 #     docker build -f runner/Dockerfile -t twain-runner .
 #
 # Uses the pixi environment (pixi.toml) so it has the same heavy scientific deps

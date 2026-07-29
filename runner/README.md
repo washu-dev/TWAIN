@@ -245,6 +245,44 @@ Prerequisites and knobs:
   when the process already runs *on* a login node (no SSH hop);
   `TWAIN_SLURM_CLUSTER` / `--cluster` — another `configs/clusters/` profile.
 
+## Deploy the backend ON RIS (runner on the login node)
+
+Instead of running the runner on your laptop (VPN required, laptop must stay
+awake), deploy it to the cluster itself. It polls the same shared Postgres on
+AWS RDS, so the web UI and API stay exactly where they are — only the runner
+moves. On the login node it submits `sbatch` directly (no SSH hop, no VPN in
+the loop) and stages bundles with plain local copies.
+
+One-time, from your workstation (on the VPN):
+
+```bash
+cp scripts/ris/env.ris.example .env.ris   # fill in LLM creds + the RDS password
+RIS_USER=<your-wustl-key> scripts/ris/deploy.sh
+```
+
+This rsyncs the repo to `<team storage>/twain-backend`, installs pixi + the
+default env there, and verifies connectivity (RDS :5432, LLM gateway, sbatch).
+Then start the runner in a tmux session on the login node:
+
+```bash
+ssh <your-wustl-key>@c2-login-001.ris.wustl.edu
+tmux new -s twain-runner
+bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/start_runner.sh
+```
+
+Detach with `Ctrl-B d`; the runner keeps running and auto-restarts on crashes.
+Redeploy code changes by re-running `deploy.sh` and restarting the loop.
+
+Notes and limits:
+- The runner itself is light (DB polling + LLM calls) and fits the login
+  node's 6 GB/user cap; all real computation goes to compute nodes via Slurm.
+- Jobs whose compute target is **local** would execute on the login node —
+  fine for light library runs, but heavy calculators should use the Slurm
+  target (the default here).
+- If the AWS ECS runner (`twain-runner` service) is also running, both
+  runners compete to claim jobs — whichever claims first wins. Scale the ECS
+  service to 0 if RIS should handle everything.
+
 ## Test
 No DB or pixi env needed — the unit tests use in-memory fakes:
 

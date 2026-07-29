@@ -1,3 +1,0 @@
-You are determining what the best simulation packages are for the prompt below.
-You must copy one of the enumerations below. You are to respond with nothing except for the options.
-"Pymatgen", "AtomicSimulationEnvironment"
