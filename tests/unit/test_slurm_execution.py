@@ -312,8 +312,11 @@ def test_payload_without_deps_or_smoke_is_bare_python(tmp_path):
 
 
 def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
-    # env_pythons are tried in order at job start; only if none exists does the
-    # payload build a venv (which can't handle compiled calculators like GPAW).
+    # env_pythons are tried in order at job start; only if none is USABLE does
+    # the payload build a venv (which can't handle compiled calculators like
+    # GPAW). Usable = executable AND passes the bundle's smoke test: the
+    # `default` env always exists but lacks specialty tools (OpenMM), so a
+    # bare existence check would wrongly skip the pip fallback.
     adapter = _exec_adapter(
         tmp_path, _happy_cluster_runner(),
         env_pythons=["/envs/gpaw/bin/python", "/envs/default/bin/python"],
@@ -322,7 +325,9 @@ def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
     payload = adapter._payload(bundle, install_deps=True, run_smoke=True)
     assert payload.startswith("set -e")
     assert 'for CAND in /envs/gpaw/bin/python /envs/default/bin/python' in payload
-    assert '[ -x "$CAND" ]' in payload
+    assert '[ -x "$CAND" ] || continue' in payload
+    assert ('if "$CAND" inline_tests.py >/dev/null 2>&1; '
+            'then PY="$CAND"; break; fi') in payload
     assert "python3 -m venv .venv" in payload      # fallback still present
     assert '"$PY" inline_tests.py' in payload
     # main.py runs under mpirun when the env ships it (openmpi GPAW build) --
@@ -348,6 +353,20 @@ def test_env_payload_without_requirements_falls_back_to_system_python(tmp_path):
     assert "venv" not in payload
     assert 'PY="python3"' in payload
     assert '"$PY" main.py' in payload
+    # No smoke test in the bundle -> nothing to probe with; the bare
+    # existence check picks the first executable candidate.
+    assert 'PY="$CAND"; break' in payload
+    assert "inline_tests.py" not in payload
+
+
+def test_env_payload_skips_probe_when_smoke_disabled(tmp_path):
+    adapter = _exec_adapter(
+        tmp_path, _happy_cluster_runner(), env_pythons=["/envs/gpaw/bin/python"],
+    )
+    bundle = _bundle(tmp_path)  # has inline_tests.py, but smoke is off
+    payload = adapter._payload(bundle, install_deps=True, run_smoke=False)
+    assert "inline_tests.py" not in payload
+    assert 'PY="$CAND"; break' in payload
 
 
 def test_execute_reads_job_log_as_stdout(tmp_path):

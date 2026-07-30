@@ -303,7 +303,11 @@ class SlurmAdapter:
         if request.gpu_count > 0:
             modules += [m for m in self.profile.gpu_modules if m not in modules]
         if modules:
-            lines.append(f"ml load {' '.join(modules)}")
+            # Best-effort: some profile modules (e.g. `slurm`) only load on
+            # login nodes -- on a compute node Lmod refuses them with a loud
+            # error, which must neither fail the job nor pollute its log.
+            lines.append(
+                f"module load {' '.join(modules)} >/dev/null 2>&1 || true")
         # Use every allocated core: scientific Python parallelizes through
         # OpenMP/BLAS threading, but those libraries default to 1 thread (or to
         # the node's full core count, oversubscribing a shared node) unless told
