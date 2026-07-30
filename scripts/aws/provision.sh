@@ -42,6 +42,9 @@ echo "Account: $ACCOUNT   Region: $REGION   Cluster: $CLUSTER"
 
 # ── ECR repositories ──────────────────────────────────────────────────────────
 info "ECR repositories"
+# Storage cap: every deploy pushes a new image (the runner's is multi-GB) and
+# ECR bills per GB-month; keep only the 5 newest per repo.
+LIFECYCLE_POLICY='{"rules":[{"rulePriority":1,"description":"Keep only the 5 newest images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
 for repo in "${ECR_REPOS[@]}"; do
   if aws ecr describe-repositories --repository-names "$repo" --region "$REGION" >/dev/null 2>&1; then
     step "$repo — exists"
@@ -50,6 +53,9 @@ for repo in "${ECR_REPOS[@]}"; do
     run aws ecr create-repository --repository-name "$repo" --region "$REGION" \
         --image-scanning-configuration scanOnPush=true >/dev/null
   fi
+  step "$repo — lifecycle policy (keep 5 newest images)"
+  run aws ecr put-lifecycle-policy --repository-name "$repo" --region "$REGION" \
+      --lifecycle-policy-text "$LIFECYCLE_POLICY" >/dev/null
 done
 
 # ── CloudWatch log groups ──────────────────────────────────────────────────────
