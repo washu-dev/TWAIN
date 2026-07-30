@@ -235,6 +235,63 @@ class TestSignatureProbeGate:
         assert not any(d.source == "signature-probe" for d in diags)
 
 
+class TestDftBudgetGate:
+    def test_pw_cutoff_above_500_is_an_error(self):
+        # Fingerprint of Slurm job 2472788: PW(600) + 12x12x12 k-points on a
+        # 6-atom cell -> ~10 min per SCF iteration; the first of 18 EOS
+        # points ate the entire 4-hour wall clock.
+        script = (
+            "import matgl\n"
+            "from gpaw import GPAW, PW\n"
+            "def calc():\n"
+            "    return GPAW(mode=PW(600), kpts=(8, 8, 8))\n"
+            "if __name__ == '__main__':\n"
+            "    calc()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "dft-budget" and "PW(600)" in d.message
+                   for d in diags)
+
+    def test_dense_kpts_grid_is_an_error(self):
+        script = (
+            "import matgl\n"
+            "from gpaw import GPAW, PW\n"
+            "def calc():\n"
+            "    return GPAW(mode=PW(400), kpts=(12, 12, 12))\n"
+            "if __name__ == '__main__':\n"
+            "    calc()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "dft-budget" and "(12, 12, 12)" in d.message
+                   for d in diags)
+
+    def test_budget_conformant_settings_are_clean(self):
+        script = (
+            "import matgl\n"
+            "from gpaw import GPAW, PW\n"
+            "def calc():\n"
+            "    return GPAW(mode=PW(400), kpts={'size': (8, 8, 8)})\n"
+            "if __name__ == '__main__':\n"
+            "    calc()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "dft-budget" for d in diags)
+
+    def test_explicit_accuracy_request_stands_down(self):
+        script = (
+            "import matgl\n"
+            "from gpaw import GPAW, PW\n"
+            "def calc():\n"
+            "    return GPAW(mode=PW(700), kpts=(16, 16, 16))\n"
+            "if __name__ == '__main__':\n"
+            "    calc()\n"
+        )
+        brief = dict(_brief())
+        brief["objective"] = "high accuracy converged bulk modulus of CaPt2"
+        diags = ScriptDoctor(brief=brief).static_diagnostics(script)
+        assert not any(d.source == "dft-budget" for d in diags)
+
+
 class TestPrimitiveCellGate:
     def test_primitive_cell_false_is_an_error(self):
         diags = ScriptDoctor(brief=_brief()).static_diagnostics(

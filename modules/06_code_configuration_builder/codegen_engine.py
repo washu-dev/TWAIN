@@ -347,10 +347,18 @@ energy needs no relaxation step. Relax first ONLY when {property} is undefined w
 equilibrium (e.g. an equation-of-state minimum, elastic response, adsorption geometry), \
 and then relax only the degrees of freedom the property depends on, to converged \
 forces/stress -- never from an arbitrary unrelaxed guess.
+- The same default-speed rule caps the NUMERICAL settings. Unless the researcher \
+explicitly asked for high accuracy or tight convergence: plane-wave cutoff <= 450 eV \
+(350-400 eV is fine for metals with PAW), k-point grids no denser than 8x8x8 for a \
+primitive cell, and an equation of state is ONE scan of 5-7 volume points spanning \
+about +-5% -- never a wide scan followed by a refinement scan. This resolves bulk \
+properties (lattice constant, bulk modulus, band gap) to a few percent, which is the \
+expected default; a 600 eV cutoff with a 12x12x12 grid and 18 EOS points costs ~50x \
+more and gets the job killed at its wall-clock limit with zero results.
 - In the real (non-smoke) run, use numerical settings converged well enough for \
-{property} (adequate k-point density, plane-wave/basis cutoff, SCF tolerance, sampling); \
-use the library's documented production defaults when unsure, and do not carry any \
-reduced settings from the --smoke check into the full run.
+{property} (adequate k-point density, plane-wave/basis cutoff, SCF tolerance, sampling) \
+within the budget above; use the library's documented production defaults when unsure, \
+and do not carry any reduced settings from the --smoke check into the full run.
 - Do NOT pay for atoms the property does not need: for a bulk crystal property \
 (lattice parameter, bulk modulus, cohesive/formation energy, band property) run the \
 calculation on the PRIMITIVE cell, converting any conventional-cell quantity (like a \
