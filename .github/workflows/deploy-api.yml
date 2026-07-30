@@ -85,6 +85,14 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Cap ECR storage (keep 5 newest images)
+        # Every deploy pushes a new sha-tagged image and ECR bills per GB-month;
+        # expire all but the 5 newest (:latest always points at the most recent).
+        run: |
+          aws ecr put-lifecycle-policy --repository-name "$ECR_REPOSITORY" --region "$AWS_REGION" \
+            --lifecycle-policy-text '{"rules":[{"rulePriority":1,"description":"Keep only the 5 newest images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}' \
+            >/dev/null
+
       - name: Build, tag, and push image to ECR
         id: build-image
         env:
