@@ -1,0 +1,23 @@
+# Shared cluster env: twain-envs/gpaw -- full plane-wave DFT.
+#
+# This file is the source of truth for what the env contains; apply it with
+# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
+# manual drift is exactly what these specs exist to prevent).
+#
+# The openmpi build matters: the Slurm payload auto-detects the env's mpirun
+# and runs main.py with one MPI rank per allocated CPU (GPAW parallelizes
+# over k-points via MPI -- far better scaling than OpenMP threads).
+# pymatgen + spglib ride along because crystal plans pair GPAW with them and
+# the job's smoke probe rejects an env missing ANY bundle import.
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - gpaw=*=*mpi_openmpi*
+  - openmpi
+  - ase
+  - pymatgen
+  - spglib
+  - numpy
+  - pandas
+  - pyyaml

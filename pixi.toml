@@ -70,7 +70,10 @@ quacc = "*"
 # e.g. [feature.workflows.dependencies] quacc/jobflow for WorkflowManagers.
 
 # Heavy calculator-execution stack, isolated on Python 3.11 (GPAW/DFTB+ have no
-# py3.12 conda builds) and kept separate from the default 3.12 env. Generated
+# py3.12 conda builds) and kept separate from the default 3.12 env. This is
+# also where ScriptDoctor's BUILD-time smoke verification runs -- keep it in
+# lockstep with the shared cluster env specs (scripts/ris/envs/*.yml): smoke
+# only predicts cluster behavior when the two stacks match. Generated
 # RunBundles execute here:
 #   pixi run -e sim python <bundle>/main.py
 #   pixi run -e sim python modules/07_runtime_orchestrator/orchestrator.py

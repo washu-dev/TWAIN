@@ -22,10 +22,19 @@ fi
 echo "==> pixi $(pixi --version)"
 
 # -- TWAIN environment --------------------------------------------------------
-# The runner only needs the default env (the heavy calculators run inside
-# Slurm jobs using the pre-provisioned twain-envs, not in this env).
+# The runner itself runs in the default env; the heavy calculators run inside
+# Slurm jobs using the pre-provisioned twain-envs.
 echo "==> pixi install (default env)"
 pixi install
+
+# The sim env is what ScriptDoctor's BUILD-time smoke verification runs in.
+# Without it, every generated script ships to Slurm UNVERIFIED ("no sim-env
+# interpreter to verify with") and calculator API bugs surface only after a
+# queue wait. Big first-time download (GPAW, psi4, ...); non-fatal because
+# smoke degrades gracefully -- but don't skip it on a real deployment.
+echo "==> pixi install -e sim (BUILD smoke env; large first install)"
+pixi install -e sim || \
+  echo "==> WARNING: sim env install failed; BUILD smoke will be skipped" >&2
 
 # -- connectivity checks -------------------------------------------------------
 fail=0

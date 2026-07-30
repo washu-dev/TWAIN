@@ -212,11 +212,21 @@ class SlurmExecutionAdapter:
             env=dict(env or {}),
         )
 
-        # 2) stage + submit --------------------------------------------------------
+        # 2) stage + preflight + submit --------------------------------------------
         try:
             script = self.slurm.render_sbatch(job, self.request)
             (Path(local_dir) / "job.slurm").write_text(script, encoding="utf-8")
             self.stager.push(local_dir, run_id)
+            preflight_error = self._preflight_env_check(
+                remote_dir, local_dir, install_deps=install_deps,
+                run_smoke=run_smoke)
+            if preflight_error:
+                return ExecutionResult(
+                    status=ExecutionStatus.DEPENDENCY_ERROR,
+                    message=preflight_error,
+                    tool_name=tool_name,
+                    artifacts_dir=local_dir if keep_artifacts else None,
+                )
             job_id = self.slurm.submit(f"{remote_dir}/job.slurm")
         except (SlurmError, StagingError, KeyError, OSError) as exc:
             return ExecutionResult(
@@ -319,6 +329,66 @@ class SlurmExecutionAdapter:
         if not path.is_dir():
             raise StagingError(f"bundle path is not a directory: {path}")
         return str(path)
+
+    # A single preflight probe's budget on the login node. Smoke tests are
+    # seconds by design; importing a heavy calculator stack dominates.
+    _PREFLIGHT_TIMEOUT_S = 300
+
+    def _preflight_env_check(self, remote_dir: str, local_dir: str, *,
+                             install_deps: bool, run_smoke: bool) -> Optional[str]:
+        """Probe the cluster envs BEFORE sbatch; an error string means fail fast.
+
+        A queued Slurm job is the most expensive place to discover "no
+        environment can run this bundle" (observed: an xtb bundle failed every
+        pre-provisioned env's smoke probe, then the job's pip fallback died on
+        the conda-only xtb-python -- all after staging + a queue wait). The
+        preflight reuses the job's own selection logic: run the bundle's smoke
+        test under each candidate env, from the login node, where the shared
+        storage is already mounted. One pass -> the job will find a working
+        env, submit. All fail -> ask pip's resolver whether the fallback can
+        even install the requirements; only a definite "no such distribution"
+        verdict blocks submission with an actionable message. Anything
+        ambiguous (no smoke test, flaky probe, old pip) fails open -- the job
+        itself remains the authority.
+        """
+        if not self.env_pythons:
+            return None
+        bundle = Path(local_dir)
+        if not (run_smoke and (bundle / "inline_tests.py").is_file()):
+            return None
+        rd = shlex.quote(remote_dir)
+        for env_python in self.env_pythons:
+            py = shlex.quote(env_python)
+            result = self.slurm.runner([
+                "bash", "-c",
+                f"cd {rd} && [ -x {py} ] && "
+                f"timeout {self._PREFLIGHT_TIMEOUT_S} {py} inline_tests.py",
+            ])
+            if result.returncode == 0:
+                return None  # this env serves the bundle; the job will find it
+        if not (install_deps and (bundle / "requirements.txt").is_file()):
+            return None  # no pip fallback to vet; let the job report precisely
+        result = self.slurm.runner([
+            "bash", "-c",
+            f"cd {rd} && python3 -m pip install --dry-run -r requirements.txt",
+        ])
+        blob = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        low = blob.lower()
+        if result.returncode != 0 and (
+                "no matching distribution" in low
+                or "could not find a version" in low):
+            tail = "\n".join(blob.splitlines()[-4:])
+            envs = ", ".join(self.env_pythons)
+            return (
+                "no runnable environment for this bundle on "
+                f"{self.profile.name}: every pre-provisioned env failed the "
+                f"bundle's smoke test (tried: {envs}), and pip cannot install "
+                f"its requirements there:\n{tail}\n"
+                "Provision or extend a shared env for this calculator "
+                "(scripts/ris/provision_envs.sh; specs in scripts/ris/envs/ "
+                "-- see runner/README.md), then rerun."
+            )
+        return None
 
     def _payload(self, local_dir, *, install_deps: bool, run_smoke: bool) -> str:
         """The shell payload the batch script runs inside the remote run dir.
@@ -458,8 +528,12 @@ class SlurmExecutionAdapter:
                     f"Slurm job {job_id} was killed (out of memory) — "
                     f"raise RAM on the approval card (floor is 4 GB) and retry")
         # The smoke script exits 2 on a missing dependency; the payload chain
-        # propagates it as the job's exit code.
-        if exit_code == 2 or any(marker in blob for marker in _DEP_ERROR_MARKERS):
+        # propagates it as the job's exit code. pip's resolver failures
+        # ("No matching distribution found for xtb-python") are the same
+        # class: the environment, not the science, is what broke.
+        pip_markers = ("no matching distribution", "could not find a version")
+        if exit_code == 2 or any(marker in blob for marker in
+                                 _DEP_ERROR_MARKERS + pip_markers):
             return (ExecutionStatus.DEPENDENCY_ERROR,
                     f"Slurm job {job_id} failed on a missing/broken dependency "
                     f"(see the job log)")
