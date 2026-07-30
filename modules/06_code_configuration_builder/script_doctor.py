@@ -396,7 +396,38 @@ class ScriptDoctor:
                 "job. Pass the documented keywords directly and let a real "
                 "TypeError surface.", line))
         diags.extend(self._primitive_cell_diagnostics(source))
+        diags.extend(self._dft_budget_diagnostics(source))
         return diags
+
+    def _dft_budget_diagnostics(self, source: str) -> List[Diagnostic]:
+        """Flag numerical settings far beyond the default-accuracy budget.
+
+        The wall-clock killer behind Slurm job 2472788: nobody asked for high
+        accuracy, but the script ran PW(600) with a 12x12x12 grid (182
+        irreducible k-points on 6-atom CaPt2 -- ~10 minutes per SCF
+        iteration), so the FIRST of its 18 EOS points consumed the whole
+        4-hour wall time. Prompt guidance alone keeps losing to the model's
+        conservatism, so the budget is mechanical; it stands down when the
+        researcher's own request asks for accuracy/convergence.
+        """
+        asked = " ".join(
+            str(self.brief.get(k) or "")
+            for k in ("objective", "property", "material_desc")
+        ).lower()
+        if any(word in asked for word in _ACCURACY_WORDS):
+            return []
+        return [
+            Diagnostic(
+                "dft-budget", "error",
+                f"uses {desc}: far beyond the default cost budget, and the "
+                "researcher did not ask for high accuracy. Default protocol: "
+                "plane-wave cutoff <= 450 eV (350-400 eV is fine for metals "
+                "with PAW), k-grid <= 8x8x8 for a primitive cell, and ONE "
+                "equation-of-state scan of 5-7 points (about +-5% volume) -- "
+                "that resolves bulk properties to a few percent in minutes "
+                "instead of blowing the job's wall clock.", line)
+            for desc, line in _extravagant_dft_settings(source)
+        ]
 
     def _primitive_cell_diagnostics(self, source: str) -> List[Diagnostic]:
         """Flag conventional-cell builds the researcher never asked for.
@@ -635,6 +666,62 @@ _EXPLICIT_CELL_WORDS = (
     "surface", "slab", "interface", "grain",
     "defect", "vacancy", "interstitial", "dopant", "doped", "adsor",
 )
+
+# Words meaning the researcher deliberately asked for expensive, tightly
+# converged settings -- the DFT cost-budget gate must stand down.
+_ACCURACY_WORDS = (
+    "high accuracy", "high-accuracy", "accurate", "converged", "convergence",
+    "publication", "benchmark", "tight", "precise", "precision",
+)
+
+
+def _static_int_elements(node) -> List[int]:
+    """Constant ints of a tuple/list literal (or a ``{"size": (...)}`` dict)."""
+    if isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and key.value == "size":
+                node = value
+                break
+    if isinstance(node, (ast.Tuple, ast.List)):
+        vals = [e.value for e in node.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, int)]
+        return vals if len(vals) == len(node.elts) else []
+    return []
+
+
+def _extravagant_dft_settings(source: str) -> List[Tuple[str, int]]:
+    """(description, line) pairs for numerical settings beyond the default budget.
+
+    Two statically checkable cost drivers: a plane-wave cutoff above 500 eV
+    (``PW(600)``) and a k-point grid denser than 10 per axis
+    (``kpts=(12, 12, 12)`` or ``kpts={"size": (12, 12, 12)}``). Either one
+    multiplies every SCF by a large factor; together they took a 6-atom CaPt2
+    EOS from minutes to ~10 minutes PER SCF ITERATION.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    found: List[Tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name == "PW" and node.args:
+            arg = node.args[0]
+            if (isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, (int, float))
+                    and arg.value > 500):
+                found.append((f"a PW({arg.value:g}) cutoff", node.lineno))
+        for kw in node.keywords:
+            if kw.arg == "kpts":
+                dims = _static_int_elements(kw.value)
+                if dims and max(dims) > 10:
+                    found.append(
+                        (f"a kpts={tuple(dims)} grid", kw.value.lineno))
+    return found
 
 
 # Cell filters that moved from ase.constraints to ase.filters in ASE 3.23.
