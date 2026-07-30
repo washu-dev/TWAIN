@@ -386,6 +386,15 @@ class ScriptDoctor:
                 'numbers and raises TypeError at calculator init. For a '
                 'frozen-occupations band-structure pass use '
                 '{"name": "fixed-uniform"} instead.', line))
+        for line in _signature_probe_calls(source):
+            diags.append(Diagnostic(
+                "signature-probe", "error",
+                "gates behavior on inspect.signature(): ASE-style calculators "
+                "(e.g. xtb-python's XTB) take **kwargs and route options "
+                "through default_parameters, so the probe falsely reports "
+                "keywords like 'solvent' as unsupported and aborts a runnable "
+                "job. Pass the documented keywords directly and let a real "
+                "TypeError surface.", line))
         diags.extend(self._primitive_cell_diagnostics(source))
         return diags
 
@@ -675,6 +684,40 @@ def _fixed_occupations_without_numbers(source: str) -> List[int]:
         name = vals.get("name")
         if (isinstance(name, ast.Constant) and name.value == "fixed"
                 and "numbers" not in keys):
+            lines.append(node.lineno)
+    return lines
+
+
+def _signature_probe_calls(source: str) -> List[int]:
+    """Lines probing API capabilities with ``inspect.signature(...)``.
+
+    Synthesized scripts use it defensively ("does this calculator accept a
+    ``solvent`` kwarg?") -- but ASE-style calculators (xtb-python's ``XTB``
+    among them) declare ``__init__(self, atoms=None, **kwargs)`` and route
+    every real option through ``default_parameters``, so the probe reports a
+    false "unsupported" and the script aborts a run that would have worked.
+    Pass the documented keywords directly; a genuinely wrong keyword raises
+    its own clear error.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    bare_signature_imported = any(
+        isinstance(node, ast.ImportFrom) and node.module == "inspect"
+        and any(alias.name == "signature" for alias in node.names)
+        for node in ast.walk(tree))
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Attribute) and func.attr == "signature"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "inspect"):
+            lines.append(node.lineno)
+        elif (isinstance(func, ast.Name) and func.id == "signature"
+                and bare_signature_imported):
             lines.append(node.lineno)
     return lines
 

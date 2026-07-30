@@ -255,9 +255,12 @@ ROOT=/storage2/fs1/mdan/Active/dtrc2026-workshop
 # test fails on any import the env is missing.
 ./bin/micromamba create -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
   python=3.11 "gpaw=*=*mpi_openmpi*" openmpi ase pymatgen spglib numpy pandas pyyaml
-# optional shared fallback env for everything else
+# optional shared fallback env for everything else. rdkit rides along because
+# molecular plans pair xtb with RDKit conformer embedding, and the job's smoke
+# probe rejects an env that misses ANY bundle import (falling back to pip,
+# which cannot install the compiled xtb-python at all).
 ./bin/micromamba create -y -p "$ROOT/twain-envs/default" -c conda-forge \
-  python=3.11 ase pymatgen spglib xtb-python numpy pandas pyyaml
+  python=3.11 ase pymatgen spglib xtb-python rdkit numpy pandas pyyaml
 # verify exactly the way the Slurm job invokes it (no activation).
 # OPAL_PREFIX tells OpenMPI where its runtime data lives when the env is not
 # activated (the Slurm payload sets it too); always use the ABSOLUTE path --
