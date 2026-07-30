@@ -16,7 +16,23 @@ export PATH="$HOME/.pixi/bin:$PATH"
 export PYTHONUNBUFFERED=1
 
 # sbatch/squeue for the runner's own submissions (jobs load modules themselves).
-module load ris slurm 2>/dev/null || true
+# `module` is a shell function that only exists after Lmod init, which login
+# shells get from /etc/profile -- but a tmux session started from cron (the
+# auto-updater) or a non-interactive ssh gets neither. Initialize it
+# explicitly, then fall back to the Slurm bin dir, and refuse to start a
+# runner that cannot submit jobs (a silent PATH failure here surfaces as
+# "[Errno 2] No such file or directory: 'sbatch'" on every user's run).
+if ! command -v module >/dev/null 2>&1; then
+  set +u; . /etc/profile >/dev/null 2>&1 || true; set -u
+fi
+module load ris slurm >/dev/null 2>&1 || true
+if ! command -v sbatch >/dev/null 2>&1 && [ -x /cm/local/apps/slurm/current/bin/sbatch ]; then
+  export PATH="/cm/local/apps/slurm/current/bin:$PATH"
+fi
+if ! command -v sbatch >/dev/null 2>&1; then
+  echo "FATAL: sbatch not on PATH after module load + fallback; not starting" >&2
+  exit 1
+fi
 
 # Secrets + DB config (deploy.sh installed .env from your .env.ris).
 set -a; . ./.env; set +a
