@@ -133,9 +133,9 @@ class SlurmExecutionAdapter:
 
         ``env_pythons`` lists pre-provisioned interpreters on cluster storage
         (e.g. ``<envs_root>/gpaw/bin/python``), tried in order at job start;
-        the first that exists is used instead of building a venv -- required
-        for compiled calculators (GPAW needs libxc headers) that pip cannot
-        build on bare compute nodes."""
+        the first that exists *and passes the bundle's smoke test* is used
+        instead of building a venv -- required for compiled calculators (GPAW
+        needs libxc headers) that pip cannot build on bare compute nodes."""
         self.profile = profile or ClusterProfile.load("compute2")
         # Default resource ask when the plan carries none: a small CPU job.
         self.request = request or SlurmRequest(
@@ -351,18 +351,33 @@ class SlurmExecutionAdapter:
 
     def _env_payload(self, bundle: Path, *, install_deps: bool,
                      run_smoke: bool) -> str:
-        """Multi-line payload: pick the first existing env python, else venv.
+        """Multi-line payload: pick the first *usable* env python, else venv.
 
         Existence is checked on the compute node at job start (``[ -x ... ]``)
-        because the adapter can't cheaply stat cluster storage from here.
+        because the adapter can't cheaply stat cluster storage from here. An
+        env that merely exists is not enough: the candidate list always ends
+        with ``<envs_root>/default``, which exists but only carries the common
+        stack -- accepting it blindly skips the pip fallback and any tool it
+        lacks (e.g. OpenMM) dies at the smoke gate. So each candidate is
+        probed with the bundle's own smoke test (quietly) and only an env
+        that passes is selected; when none does, the venv+pip path takes over.
         ``set -e`` keeps the fail-fast behavior of the ``&&`` chain.
         """
+        have_smoke = run_smoke and (bundle / "inline_tests.py").is_file()
         candidates = " ".join(shlex.quote(p) for p in self.env_pythons)
         lines = [
             "set -e",
             'PY=""',
-            f"for CAND in {candidates}; do "
-            'if [ -x "$CAND" ]; then PY="$CAND"; break; fi; done',
+            f"for CAND in {candidates}; do",
+            '  [ -x "$CAND" ] || continue',
+        ]
+        if have_smoke:
+            lines.append('  if "$CAND" inline_tests.py >/dev/null 2>&1; '
+                         'then PY="$CAND"; break; fi')
+        else:
+            lines.append('  PY="$CAND"; break')
+        lines += [
+            "done",
             'if [ -z "$PY" ]; then',
         ]
         if install_deps and (bundle / "requirements.txt").is_file():

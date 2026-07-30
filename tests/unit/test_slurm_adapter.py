@@ -121,7 +121,9 @@ def test_render_sbatch_cpu_job():
     assert "#SBATCH --mem=16000M" in script
     assert "#SBATCH --time=00:45:00" in script
     assert "--gres" not in script and "--gpus" not in script  # no GPU directive for cpu job
-    assert "ml load ris slurm" in script
+    # Module loads are best-effort and quiet: `slurm` refuses to load on
+    # compute nodes, and that Lmod error must not fail or pollute the job.
+    assert "module load ris slurm >/dev/null 2>&1 || true" in script
     assert "cd /storage2/fs1/me/run" in script
     assert script.rstrip().endswith("python main.py")
     # Threading env pins OpenMP/BLAS to the allocated cores so the payload
