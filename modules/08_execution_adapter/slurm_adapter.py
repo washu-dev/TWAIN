@@ -76,18 +76,31 @@ def subprocess_runner(argv: Sequence[str]) -> CommandResult:
     return CommandResult(proc.returncode, proc.stdout, proc.stderr)
 
 
-def ssh_runner(host: str, *, user: Optional[str] = None) -> Runner:
+def ssh_runner(host: str, *, user: Optional[str] = None,
+               modules: Optional[Sequence[str]] = None) -> Runner:
     """Build a runner that executes commands on ``host`` over SSH.
 
     The remote command is the safely-quoted ``argv`` so it runs unchanged on the
     login node (which is where ``sbatch``/``squeue`` live for Compute2).
+
+    The command runs inside ``bash -lc`` with the profile's ``modules``
+    explicitly loaded: a plain ``ssh host sbatch ...`` executes in a
+    non-interactive shell whose PATH depends on each user's personal dotfiles
+    (and zsh users' ``.zshrc`` is not even read there), so ``sbatch`` is only
+    on PATH for users who happen to load the Slurm module themselves. A bash
+    login shell initializes Lmod from the system profile for every user, and
+    the explicit ``module load`` makes the scheduler commands available
+    deterministically -- no per-user shell setup required.
     """
     target = f"{user}@{host}" if user else host
+    prefix = (f"module load {' '.join(modules)} >/dev/null 2>&1 || true; "
+              if modules else "")
 
     def _run(argv: Sequence[str]) -> CommandResult:
         remote = " ".join(shlex.quote(a) for a in argv)
+        wrapped = f"bash -lc {shlex.quote(prefix + remote)}"
         proc = subprocess.run(
-            ["ssh", target, remote], capture_output=True, text=True
+            ["ssh", target, wrapped], capture_output=True, text=True
         )
         return CommandResult(proc.returncode, proc.stdout, proc.stderr)
 

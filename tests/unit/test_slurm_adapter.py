@@ -259,3 +259,45 @@ def test_jobstate_terminal_and_success_flags():
     assert JobState.COMPLETED.is_terminal and JobState.COMPLETED.succeeded
     assert JobState.FAILED.is_terminal and not JobState.FAILED.succeeded
     assert not JobState.RUNNING.is_terminal
+
+
+class TestSshRunner:
+    """The SSH runner must not depend on the remote user's dotfiles: sbatch is
+    only on PATH after `module load`, which non-interactive shells (and zsh
+    users' .zshrc) never run -- so the command is wrapped in `bash -lc` with
+    the profile's modules loaded explicitly."""
+
+    def _capture(self, monkeypatch):
+        calls = []
+
+        def fake_run(argv, capture_output, text):
+            calls.append(argv)
+            class P:
+                returncode, stdout, stderr = 0, "", ""
+            return P()
+
+        from execution_adapter import slurm_adapter as mod
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        return calls
+
+    def test_wraps_in_bash_login_shell_with_module_load(self, monkeypatch):
+        from execution_adapter.slurm_adapter import ssh_runner
+        calls = self._capture(monkeypatch)
+        run = ssh_runner("login.example.edu", user="alice",
+                         modules=["ris", "slurm"])
+        run(["sbatch", "/runs/job.slurm"])
+        ssh_argv = calls[0]
+        assert ssh_argv[:2] == ["ssh", "alice@login.example.edu"]
+        remote = ssh_argv[2]
+        assert remote.startswith("bash -lc ")
+        assert "module load ris slurm" in remote
+        assert "sbatch /runs/job.slurm" in remote
+
+    def test_no_modules_still_uses_login_shell(self, monkeypatch):
+        from execution_adapter.slurm_adapter import ssh_runner
+        calls = self._capture(monkeypatch)
+        run = ssh_runner("login.example.edu")
+        run(["squeue", "--job", "42"])
+        remote = calls[0][2]
+        assert remote.startswith("bash -lc ")
+        assert "module load" not in remote

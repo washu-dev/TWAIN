@@ -154,8 +154,9 @@ class SlurmExecutionAdapter:
         self.should_abort = should_abort
 
         if cluster_runner is None:
-            cluster_runner = ssh_runner(self.host, user=user) if self.host \
-                else subprocess_runner
+            cluster_runner = ssh_runner(
+                self.host, user=user, modules=self.profile.modules,
+            ) if self.host else subprocess_runner
         self.slurm = SlurmAdapter(self.profile, runner=cluster_runner)
         # host="" (already on a login node) degrades staging to local copies.
         self.stager = Stager(self.profile, host=self.host, user=user,
