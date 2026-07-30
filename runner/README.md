@@ -229,65 +229,55 @@ The job builds its own venv from the bundle's `requirements.txt` (compute
 nodes have no TWAIN environment), and the smoke test runs first so a missing
 dependency fails in seconds instead of after a long queue wait.
 
-**Compiled calculators (GPAW, DFTB+) can't be pip-installed by the job** —
-GPAW needs libxc headers the compute nodes don't have. For those, provision a
-shared environment once under the profile's `envs_root`
+**Compiled calculators (GPAW, xtb, DFTB+) can't be pip-installed by the job**
+— GPAW needs libxc headers, xtb-python isn't on PyPI at all. For those,
+shared environments live under the profile's `envs_root`
 (`/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs` on compute2); the
 job automatically prefers `<envs_root>/<calculator>/bin/python` (then
-`<envs_root>/<tool>/`, then `<envs_root>/default/`) over building a venv.
-One-time setup on a login node (micromamba needs no modules or sudo):
+`<envs_root>/<tool>/`, then `<envs_root>/default/`) over building a venv —
+selecting the first env that passes the bundle's smoke test, so an env that
+exists but lacks an import never silently wins.
+
+**The envs are declarative.** Each env has a version-controlled spec in
+`scripts/ris/envs/<name>.yml` (the env is named after the spec file and
+matched case-insensitively against the plan's calculator / tool name, so
+`gpaw.yml` -> `twain-envs/gpaw` serves any plan that selects GPAW). Provision
+or sync them on a login node — micromamba needs no modules or sudo, and the
+script installs it if missing:
 
 ```bash
 ssh <wustl-key>@c2-login-001.ris.wustl.edu
-cd /storage2/fs1/mdan/Active/dtrc2026-workshop
-# standalone micromamba binary (no install)
-curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
-  | tar -xj bin/micromamba
-# micromamba needs ABSOLUTE prefixes (-p): package post-link scripts fail on
-# relative ones.
-export MAMBA_ROOT_PREFIX=/storage2/fs1/mdan/Active/dtrc2026-workshop/.micromamba
+cd /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend
+bash scripts/ris/provision_envs.sh           # all specs
+bash scripts/ris/provision_envs.sh default   # just one env
+```
+
+To add a package (a new plan needs an import the env lacks — the smoke test
+names it in the job log, and the pre-submit preflight names it before
+queueing), **edit the spec, commit, and rerun the script**. Never
+`micromamba install` into a shared env by hand: manual drift is how
+`twain-envs/default` silently lost rdkit, and hand edits also race against
+teammates' running jobs.
+
+To verify an env exactly the way the Slurm job invokes it (no activation;
+`OPAL_PREFIX` tells OpenMPI where its runtime data lives — always use the
+ABSOLUTE path, a relative mpirun path breaks OpenMPI's prefix
+auto-detection):
+
+```bash
 ROOT=/storage2/fs1/mdan/Active/dtrc2026-workshop
-# conda-forge ships prebuilt linux-64 GPAW with libxc included. Use the
-# openmpi build: the Slurm payload auto-detects the env's mpirun and runs
-# main.py with one MPI rank per allocated CPU (GPAW parallelizes over
-# k-points via MPI — far better scaling than OpenMP threads). Include
-# pymatgen + spglib: crystal plans pair GPAW with them and the job's smoke
-# test fails on any import the env is missing.
-./bin/micromamba create -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
-  python=3.11 "gpaw=*=*mpi_openmpi*" openmpi ase pymatgen spglib numpy pandas pyyaml
-# optional shared fallback env for everything else. rdkit rides along because
-# molecular plans pair xtb with RDKit conformer embedding, and the job's smoke
-# probe rejects an env that misses ANY bundle import (falling back to pip,
-# which cannot install the compiled xtb-python at all).
-./bin/micromamba create -y -p "$ROOT/twain-envs/default" -c conda-forge \
-  python=3.11 ase pymatgen spglib xtb-python rdkit numpy pandas pyyaml
-# verify exactly the way the Slurm job invokes it (no activation).
-# OPAL_PREFIX tells OpenMPI where its runtime data lives when the env is not
-# activated (the Slurm payload sets it too); always use the ABSOLUTE path --
-# a relative mpirun path breaks OpenMPI's prefix auto-detection.
 "$ROOT/twain-envs/gpaw/bin/python" \
   -c "import gpaw, ase, pymatgen, spglib; print(gpaw.__version__)"
 OPAL_PREFIX="$ROOT/twain-envs/gpaw" \
   "$ROOT/twain-envs/gpaw/bin/mpirun" --version | head -1
 ```
 
-If you already created the env with the `nompi` build, switch it in place:
-
-```bash
-./bin/micromamba install -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
-  "gpaw=*=*mpi_openmpi*" openmpi
-```
-
-To add packages to an existing env later (e.g. a new plan needs something
-the env lacks — the smoke test will name the missing imports in the job log):
-
-```bash
-./bin/micromamba install -y -p "$ROOT/twain-envs/gpaw" -c conda-forge \
-  pymatgen spglib
-```
-
-Env names are matched case-insensitively against the plan's calculator /
-tool name, so `twain-envs/gpaw` serves any plan that selects GPAW.
+**Before submitting**, the adapter also runs a preflight from the login node:
+each candidate env is probed with the bundle's smoke test, and if none passes
+it asks pip (`--dry-run`) whether the job's venv fallback could even install
+the requirements. A definite "no matching distribution" verdict fails the run
+immediately with a pointer to the env specs — instead of after staging plus a
+queue wait.
 
 Prerequisites and knobs:
 - WashU VPN (AnyConnect) + Duo, and an SSH key for the login node

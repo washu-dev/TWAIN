@@ -369,6 +369,81 @@ def test_env_payload_skips_probe_when_smoke_disabled(tmp_path):
     assert 'PY="$CAND"; break' in payload
 
 
+# -- preflight: fail fast before sbatch when no env can serve the bundle ---------
+
+def _is_probe(argv):
+    return argv[0] == "bash" and "inline_tests.py" in argv[2]
+
+
+def _is_pip_dry_run(argv):
+    return argv[0] == "bash" and "pip install --dry-run" in argv[2]
+
+
+def test_preflight_env_pass_stops_probing_and_submits(tmp_path):
+    cluster = _happy_cluster_runner()
+    cluster.on(_is_probe, CommandResult(0, ""))
+    adapter = _exec_adapter(
+        tmp_path, cluster,
+        env_pythons=["/envs/xtb/bin/python", "/envs/default/bin/python"],
+    )
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s1")
+    assert result.status == ExecutionStatus.SUCCESS
+    # first candidate passed -> no second probe, no pip check, sbatch ran
+    assert len([c for c in cluster.calls if _is_probe(c)]) == 1
+    assert not any(_is_pip_dry_run(c) for c in cluster.calls)
+    assert any(c[0] == "sbatch" for c in cluster.calls)
+
+
+def test_preflight_blocks_submission_when_nothing_can_run_the_bundle(tmp_path):
+    # Fingerprint of Slurm job 2459489: every env fails the smoke probe AND
+    # pip's resolver cannot install the requirements (conda-only xtb-python).
+    # The old flow burned a stage + queue round-trip to learn this.
+    cluster = _happy_cluster_runner()
+    cluster.on(_is_probe, CommandResult(2, "[smoke] MISSING DEPENDENCY: xtb"))
+    cluster.on(_is_pip_dry_run, CommandResult(
+        1, "", "ERROR: No matching distribution found for xtb-python==22.1"))
+    adapter = _exec_adapter(
+        tmp_path, cluster, env_pythons=["/envs/default/bin/python"])
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s2")
+    assert result.status == ExecutionStatus.DEPENDENCY_ERROR
+    assert "provision" in result.message.lower()
+    assert "xtb-python" in result.message
+    assert not any(c[0] == "sbatch" for c in cluster.calls)  # never queued
+
+
+def test_preflight_fails_open_when_pip_can_install(tmp_path):
+    # No env passes, but the requirements resolve on PyPI -> the job's
+    # venv+pip fallback will work; submission must proceed.
+    cluster = _happy_cluster_runner()
+    cluster.on(_is_probe, CommandResult(2, ""))
+    cluster.on(_is_pip_dry_run, CommandResult(0, "Would install ase-3.23.0"))
+    adapter = _exec_adapter(
+        tmp_path, cluster, env_pythons=["/envs/default/bin/python"])
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s3")
+    assert result.status == ExecutionStatus.SUCCESS
+    assert any(c[0] == "sbatch" for c in cluster.calls)
+
+
+def test_preflight_fails_open_on_ambiguous_pip_verdict(tmp_path):
+    # `--dry-run` needs pip >= 22.2; an old pip erroring out is not a
+    # dependency verdict and must not block the job.
+    cluster = _happy_cluster_runner()
+    cluster.on(_is_probe, CommandResult(2, ""))
+    cluster.on(_is_pip_dry_run, CommandResult(2, "", "no such option: --dry-run"))
+    adapter = _exec_adapter(
+        tmp_path, cluster, env_pythons=["/envs/default/bin/python"])
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s4")
+    assert result.status == ExecutionStatus.SUCCESS
+
+
+def test_preflight_skipped_without_env_pythons(tmp_path):
+    cluster = _happy_cluster_runner()
+    adapter = _exec_adapter(tmp_path, cluster)
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s5")
+    assert result.status == ExecutionStatus.SUCCESS
+    assert not any(c[0] == "bash" for c in cluster.calls)
+
+
 def test_execute_reads_job_log_as_stdout(tmp_path):
     cluster = _happy_cluster_runner()
     adapter = _exec_adapter(tmp_path, cluster)
