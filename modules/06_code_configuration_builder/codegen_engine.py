@@ -323,6 +323,11 @@ helper is `from ase.dft.bandgap import bandgap` (pass it the attached calculator
 there is NO `gpaw.bandgap` module. In GPAW, occupations={{"name": "fixed"}} requires an \
 explicit per-band `numbers` array -- for a frozen-occupations band-structure pass use \
 {{"name": "fixed-uniform"}}.
+- NEVER gate behavior on `inspect.signature()` capability probes: ASE-style calculators \
+(e.g. xtb-python's `XTB`) declare `__init__(self, atoms=None, **kwargs)` and route real \
+options (`method`, `accuracy`, `solvent`, ...) through `default_parameters`, so the probe \
+falsely reports them unsupported. Pass the documented keywords directly \
+(`XTB(method="GFN2-xTB", solvent="water")`) and let a genuinely wrong keyword raise.
 - Attach the {calculator} calculator (`{calculator_import}`) and compute {property}. \
 Do NOT invent model, dataset, or parameter-set identifiers -- a name you guess may \
 not exist. If the calculator loads a named pretrained model, discover the valid \

@@ -187,6 +187,54 @@ class TestGpawFixedOccupationsGate:
         assert not any(d.source == "gpaw-occupations" for d in diags)
 
 
+class TestSignatureProbeGate:
+    def test_inspect_signature_probe_is_an_error(self):
+        # Fingerprint of Slurm job 2459489's bundle: the script probed
+        # inspect.signature(XTB.__init__) for a 'solvent' parameter, but the
+        # calculator takes **kwargs (options live in default_parameters), so
+        # the probe falsely reported "unsupported" and aborted a runnable job.
+        script = (
+            "import matgl\n"
+            "import inspect\n"
+            "def make_calc(solvent):\n"
+            "    from xtb.ase.calculator import XTB\n"
+            "    accepted = set(inspect.signature(XTB.__init__).parameters)\n"
+            "    if 'solvent' not in accepted:\n"
+            "        raise RuntimeError('no solvent kw')\n"
+            "    return XTB(solvent=solvent)\n"
+            "if __name__ == '__main__':\n"
+            "    make_calc('water')\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "signature-probe" and d.severity == "error"
+                   for d in diags)
+
+    def test_bare_signature_import_is_an_error(self):
+        script = (
+            "import matgl\n"
+            "from inspect import signature\n"
+            "def make_calc():\n"
+            "    from xtb.ase.calculator import XTB\n"
+            "    return signature(XTB.__init__)\n"
+            "if __name__ == '__main__':\n"
+            "    make_calc()\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "signature-probe" for d in diags)
+
+    def test_unrelated_signature_name_is_clean(self):
+        # A local function named `signature` is not an inspect probe.
+        script = (
+            "import matgl\n"
+            "def signature(x):\n"
+            "    return x\n"
+            "if __name__ == '__main__':\n"
+            "    signature(1)\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "signature-probe" for d in diags)
+
+
 class TestPrimitiveCellGate:
     def test_primitive_cell_false_is_an_error(self):
         diags = ScriptDoctor(brief=_brief()).static_diagnostics(
