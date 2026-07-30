@@ -316,6 +316,33 @@ Detach with `Ctrl-B d`; the runner keeps running and auto-restarts on crashes.
 Redeploy code changes by re-running `deploy.sh` and restarting the loop — or
 turn on auto-update (below) and never do it by hand again.
 
+### On-demand extra workers (backlog behind a long run)
+
+The runner drives one job at a time, and EXECUTE holds it for as long as the
+Slurm job runs — so a multi-hour DFT run makes everyone else's jobs queue
+even though the cluster has free nodes. `scale_runners.sh` fixes that by
+keeping up to N one-shot workers alive (`runner.runner --once`: claim one
+job, drive it, exit) while a claimable backlog exists, then exiting once the
+queue drains. Make it automatic with a one-time cron install on the login
+node:
+
+```bash
+bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/scale_runners.sh --install-cron
+```
+
+Cron fires it every minute: an idle check costs ~2 seconds and logs nothing;
+when jobs stack up it becomes the supervisor until the backlog drains (a
+flock guard keeps it single-instance, so overlapping fires are no-ops).
+Activity logs to `scale-runners.log` in the deploy dir. It can also be run
+by hand (`scale_runners.sh [N]`) — same behavior, plus console output.
+
+Safe by design: job claiming is atomic (`FOR UPDATE SKIP LOCKED`) and
+per-session serialized, so workers never collide with the main runner or
+each other, and a killed worker's job is re-queued by the reaper when its
+lease expires. The default cap is 2 extra workers (set
+`TWAIN_MAX_EXTRA_RUNNERS` in the deploy dir's `.env` to change it); keep it
+small — the login node has a ~6 GB/user memory cap.
+
 ### Auto-update from master (cron)
 
 GitHub's hosted Actions runners can't reach RIS (campus network only), so the
