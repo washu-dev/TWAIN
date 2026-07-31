@@ -13,9 +13,17 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { apiClient, Conversation, Message } from '@/api/client';
+import { IssueModal } from '@/components/IssueModal';
+import { useAuth } from '@/hooks/useAuth';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
+
+// Exact lead-in the planner puts on the safety note when the best-fit engine
+// can't run on the cluster (see ENGINE_UNAVAILABLE_PREFIX in
+// modules/16_agent_mesh_control_plane/statemachine.py — keep in sync). The
+// approval card keys off it to offer a one-tap GitHub provisioning request.
+const ENGINE_UNAVAILABLE_PREFIX = 'ENGINE UNAVAILABLE ON THIS DEPLOYMENT: ';
 
 // The happy-path pipeline states shown in the stepper (loops CORRECT/REPLAN omitted).
 const PIPELINE_STATES = [
@@ -99,8 +107,10 @@ function parsePlanSummary(content: string): PlanSummary | null {
 export const ChatScreen: React.FC = () => {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
+  const { user } = useAuth();
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState('');
+  const [issueOpen, setIssueOpen] = useState(false); // "provision this engine" GitHub issue
   // The researcher's edits to the Slurm resource request, keyed to the approval
   // card they were made on so a fresh card reseeds from its own plan.
   const [slurmEdit, setSlurmEdit] = useState<{ key: string; draft: SlurmDraft } | null>(null);
@@ -130,6 +140,29 @@ export const ChatScreen: React.FC = () => {
   const approvalContent =
     [...messages].reverse().find((m) => m.kind === 'approval_request')?.content ?? null;
   const approvalPlan = approvalContent ? parsePlanSummary(approvalContent) : null;
+
+  // Planner flagged that the best-fit engine can't run on the cluster: surface
+  // it beside the approval buttons with a prefilled "please provision it"
+  // GitHub issue, so the researcher decides (approve the substitute / request
+  // the engine) instead of getting a silent substitution.
+  const engineNote =
+    (approvalPlan?.safety_notes ?? []).find((n) => n.startsWith(ENGINE_UNAVAILABLE_PREFIX)) ??
+    null;
+  const blockedEngines = engineNote
+    ? engineNote.slice(ENGINE_UNAVAILABLE_PREFIX.length).split(' would fit')[0]
+    : null;
+  const engineIssueBody = engineNote
+    ? [
+        'While planning a run, TWAIN reported:',
+        '',
+        engineNote,
+        '',
+        `Please provision ${blockedEngines} on the RIS cluster: add an env spec under ` +
+          'scripts/ris/envs/ and run scripts/ris/provision_envs.sh.',
+        '',
+        `Conversation: ${conversationId ?? 'n/a'}`,
+      ].join('\n')
+    : undefined;
 
   // Editable Slurm fields: the plan's request seeds the values; the
   // researcher's edits (if made on this approval card) override them.
@@ -342,6 +375,24 @@ export const ChatScreen: React.FC = () => {
       {awaitingApproval ? (
         <View style={styles.approvalBar}>
           <Text style={styles.approvalLabel}>Approve this plan for the RIS cluster?</Text>
+          {engineNote ? (
+            <View style={styles.engineNotice}>
+              <Text style={styles.engineNoticeText}>
+                {blockedEngines} fits this request best but isn’t available on the cluster,
+                so this plan uses a substitute. Approve to run it as planned, or ask the
+                team to make {blockedEngines} available.
+              </Text>
+              <TouchableOpacity
+                style={styles.engineIssueBtn}
+                onPress={() => setIssueOpen(true)}
+                accessibilityRole="button"
+              >
+                <Text style={styles.engineIssueText}>
+                  Request {blockedEngines} via GitHub issue
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
           {slurmDraft && (
             <View style={styles.slurmEditor}>
               <Text style={styles.slurmEditorTitle}>Slurm resources (editable)</Text>
@@ -499,6 +550,15 @@ export const ChatScreen: React.FC = () => {
           </View>
         </View>
       </Modal>
+
+      <IssueModal
+        visible={issueOpen}
+        submitterEmail={user?.email}
+        initialTitle={`Provision request: ${blockedEngines ?? 'engine'} unavailable on the RIS cluster`}
+        initialBody={engineIssueBody}
+        onSubmit={(title, body) => apiClient.createIssue(title, body)}
+        onClose={() => setIssueOpen(false)}
+      />
     </SafeAreaView>
   );
 };
@@ -810,6 +870,24 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   approvalLabel: { fontSize: 15, fontWeight: '600', color: C.text },
+  engineNotice: {
+    gap: Spacing.two,
+    padding: Spacing.two,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: C.washuRed,
+    backgroundColor: '#FDF3F4',
+  },
+  engineNoticeText: { fontSize: 13, color: C.text, lineHeight: 19 },
+  engineIssueBtn: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: C.washuRed,
+    borderRadius: 6,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 6,
+  },
+  engineIssueText: { color: C.washuRed, fontSize: 13, fontWeight: '700' },
   slurmEditor: {
     gap: Spacing.two,
     padding: Spacing.two,

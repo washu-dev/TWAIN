@@ -269,7 +269,12 @@ PyPI (checked live, cached; known unbuildable-on-nodes packages like gpaw
 and the conda-only codes are also blockable offline via
 `CONDA_ONLY_PACKAGES` in `dependency_inferencer.py`). Anything else is
 rerouted to a runnable tool at plan time instead of dying in the job's
-`pip install`. So to make a conda-only tool (e.g. Psi4) available on RIS:
+`pip install`. The reroute is never silent: the plan carries an
+"ENGINE UNAVAILABLE ON THIS DEPLOYMENT" safety note naming the passed-over
+engine and the substitute, and the approval card turns it into a one-tap,
+prefilled GitHub issue asking the team to provision the engine — the
+researcher decides whether to run the substitute or request the real thing.
+So to make a conda-only tool (e.g. Psi4) available on RIS:
 add its spec, provision it, commit — planning picks it up from the spec
 alone. If a run still fails with a Python traceback inside the generated
 script, EXECUTE feeds that traceback back to the repair LLM and resubmits

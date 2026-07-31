@@ -1,0 +1,22 @@
+# Shared cluster env: twain-envs/psi4 -- ab initio quantum chemistry (molecules).
+#
+# This file is the source of truth for what the env contains; apply it with
+# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
+# manual drift is exactly what these specs exist to prevent).
+#
+# psi4 ships only through conda-forge (no PyPI distribution), so this env is
+# its only path onto RIS: without this spec, planning vetoes Psi4 outright
+# (statemachine's _cluster_cannot_run) and reroutes to a pip-installable tool.
+# ase rides along as the driver library plans pair it with
+# (ase.calculators.psi4), and rdkit covers SMILES -> 3D structure prep --
+# the job's smoke probe rejects an env missing ANY bundle import.
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - psi4
+  - ase
+  - rdkit
+  - numpy
+  - pandas
+  - pyyaml
