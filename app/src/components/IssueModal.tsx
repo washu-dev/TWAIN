@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Modal,
   View,
@@ -17,6 +17,9 @@ interface IssueModalProps {
   visible: boolean;
   /** Email shown to the user so they know how the issue will be attributed. */
   submitterEmail?: string;
+  /** Pre-fill the form (e.g. a "provision this engine" request from a plan card). */
+  initialTitle?: string;
+  initialBody?: string;
   /** Performs the actual create call; resolves to the created issue. */
   onSubmit: (title: string, body: string) => Promise<CreatedIssue>;
   onClose: () => void;
@@ -25,6 +28,8 @@ interface IssueModalProps {
 export const IssueModal: React.FC<IssueModalProps> = ({
   visible,
   submitterEmail,
+  initialTitle,
+  initialBody,
   onSubmit,
   onClose,
 }) => {
@@ -33,6 +38,15 @@ export const IssueModal: React.FC<IssueModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedIssue | null>(null);
+
+  // Seed the form each time the modal opens (closing always clears it, so a
+  // caller-provided draft must be re-applied on the next open).
+  useEffect(() => {
+    if (visible) {
+      setTitle(initialTitle ?? '');
+      setBody(initialBody ?? '');
+    }
+  }, [visible, initialTitle, initialBody]);
 
   const canSubmit = title.trim().length > 0 && !submitting;
 

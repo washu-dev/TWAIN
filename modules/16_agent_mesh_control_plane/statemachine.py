@@ -144,6 +144,13 @@ def _cluster_cannot_run(library: str) -> bool:
     return False
 
 
+# Stable lead-in for the "your best-fit engine can't run here" safety note.
+# The approval card keys off this exact prefix to offer a one-tap "request it
+# via GitHub issue" action, so change it in both places or not at all
+# (app/src/screens/ChatScreen.tsx).
+ENGINE_UNAVAILABLE_PREFIX = "ENGINE UNAVAILABLE ON THIS DEPLOYMENT: "
+
+
 # MPI jobs interleave per-rank output as 'rank=N LNN: <line>' (GPAW's rank
 # logger); stripped so a crash traceback parses like a plain one.
 _MPI_RANK_PREFIX = re.compile(r"^rank=\d+\s+L\d+:\s?", re.MULTILINE)
@@ -1076,10 +1083,27 @@ class StateMachine:
         ranked = rank_candidates(entries, query, top_k=None)  # full ranking
         if not ranked:
             return State.BUILD
+        # Engines this deployment's cluster can't run, noted BEFORE the veto
+        # filters them out: the researcher deserves to hear "your best-fit
+        # engine exists but isn't provisioned here" on the approval card (and
+        # can then ask the team to provision it via a GitHub issue), rather
+        # than a silent substitution. Only candidates that OUTRANK the best
+        # runnable one are noted -- anything ranked below it would have lost
+        # anyway, and naming it is just noise.
+        cluster_blocked = []
+        if self.execute_slurm:
+            for c in ranked:
+                if not _cluster_cannot_run(c.entry.id):
+                    break
+                cluster_blocked.append(c.entry.name)
         # Ground the toolset in what's installed: drop any candidate library that
         # isn't importable in the run interpreter, so both the deterministic pick
         # (ranked[0]) and the LLM's candidate slate are guaranteed runnable here.
         ranked, dropped_uninstalled = self._installed_candidates(ranked)
+        # Cluster-vetoed names get their own dedicated note below; keep them out
+        # of the generic "not installed" note so the reason stays truthful.
+        dropped_uninstalled = [n for n in dropped_uninstalled
+                               if n not in cluster_blocked]
 
         requested_property = self._requested_property(intent)
         domain = (intent.get("domain") or "").lower() or None
@@ -1101,13 +1125,19 @@ class StateMachine:
             if self._library_importable(primary_key) is False:
                 # The model named a library that isn't installed here -- don't
                 # plan around something the run can't import; fall back to the
-                # deterministic, installed pick.
+                # deterministic, installed pick. When the block was the CLUSTER
+                # veto (not a local install gap), that's the model's best-fit
+                # engine being passed over: note it for the researcher.
+                if self.execute_slurm and _cluster_cannot_run(primary_key):
+                    cluster_blocked.append(
+                        picked.entry.name if picked else recommendation.libraries[0])
                 recommendation = None
             elif (rec_calc is not None and self.execute_slurm
                   and _cluster_cannot_run(rec_calc.id)):
                 # The model attached a calculator the cluster can't run (conda-
                 # only, not in any provisioned env spec); fall back to the
                 # deterministic pick, which filters those out.
+                cluster_blocked.append(rec_calc.name)
                 recommendation = None
         if recommendation is not None:
             libraries = recommendation.libraries
@@ -1118,8 +1148,10 @@ class StateMachine:
                               + (f" with {recommendation.calculator}" if recommendation.calculator else "")
                               + (f": {recommendation.reasoning}" if recommendation.reasoning else ""))
         else:
-            libraries, calc_entry, calculator_library = self._select_toolset(
-                ranked, requested_property, domain, platform=platform)
+            libraries, calc_entry, calculator_library, blocked_calcs = (
+                self._select_toolset(
+                    ranked, requested_property, domain, platform=platform))
+            cluster_blocked.extend(blocked_calcs)
             primary = ranked[0]
             selection_note = None
 
@@ -1148,6 +1180,18 @@ class StateMachine:
             execution_plan.safety_notes.append(
                 "Discovery skipped candidate(s) not installed in the run "
                 "environment: " + ", ".join(dropped_uninstalled))
+        if cluster_blocked:
+            blocked = list(dict.fromkeys(cluster_blocked))
+            picked_desc = calc_entry.name if calc_entry is not None else libraries[0]
+            execution_plan.safety_notes.append(
+                f"{ENGINE_UNAVAILABLE_PREFIX}{', '.join(blocked)} would fit this "
+                f"request but cannot run on this deployment's cluster -- the "
+                f"package(s) are not in any provisioned environment and pip "
+                f"cannot install them there. Proceeding with {picked_desc} "
+                f"instead. If you need {blocked[0]}, submit a GitHub issue "
+                f"asking the team to provision it (an env spec in "
+                f"scripts/ris/envs/ plus one provision_envs.sh run); otherwise "
+                f"approving this plan runs {picked_desc}.")
         if dropped_unrunnable:
             execution_plan.safety_notes.append(
                 f"Dropped from the toolset (no build in the '{SIM_ENV}' environment "
@@ -1282,7 +1326,8 @@ class StateMachine:
     def _select_toolset(self, ranked, requested_property, domain, platform=None):
         """Assemble a compatible toolset from the discovery ranking.
 
-        Returns ``(libraries, calculator_entry_or_None, calculator_library_or_None)``.
+        Returns ``(libraries, calculator_entry_or_None,
+        calculator_library_or_None, cluster_blocked_calculator_names)``.
         ``libraries[0]`` is the primary (discovery's #1). If the property needs a
         calculator, the best covering one that is *available on this platform* is
         attached: preferring a calculator compatible with the primary, else
@@ -1291,26 +1336,37 @@ class StateMachine:
         together. Fully data-driven -- no tool is forced, and a calculator with no
         build for the current platform (e.g. GPAW on a Mac) is never chosen.
         ``platform`` defaults to the current platform.
+
+        Under Slurm execution, a calculator whose packages pip can't install
+        and no cluster env spec provides (e.g. QE/Abinit binaries) would die
+        in the job's install step -- those are never attached. The ones that
+        OUTRANKED the best runnable calculator (i.e. were passed over) are
+        returned by name so the caller can tell the researcher on the
+        approval card instead of substituting silently.
         """
         primary = ranked[0].entry
         libraries = [primary.name]
         if not requested_property:
-            return libraries, None, None
+            return libraries, None, None, []
         if platform is None:
             platform = current_platform()
         covering = calculators_for_property(requested_property, domain=domain, platform=platform)
-        # Under Slurm execution, a calculator whose packages pip can't install
-        # and no cluster env spec provides (e.g. QE/Abinit binaries) would die
-        # in the job's install step -- never attach one.
+        blocked = []
         if self.execute_slurm:
+            # Report only calculators that outrank the best runnable one (they
+            # are the "passed over" engines); anything below would lose anyway.
+            for c in covering:
+                if not _cluster_cannot_run(c.id):
+                    break
+                blocked.append(c.name)
             covering = [c for c in covering if not _cluster_cannot_run(c.id)]
         if not covering:
-            return libraries, None, None
+            return libraries, None, None, blocked
 
         # 1) a covering calculator compatible with the primary library
         for calc in covering:
             if calc.supports_library(primary.name):
-                return libraries, calc, primary.name
+                return libraries, calc, primary.name, blocked
 
         # 2) none compatible with the primary -> pair the best covering calculator
         #    with a library it supports (preferring one discovery ranked), and use
@@ -1319,7 +1375,7 @@ class StateMachine:
         bridge = self._pick_compatible_library(ranked, calc)
         if bridge and bridge.lower() != primary.name.lower():
             libraries.append(bridge)
-        return libraries, calc, bridge
+        return libraries, calc, bridge, blocked
 
     @staticmethod
     def _pick_compatible_library(ranked, calc):

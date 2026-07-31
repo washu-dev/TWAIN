@@ -209,12 +209,52 @@ class TestPlanningSelectsCalculator:
         # Use band_structure: every calculator that covers it is ASE-driven, so
         # Pymatgen can't drive it directly -> a bridging library is brought in.
         # (band_gap would instead pair Pymatgen with the Pymatgen-native MatGL.)
-        libraries, calc, calc_lib = m._select_toolset(
+        libraries, calc, calc_lib, _blocked = m._select_toolset(
             ranked, "band_structure", "materials", platform="linux-64")
         assert libraries[0] == "Pymatgen"   # discovery's primary is honoured
         assert "ASE" in libraries           # bridging library brought in
         assert calc.name == "GPAW"          # the DFT calculator is attached
         assert calc_lib == "ASE"            # ...driven through ASE, not Pymatgen
+
+    def test_cluster_blocked_engine_is_surfaced_not_silently_substituted(self, tmp_path):
+        # Slurm routing, with the best-fit engine (GPAW) vetoed as if no env
+        # spec provisioned it: planning must still produce a runnable plan
+        # (substitute calculator) AND tell the researcher -- via the
+        # ENGINE UNAVAILABLE safety note the approval card keys off -- which
+        # engine was passed over and that a GitHub issue can get it
+        # provisioned. This is the "let the user decide" contract.
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path)
+        m.decompose()
+        m.discover()
+        m.execute_slurm = True
+        with patch.object(SM, "current_platform", return_value="linux-64"), \
+             patch.object(SM, "_cluster_cannot_run",
+                          side_effect=lambda lib: lib.lower() == "gpaw"):
+            m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert plan["selected_method"]["calculator"] != "GPAW"  # substitute used
+        notes = [n for n in plan["safety_notes"]
+                 if n.startswith(SM.ENGINE_UNAVAILABLE_PREFIX)]
+        assert notes, plan["safety_notes"]
+        assert "GPAW" in notes[0]                       # names the blocked engine
+        assert "GitHub issue" in notes[0]               # ...and the way to get it
+        assert plan["selected_method"]["calculator"] in notes[0]  # ...and the substitute
+        # The generic "not installed" note must not double-report the veto.
+        assert not any("not installed" in n and "GPAW" in n
+                       for n in plan["safety_notes"])
+
+    def test_no_engine_note_when_everything_is_runnable(self, tmp_path):
+        # Off-Slurm (or nothing vetoed): the note never appears.
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path)
+        m.decompose()
+        m.discover()
+        with patch.object(SM, "current_platform", return_value="linux-64"):
+            m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert not any(n.startswith(SM.ENGINE_UNAVAILABLE_PREFIX)
+                       for n in plan["safety_notes"])
 
     def test_multi_library_requirements_cover_whole_toolset(self):
         from code_gen.codegen_engine import CodegenEngine

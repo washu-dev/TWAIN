@@ -900,18 +900,22 @@ class TestSlurmClusterGrounding:
     def test_env_specs_parse_to_package_names(self):
         pkgs = SM._cluster_env_packages()
         # From the real scripts/ris/envs specs: default.yml carries xtb-python,
-        # gpaw.yml carries gpaw (version/build pins stripped).
+        # gpaw.yml carries gpaw (version/build pins stripped), psi4.yml psi4.
         assert "xtb-python" in pkgs
         assert "gpaw" in pkgs
-        assert "psi4" not in pkgs
+        assert "psi4" in pkgs
+        assert "cp2k" not in pkgs  # no spec -> stays cluster-blocked
 
     def test_conda_only_library_without_env_spec_is_blocked(self):
-        assert SM._cluster_cannot_run("psi4") is True
+        # cp2k is a conda-only binary code with no env spec: unrunnable.
+        assert SM._cluster_cannot_run("cp2k") is True
 
     def test_conda_only_library_covered_by_a_spec_is_allowed(self):
-        # xtb needs conda-only xtb-python, but default.yml provisions it.
+        # These need conda-only packages, but a spec provisions each: xtb via
+        # default.yml, gpaw via gpaw.yml, psi4 via psi4.yml.
         assert SM._cluster_cannot_run("xtb") is False
         assert SM._cluster_cannot_run("gpaw") is False
+        assert SM._cluster_cannot_run("psi4") is False
 
     def test_pip_installable_library_is_never_blocked(self):
         assert SM._cluster_cannot_run("pymatgen") is False
@@ -922,7 +926,7 @@ class TestSlurmClusterGrounding:
         m = _make_machine(tmp_path)
         m.execute_slurm = True
         m._library_available = lambda name: True
-        assert m._library_importable("psi4") is False
+        assert m._library_importable("cp2k") is False
         assert m._library_importable("pymatgen") is True
 
     def test_gate_is_inert_off_slurm(self, tmp_path):
@@ -930,7 +934,7 @@ class TestSlurmClusterGrounding:
         m = _make_machine(tmp_path)
         m.execute_slurm = False
         m._library_available = lambda name: True
-        assert m._library_importable("psi4") is True
+        assert m._library_importable("cp2k") is True
 
     def test_package_absent_from_pypi_is_blocked_without_curation(self, monkeypatch):
         # The general (derived) arm: a tool nobody hand-listed anywhere, whose
