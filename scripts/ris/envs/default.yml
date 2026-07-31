@@ -14,6 +14,10 @@ dependencies:
   - python=3.11
   - ase
   - pymatgen
+  # Materials Project API client: backs database-retrieval tasks ("look up the
+  # stored bulk modulus of X") via pymatgen's MPRester. Needs MP_API_KEY in the
+  # runner's .env at run time.
+  - mp-api
   - spglib
   - xtb-python
   - rdkit

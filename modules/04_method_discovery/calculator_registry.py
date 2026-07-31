@@ -272,6 +272,20 @@ _PROPERTY_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
         "cohesive energy", "formation energy", "atomization energy",
     )),
     ("forces", ("interatomic force", "atomic forces", "force on each atom")),
+    # Mechanical properties. Listed before elastic_constants so the common
+    # "elasticity/bulk modulus" phrasing resolves to the specific scalar the
+    # researcher named. A missing entry here is not cosmetic: a library-only
+    # plan (e.g. discovery picked Pymatgen) relies on requested_property to
+    # reroute codegen to LLM synthesis, and with None it rendered the
+    # fail-loud structure_analysis template instead (the CaPt2 failure).
+    ("bulk_modulus", (
+        "bulk modulus", "bulk-modulus", "bulk_modulus", "compressibility",
+        "equation of state", "birch-murnaghan", "birch murnaghan",
+    )),
+    ("elastic_constants", (
+        "elastic constant", "elastic tensor", "elastic moduli",
+        "shear modulus", "young's modulus", "poisson ratio",
+    )),
 )
 # NOTE: this table is a *seed* of common properties for the deterministic path,
 # not the decision-maker. A vague ask that names no specific observable
