@@ -28,13 +28,9 @@ def create_conversation(
     request: str,
     title: str | None = None,
     *,
-    compute_target: str | None = None,
     max_cost: float | None = None,
 ) -> dict:
     """Create a conversation, store the first user turn, and enqueue a start job.
-
-    ``compute_target`` ('local' | 'slurm') rides in the job params so the runner
-    can pick the execution backend per run; None keeps the runner's default.
 
     All three writes share one transaction so a conversation never exists
     without its opening message and queued job. ``max_cost`` (optional) is the
@@ -62,8 +58,6 @@ def create_conversation(
             (session_id, request),
         )
         params = {"request": request, "researcher_id": user_id}
-        if compute_target:
-            params["compute_target"] = compute_target
         if max_cost is not None:
             params["max_cost"] = max_cost
         cursor.execute(
@@ -247,6 +241,15 @@ def add_approval_response(
             (conversation_id, content),
         )
         row = cursor.fetchone()
+        # Clear the approval card immediately: without this, a reject leaves the
+        # status on 'awaiting_approval' until the runner picks the job up, which
+        # looks like the button did nothing. The runner settles the next status
+        # (onward past the gate for an approve; 'awaiting_input' for a reject,
+        # where the gate asks what should change and revises the plan).
+        cursor.execute(
+            "UPDATE conversations SET status = 'running', updated_at = now() WHERE id = %s;",
+            (conversation_id,),
+        )
         # Wake the run parked at the approval gate to act on the decision.
         _enqueue_resume(cursor, conversation_id)
         conn.commit()

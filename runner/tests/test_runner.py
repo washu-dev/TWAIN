@@ -79,6 +79,11 @@ class FakeDB:
             if m["role"] == "user" and m["id"] > after_id and (kind is None or m["kind"] == kind)
         ]
 
+    def mark_reply_consumed(self, message_id):
+        for m in self.messages:
+            if m["id"] == message_id:
+                m["state"] = "consumed"
+
     # -- status / state / events ------------------------------------------------
     def set_conversation_status(self, sid, status):
         self.status = status
@@ -212,20 +217,19 @@ class FakeEngine:
         self._compute_target = compute_target
         self._slurm_cluster = slurm_cluster
         self.built_with = None       # records build_orchestrator kwargs for assertions
-        self.compute_targets = []    # what process_job forwarded from job params
         self.applied_overrides = []  # slurm overrides applied on approve
         self.rewound_to = None       # records the rewind target for rerun assertions
         self.approved = False        # set when approve_plan() is called
+        self.replanned_with = []     # rejection feedback passed to replan_with_feedback
 
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store,
-        compute_target=None, cancel=None, max_cost=None,
+        cancel=None, max_cost=None,
     ):
         self.built_with = {
             "session_id": session_id, "researcher_id": researcher_id,
-            "request": request, "compute_target": compute_target, "max_cost": max_cost,
+            "request": request, "max_cost": max_cost,
         }
-        self.compute_targets.append(compute_target)
         return FakeOrchestrator(
             ask, sink, clarifies=self._clarifies, heavy=self._heavy,
             max_cost=max_cost if max_cost is not None else 1.0,
@@ -247,6 +251,12 @@ class FakeEngine:
         # A real rewind resets the run to `target_state`; the fake just records it
         # (the fresh FakeOrchestrator already starts at leg 0, i.e. the top).
         self.rewound_to = target_state
+
+    def replan_with_feedback(self, orch, feedback):
+        # The real engine folds the feedback into the intent and rewinds to
+        # DISCOVER; the fake records both so tests can assert the round-trip.
+        self.replanned_with.append(feedback)
+        self.rewound_to = "DISCOVER"
 
     def approve_plan(self, orch):
         # A real approve_plan flips the plan_approved guard flag; the fake records
@@ -371,15 +381,18 @@ class TestProcessJob:
         assert any(e["event_type"] == "run.completed" for e in db.events)
         assert db.messages[-1]["content"] == "Run complete."
 
-    def test_rejected_run_stops_before_build(self):
+    def test_reject_asks_what_to_change_instead_of_stopping(self):
+        # A rejection no longer ends the run: the gate asks for revision
+        # feedback and waits, with nothing built or executed.
         db = FakeDB()
         db.preload_approval("reject")
         engine = FakeEngine()
         runner.process_job(self._job(), db, engine)
-        assert db.status == "rejected"
+        assert db.status == "awaiting_input"
         assert engine.approved is False         # never approved -> guard stays closed
         assert not any(e["event_type"] == "run.completed" for e in db.events)
-        assert "rejected" in db.messages[-1]["content"].lower()
+        assert db.messages[-1]["kind"] == "clarification"
+        assert "what should change" in db.messages[-1]["content"].lower()
 
     def test_auto_run_skips_approval_gate(self, monkeypatch):
         monkeypatch.setenv("TWAIN_AUTO_RUN", "1")
@@ -421,6 +434,66 @@ class TestProcessJob:
         db = FakeDB()
         with pytest.raises(ValueError):
             runner.process_job(self._job(kind="rerun"), db, FakeEngine())
+
+    def test_feedback_reply_triggers_replan_and_a_fresh_card(self):
+        # Reject → the gate asks what to change → the reply is folded into the
+        # run (replan_with_feedback) and a NEW approval card is posted.
+        db = FakeDB()
+        db.preload_approval("reject")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)          # asks what to change
+        db.add_user("use xtb instead of GPAW")               # the revision feedback
+        runner.process_job(self._job(kind="resume"), db, engine)
+        assert engine.replanned_with == ["use xtb instead of GPAW"]
+        assert engine.rewound_to == "DISCOVER"
+        requests = [m for m in db.messages if m["kind"] == "approval_request"]
+        assert len(requests) == 2          # a fresh card for the revised plan
+        assert db.status == "awaiting_approval"
+
+    def test_approving_the_revised_plan_completes_the_run(self):
+        # Full round-trip: reject, give feedback, approve the revised plan.
+        db = FakeDB()
+        db.preload_approval("reject")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        db.add_user("skip the geometry optimization")
+        runner.process_job(self._job(kind="resume"), db, engine)
+        db.add_user("approve", kind="approval_response")     # approve the new card
+        runner.process_job(self._job(kind="resume"), db, engine)
+        assert engine.approved is True
+        assert db.status == "completed"
+
+    def test_redundant_resume_while_awaiting_feedback_does_not_repost(self):
+        # A resume that arrives before the user answers the what-should-change
+        # question must not post a second question or a second plan card.
+        db = FakeDB()
+        db.preload_approval("reject")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        runner.process_job(self._job(kind="resume"), db, engine)
+        assert db.kinds().count("clarification") == 1
+        assert db.kinds().count("approval_request") == 1
+        assert db.status == "awaiting_input"
+
+    def test_rerun_after_completion_posts_a_fresh_approval_card(self):
+        # The regression behind "Re-run from … does nothing": the first run's
+        # decision was replayed forever, so a re-run reaching BUILD crossed the
+        # gate on the old answer instead of asking again. Now the consumed
+        # decision is one-shot and the re-run posts a NEW approval request.
+        db = FakeDB()
+        db.preload_approval("approve")
+        runner.process_job(self._job(), db, FakeEngine())
+        assert db.status == "completed"
+
+        engine = FakeEngine()
+        runner.process_job(
+            self._job(kind="rerun", target_state="PLAN", researcher_id="u", request="r"),
+            db, engine,
+        )
+        requests = [m for m in db.messages if m["kind"] == "approval_request"]
+        assert len(requests) == 2          # a fresh card, not the old one reused
+        assert db.status == "awaiting_approval"
+        assert engine.approved is False    # old 'approve' was not replayed as-is
 
     def test_max_cost_forwarded_from_params(self):
         # A per-run budget in the job params must reach build_orchestrator so the
@@ -488,14 +561,12 @@ class TestProcessJob:
         assert "failed" in [reason for _sid, reason, _msg in notes.calls]
 
     # ── Slurm / compute target ────────────────────────────────────────────────
-    def test_compute_target_forwarded_and_announced(self):
-        # A per-run compute_target reaches build_orchestrator, and a fresh start
-        # announces where it will execute (RIS vs local) up front.
+    def test_slurm_target_announced_on_start(self):
+        # A fresh start announces where it will execute (RIS vs local) up front.
         db = FakeDB()
         db.preload_approval("approve")
         engine = FakeEngine(compute_target="slurm")
-        runner.process_job(self._job(compute_target="slurm"), db, engine)
-        assert engine.compute_targets == ["slurm"]
+        runner.process_job(self._job(), db, engine)
         assert any("RIS cluster" in m["content"] for m in db.messages)
 
     def test_slurm_overrides_applied_on_approve(self):
@@ -509,7 +580,7 @@ class TestProcessJob:
             kind="approval_response",
         )
         engine = FakeEngine(compute_target="slurm")
-        runner.process_job(self._job(compute_target="slurm"), db, engine)
+        runner.process_job(self._job(), db, engine)
         assert engine.applied_overrides == [overrides]
         assert any("updated Slurm settings" in m["content"] for m in db.messages)
 

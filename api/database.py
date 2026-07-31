@@ -20,7 +20,7 @@ import boto3
 import psycopg2
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 
 load_dotenv()
 
@@ -134,7 +134,8 @@ def upsert_user(subject: str, email: str, name: str, *, bootstrap_admin: bool = 
               SET email = EXCLUDED.email,
                   name = EXCLUDED.name,
                   last_login_at = now()
-            RETURNING id, subject, email, name, role, created_at, last_login_at;
+            RETURNING id, subject, email, name, role, created_at, last_login_at,
+                      notify_prefs;
             """,
             (subject, email, name, role),
         )
@@ -162,6 +163,30 @@ def list_users() -> list:
         return results
     except Exception as e:
         raise Exception(f"Failed to list users: {e}") from e
+
+
+def set_notify_prefs(user_id: str, prefs: dict) -> dict | None:
+    """Store a user's notification preferences; return them, or None if no user.
+
+    ``prefs`` is the whole preferences object (the Settings page sends its full
+    state): ``{"enabled": bool, "kinds": {kind: bool, ...}}``. The runner treats
+    any missing key as "send", so '{}' means all notifications on.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "UPDATE users SET notify_prefs = %s WHERE id = %s "
+            "RETURNING notify_prefs;",
+            (Json(prefs), user_id),
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return row["notify_prefs"] if row else None
+    except Exception as e:
+        raise Exception(f"Failed to set notification preferences: {e}") from e
 
 
 def set_user_role(user_id: str, role: str) -> dict | None:

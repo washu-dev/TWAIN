@@ -224,8 +224,15 @@ const ArtifactRow: React.FC<{ conversationId: string; meta: ArtifactMeta }> = ({
           {loading && <ActivityIndicator color={C.washuRed} />}
           {error && <Text style={styles.error}>{error}</Text>}
           {content !== null && (
-            <ScrollView horizontal style={styles.codeScroll}>
-              <Text style={styles.code}>{content}</Text>
+            // Vertical scroller (capped height) wrapping a horizontal one for
+            // long lines. A single horizontal ScrollView clipped anything
+            // taller than the cap with no way to reach the bottom of the file.
+            <ScrollView style={styles.codeScroll} nestedScrollEnabled>
+              <ScrollView horizontal nestedScrollEnabled>
+                <Text style={styles.code} selectable>
+                  {content}
+                </Text>
+              </ScrollView>
             </ScrollView>
           )}
         </View>
@@ -406,7 +413,7 @@ const styles = StyleSheet.create({
   artifactName: { flex: 1, fontSize: 14, fontWeight: '600', color: C.text },
   artifactKind: { fontSize: 11, color: C.textSecondary, textTransform: 'uppercase' },
   artifactBody: { padding: Spacing.three, backgroundColor: C.washuWhite },
-  codeScroll: { maxHeight: 320 },
+  codeScroll: { maxHeight: 480 },
   code: { fontFamily: mono, fontSize: 12, color: C.text },
   error: { color: C.washuRed, padding: Spacing.three },
 });

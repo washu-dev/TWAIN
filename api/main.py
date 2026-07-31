@@ -14,7 +14,7 @@ import conversations as convo
 import github_issues
 import migrate
 from auth import AdminUser, CurrentUser
-from database import list_users, set_user_role, upsert_user
+from database import list_users, set_notify_prefs, set_user_role, upsert_user
 
 # How often (seconds) the SSE stream polls run_events, and its hard time cap.
 SSE_POLL_SECONDS = float(os.getenv("SSE_POLL_SECONDS", "1.0"))
@@ -105,8 +105,41 @@ class RoleUpdate(BaseModel):
 
 @app.get("/api/me")
 async def get_me(user: CurrentUser):
-    """Return the authenticated user (identity + role)."""
+    """Return the authenticated user (identity + role + notification prefs)."""
     return {"data": user}
+
+
+# Keep in lockstep with runner/notifications.py NOTIFY_KINDS (the reasons the
+# runner actually emails about). The api and runner are separate deployables,
+# so the list is mirrored here rather than imported.
+NOTIFY_KINDS = ("input", "approval", "completed", "failed", "terminated")
+
+
+class NotifyPrefs(BaseModel):
+    """The Settings page sends its whole state; missing key = "send"."""
+
+    enabled: bool = True
+    kinds: dict[str, bool] = {}
+
+
+@app.put("/api/me/notifications")
+async def put_notify_prefs(body: NotifyPrefs, user: CurrentUser):
+    """Replace the caller's email notification preferences.
+
+    The runner consults these before every send: emails off entirely
+    (``enabled=false``) or per-kind opt-outs (``kinds[kind]=false``).
+    """
+    unknown = sorted(set(body.kinds) - set(NOTIFY_KINDS))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown notification kind(s): {', '.join(unknown)}; "
+                   f"valid kinds: {', '.join(NOTIFY_KINDS)}",
+        )
+    prefs = set_notify_prefs(user["id"], body.model_dump())
+    if prefs is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"data": prefs}
 
 
 @app.get("/api/admin/users")
@@ -159,9 +192,6 @@ async def create_issue(body: CreateIssue, user: CurrentUser):
 class CreateConversation(BaseModel):
     request: str
     title: str | None = None
-    # Where EXECUTE runs: 'slurm' submits to the RIS cluster, 'local' runs on
-    # the runner host, None keeps the runner's env-configured default.
-    compute_target: Literal["local", "slurm"] | None = None
     # Optional per-run LLM cost cap (USD). None => deployment default (the runner
     # falls back to TWAIN_RUN_MAX_COST). Must be positive when supplied.
     max_cost: float | None = None
@@ -198,8 +228,7 @@ async def start_conversation(body: CreateConversation, user: CurrentUser):
     if body.max_cost is not None and body.max_cost <= 0:
         raise HTTPException(status_code=422, detail="max_cost must be a positive number.")
     conversation = convo.create_conversation(
-        user["id"], body.request, body.title,
-        compute_target=body.compute_target, max_cost=body.max_cost
+        user["id"], body.request, body.title, max_cost=body.max_cost
     )
     return {"data": conversation}
 

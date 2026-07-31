@@ -179,21 +179,23 @@ class RunnerDB:
 
         Joins the run's conversation to its owning user (``conversations.id`` is the
         session_id; ``conversations.user_id`` → ``users``). Returns
-        ``{"email", "name", "phone"}`` so the notifier can reach the *specific*
-        researcher who left the session — by email (SES/SendGrid) or SMS (SNS to
-        their ``phone``) — instead of one global address/topic. Any field may be
-        None (e.g. no phone on file); returns None outright when the session or
-        user is unknown, so the caller can fall back to the configured default.
+        ``{"email", "name", "phone", "notify_prefs"}`` so the notifier can reach
+        the *specific* researcher who left the session — by email (SES/SendGrid)
+        or SMS (SNS to their ``phone``) — and honor their notification
+        preferences. Any field may be None (e.g. no phone on file); returns None
+        outright when the session or user is unknown, so the caller can fall
+        back to the configured default.
         """
         row = self._query_one(
-            "SELECT u.email, u.name, u.phone FROM conversations c "
+            "SELECT u.email, u.name, u.phone, u.notify_prefs FROM conversations c "
             "JOIN users u ON u.id = c.user_id "
             "WHERE c.id = %s;",
             (session_id,),
         )
         if not row:
             return None
-        return {"email": row.get("email"), "name": row.get("name"), "phone": row.get("phone")}
+        return {"email": row.get("email"), "name": row.get("name"),
+                "phone": row.get("phone"), "notify_prefs": row.get("notify_prefs")}
 
     def run_title(self, session_id: str) -> str | None:
         """The run's title (its originating request), or None if unknown.
@@ -254,7 +256,7 @@ class RunnerDB:
 
     def user_replies_after(self, session_id: str, after_id: int, kind: str | None = None) -> list:
         sql = (
-            "SELECT id, content, kind FROM messages "
+            "SELECT id, content, kind, state FROM messages "
             "WHERE conversation_id = %s AND id > %s AND role = 'user'"
         )
         params = [session_id, after_id]
@@ -266,6 +268,18 @@ class RunnerDB:
             sql += " AND kind <> 'terminate'"
         sql += " ORDER BY id;"
         return self._query_all(sql, tuple(params))
+
+    def mark_reply_consumed(self, message_id: int) -> None:
+        """Record that a gate acted on this user reply (see bridges.consume_approval).
+
+        Reuses the messages.state column, which is NULL on user rows: once a
+        reply is 'consumed', a later visit to the same gate (e.g. a re-run
+        reaching BUILD again) must not re-apply it and instead asks afresh.
+        """
+        self._execute(
+            "UPDATE messages SET state = 'consumed' WHERE id = %s;",
+            (message_id,),
+        )
 
     def terminate_requested(self, session_id: str) -> bool:
         """True once the user asked to terminate this run (kind='terminate')."""
