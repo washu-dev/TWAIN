@@ -68,9 +68,11 @@ export const ReportScreen: React.FC = () => {
             </View>
           </View>
 
-          {(report.result || report.results_dir) && (
-            <ResultCard result={report.result ?? {}} resultsDir={report.results_dir} />
-          )}
+          <ResultCard
+            result={report.result ?? {}}
+            resultsDir={report.results_dir}
+            fallbackOutput={report.result ? null : stdoutTail(report)}
+          />
 
           <SummaryCard report={report} />
 
@@ -248,12 +250,32 @@ function formatValue(v: unknown): string {
   return String(v);
 }
 
+// The last lines the run's script printed — the human-readable result when no
+// structured (single-line JSON) result was found in stdout.
+function stdoutTail(report: Report, maxLines = 12): string | null {
+  const exec = report.execution_result;
+  const stdout =
+    typeof exec === 'object' && exec && typeof exec['stdout'] === 'string'
+      ? (exec['stdout'] as string)
+      : null;
+  if (!stdout) return null;
+  const lines = stdout
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return null;
+  return lines.slice(-maxLines).join('\n');
+}
+
 // Headline scientific result: the property + value the run computed, plus where
-// the output files are stored. Falls back gracefully for arbitrary result shapes.
-const ResultCard: React.FC<{ result: Record<string, unknown>; resultsDir?: string | null }> = ({
-  result,
-  resultsDir,
-}) => {
+// the output files are stored. Falls back gracefully for arbitrary result shapes,
+// and shows the script's raw output when no structured result was printed — so
+// the top of the report always answers "what did the run produce?".
+const ResultCard: React.FC<{
+  result: Record<string, unknown>;
+  resultsDir?: string | null;
+  fallbackOutput?: string | null;
+}> = ({ result, resultsDir, fallbackOutput }) => {
   const propName = typeof result['property'] === 'string' ? (result['property'] as string) : null;
   const headline = propName ? result[propName] : undefined;
   const unit = propName ? result[`${propName}_unit`] : undefined;
@@ -269,6 +291,8 @@ const ResultCard: React.FC<{ result: Record<string, unknown>; resultsDir?: strin
       (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'),
   );
 
+  const hasStructured = (propName && headline != null) || rows.length > 0;
+
   return (
     <View style={styles.resultCard}>
       <Text style={styles.resultCardTitle}>Result</Text>
@@ -281,6 +305,22 @@ const ResultCard: React.FC<{ result: Record<string, unknown>; resultsDir?: strin
       {rows.map(([k, v]) => (
         <Row key={k} label={k} value={formatValue(v)} />
       ))}
+      {!hasStructured && fallbackOutput ? (
+        <>
+          <Text style={styles.resultFallbackLabel}>
+            What the run printed (no structured result found):
+          </Text>
+          <Text style={styles.resultFallback} selectable>
+            {fallbackOutput}
+          </Text>
+        </>
+      ) : null}
+      {!hasStructured && !fallbackOutput ? (
+        <Text style={styles.resultEmpty}>
+          This run has no result output (it may have stopped before executing).
+          The plan, budget, and any files it did produce are below.
+        </Text>
+      ) : null}
       {resultsDir ? (
         <View style={styles.resultPathBox}>
           <Text style={styles.resultPathLabel}>Results stored at</Text>
@@ -386,6 +426,9 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   resultHeadline: { fontSize: 22, fontWeight: '700', color: C.text, marginVertical: Spacing.one },
+  resultFallbackLabel: { fontSize: 12, color: C.textSecondary, marginTop: Spacing.one },
+  resultFallback: { fontFamily: mono, fontSize: 12, color: C.text, lineHeight: 17 },
+  resultEmpty: { fontSize: 13, color: C.textSecondary, fontStyle: 'italic' },
   resultPathBox: { marginTop: Spacing.two, gap: 2 },
   resultPathLabel: {
     fontSize: 11,
