@@ -317,6 +317,26 @@ class ScriptDoctor:
         return HealReport(source, _final_status(fixes, last_smoke), rounds, fixes,
                           self.static_diagnostics(source))
 
+    def repair_runtime(self, source: str, failure: str) -> Optional[str]:
+        """Repair ``source`` against a failure from the REAL run (post-EXECUTE).
+
+        This is the general net behind the per-incident static checks: those
+        catch the failure modes we've already seen, while ANY novel API misuse
+        the script commits surfaces as a runtime traceback -- the ground truth
+        -- which one repair round here turns into a fixed script the caller
+        can re-execute. The result must still pass the static checks and (when
+        a sim env exists) smoke clean, so a "fix" can never regress the bundle.
+        Returns the healed script, or ``None`` when nothing better could be
+        produced (no agent, unchanged output, or the fix failed verification).
+        """
+        if self.agent is None or not (source or "").strip() or not (failure or "").strip():
+            return None
+        fixed = self._repair(
+            source, [Diagnostic("runtime-failure", "error", failure)])
+        if not fixed or fixed == source or _has_errors(self.static_diagnostics(fixed)):
+            return None
+        return self._smoke_repair(fixed)
+
     def _smoke_repair(self, source: str) -> Optional[str]:
         """Smoke ``source`` and repair a runtime break, bounded by ``max_rounds``.
 
@@ -395,6 +415,18 @@ class ScriptDoctor:
                 "keywords like 'solvent' as unsupported and aborts a runnable "
                 "job. Pass the documented keywords directly and let a real "
                 "TypeError surface.", line))
+        for line in _hardcoded_bandpath_calls(source):
+            diags.append(Diagnostic(
+                "bandpath-literal", "error",
+                "hardcodes a band-path string in `.bandpath(...)`: the special "
+                "points available depend on the lattice ASE detects in the "
+                "ACTUAL cell, and after a relaxation the (noisy) cell is often "
+                "no longer recognized as the ideal lattice -- a hardcoded "
+                "letter then raises KeyError after the ground state was "
+                "already computed. Call `atoms.cell.bandpath(npoints=..., "
+                "pbc=atoms.pbc)` with NO path string so ASE picks the standard "
+                "path for the detected lattice, or build the string only from "
+                "letters in `atoms.cell.bandpath().special_points`.", line))
         diags.extend(self._primitive_cell_diagnostics(source))
         diags.extend(self._dft_budget_diagnostics(source))
         return diags
@@ -805,6 +837,40 @@ def _signature_probe_calls(source: str) -> List[int]:
             lines.append(node.lineno)
         elif (isinstance(func, ast.Name) and func.id == "signature"
                 and bare_signature_imported):
+            lines.append(node.lineno)
+    return lines
+
+
+def _hardcoded_bandpath_calls(source: str) -> List[int]:
+    """Lines calling ``.bandpath(...)`` with a literal special-point string.
+
+    The killer behind Slurm job 2487027: the script relaxed the cell (adding
+    numerical noise), then asked for ``bandpath("GXWKGL")``. ASE derives the
+    available special points from the lattice it detects in the *actual* cell
+    -- after relaxation the FCC cell is no longer recognized as FCC, the
+    detected lattice has no 'W', and the whole DFT run dies on KeyError after
+    the ground state was already paid for. Calling ``bandpath(npoints=...)``
+    with no path string always works: ASE picks the standard path for whatever
+    lattice it detected.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "bandpath"):
+            continue
+        literal = (node.args and isinstance(node.args[0], ast.Constant)
+                   and isinstance(node.args[0].value, str))
+        literal = literal or any(
+            kw.arg == "path" and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+            for kw in node.keywords)
+        if literal:
             lines.append(node.lineno)
     return lines
 

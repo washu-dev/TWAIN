@@ -878,3 +878,249 @@ class TestClarifyConcise:
             m.intake()
             assert m.clarify() == State.DECOMPOSE
         assert m.context.clarified is True
+
+
+class TestSlurmClusterGrounding:
+    """Slurm execution must never plan around a library the cluster can't run.
+
+    Fingerprint of Slurm job 2487046: psi4 is importable locally (pixi
+    installs it from conda-forge) so the old grounding kept it -- but psi4 has
+    no PyPI distribution and no cluster env spec provides it, so the job died
+    in `pip install` after staging + a queue wait.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_caches(self):
+        SM._CLUSTER_ENV_PKGS_CACHE = None
+        SM._PYPI_VERDICTS.clear()
+        yield
+        SM._CLUSTER_ENV_PKGS_CACHE = None
+        SM._PYPI_VERDICTS.clear()
+
+    def test_env_specs_parse_to_package_names(self):
+        pkgs = SM._cluster_env_packages()
+        # From the real scripts/ris/envs specs: default.yml carries xtb-python,
+        # gpaw.yml carries gpaw (version/build pins stripped).
+        assert "xtb-python" in pkgs
+        assert "gpaw" in pkgs
+        assert "psi4" not in pkgs
+
+    def test_conda_only_library_without_env_spec_is_blocked(self):
+        assert SM._cluster_cannot_run("psi4") is True
+
+    def test_conda_only_library_covered_by_a_spec_is_allowed(self):
+        # xtb needs conda-only xtb-python, but default.yml provisions it.
+        assert SM._cluster_cannot_run("xtb") is False
+        assert SM._cluster_cannot_run("gpaw") is False
+
+    def test_pip_installable_library_is_never_blocked(self):
+        assert SM._cluster_cannot_run("pymatgen") is False
+
+    def test_library_importable_vetoes_blocked_candidates(self, tmp_path):
+        # The veto beats even an injected "it's installed here" answer: local
+        # importability is irrelevant when the cluster can't run the library.
+        m = _make_machine(tmp_path)
+        m.execute_slurm = True
+        m._library_available = lambda name: True
+        assert m._library_importable("psi4") is False
+        assert m._library_importable("pymatgen") is True
+
+    def test_gate_is_inert_off_slurm(self, tmp_path):
+        # The gate keys off the machine's own routing flag, not the env.
+        m = _make_machine(tmp_path)
+        m.execute_slurm = False
+        m._library_available = lambda name: True
+        assert m._library_importable("psi4") is True
+
+    def test_package_absent_from_pypi_is_blocked_without_curation(self, monkeypatch):
+        # The general (derived) arm: a tool nobody hand-listed anywhere, whose
+        # package simply does not exist on PyPI, is vetoed by asking PyPI --
+        # this is what keeps the gate from being incident-specific.
+        monkeypatch.setattr(SM._depinf, "is_available_on_pypi",
+                            lambda pkg, ver=None, **kw: False)
+        assert SM._cluster_cannot_run("somenewtool") is True
+
+    def test_ambiguous_pypi_verdict_fails_open(self, monkeypatch):
+        # Offline / network error -> None -> the candidate survives; the
+        # pre-submit preflight remains the authority for the final bundle.
+        monkeypatch.setattr(SM._depinf, "is_available_on_pypi",
+                            lambda pkg, ver=None, **kw: None)
+        assert SM._cluster_cannot_run("somenewtool") is False
+
+    def test_pypi_verdicts_are_cached(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(SM._depinf, "is_available_on_pypi",
+                            lambda pkg, ver=None, **kw: calls.append(pkg) or False)
+        SM._cluster_cannot_run("somenewtool")
+        SM._cluster_cannot_run("somenewtool")
+        assert len(calls) == 1
+
+
+class TestRuntimeTracebackExtraction:
+    """_runtime_traceback: the trigger for EXECUTE's general self-heal loop."""
+
+    def _result(self, status, stdout="", stderr=""):
+        from execution_adapter.execution_result import ExecutionResult
+        return ExecutionResult(status=status, exit_code=1,
+                               stdout=stdout, stderr=stderr)
+
+    MPI_CRASH = (
+        "Relaxed lattice constant a: 5.475\n"
+        "rank=4 L00: Traceback (most recent call last):\n"
+        'rank=4 L01:   File "main.py", line 91, in compute_band_gaps\n'
+        "rank=4 L02:     path = atoms.cell.bandpath('GXWKGL', npoints=200)\n"
+        "rank=4 L03: KeyError: 'W'\n"
+        "GPAW CLEANUP (node 4): <class 'KeyError'> occurred.  Calling MPI_Abort!\n"
+    )
+
+    def test_mpi_rank_prefixed_traceback_is_extracted(self):
+        from execution_adapter.execution_result import ExecutionStatus
+        tb = SM._runtime_traceback(self._result(ExecutionStatus.FAILED,
+                                                stdout=self.MPI_CRASH))
+        assert tb is not None
+        assert "KeyError: 'W'" in tb and "main.py" in tb
+        assert "rank=" not in tb  # prefixes stripped so the block reads plainly
+
+    def test_plain_traceback_in_stderr_is_extracted(self):
+        from execution_adapter.execution_result import ExecutionStatus
+        stderr = ('Traceback (most recent call last):\n'
+                  '  File "main.py", line 5, in <module>\n'
+                  "TypeError: bad call\n")
+        tb = SM._runtime_traceback(self._result(ExecutionStatus.FAILED,
+                                                stderr=stderr))
+        assert tb is not None and "TypeError" in tb
+
+    def test_non_failed_statuses_never_qualify(self):
+        # Dependency/timeout/setup failures have their own handling -- a code
+        # repair can't fix them, so the loop must not burn attempts on them.
+        from execution_adapter.execution_result import ExecutionStatus
+        for status in (ExecutionStatus.DEPENDENCY_ERROR, ExecutionStatus.TIMEOUT,
+                       ExecutionStatus.SETUP_FAILED, ExecutionStatus.SMOKE_FAILED):
+            assert SM._runtime_traceback(
+                self._result(status, stdout=self.MPI_CRASH)) is None
+
+    def test_traceback_outside_main_py_does_not_qualify(self):
+        # A crash whose frames never touch main.py happened outside the code
+        # we can rewrite (e.g. inside the calculator itself).
+        from execution_adapter.execution_result import ExecutionStatus
+        stdout = ('Traceback (most recent call last):\n'
+                  '  File "/envs/gpaw/lib/python3.11/site-packages/gpaw/core.py", '
+                  'line 10, in solve\n'
+                  "RuntimeError: SCF not converged\n")
+        assert SM._runtime_traceback(
+            self._result(ExecutionStatus.FAILED, stdout=stdout)) is None
+
+    def test_failure_without_traceback_does_not_qualify(self):
+        from execution_adapter.execution_result import ExecutionStatus
+        assert SM._runtime_traceback(
+            self._result(ExecutionStatus.FAILED, stdout="exit 42, no output")) is None
+
+
+class _SeqAdapter:
+    """An execution adapter returning queued results (last one repeats)."""
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.calls = []
+
+    def execute(self, bundle, **kwargs):
+        self.calls.append((bundle, kwargs))
+        return self._results.pop(0) if len(self._results) > 1 else self._results[0]
+
+
+class _FakeDoctor:
+    """Stands in for the ScriptDoctor in the self-heal loop tests."""
+
+    agent = object()  # non-None: the LLM repair channel is "available"
+
+    def __init__(self, fixed):
+        self.fixed = fixed
+        self.failures = []
+
+    def repair_runtime(self, source, failure):
+        self.failures.append(failure)
+        return self.fixed
+
+
+class TestExecuteSelfHeals:
+    """A run that crashes in the generated script is repaired and re-executed."""
+
+    CRASH = TestRuntimeTracebackExtraction.MPI_CRASH
+
+    def _machine(self, tmp_path, results, fixed="print('fixed')\n"):
+        m = _offline_machine(tmp_path)
+        bundle_dir = Path(m.artifacts_dir) / f"run_bundle_{m.run_id}"
+        bundle_dir.mkdir(parents=True)
+        (bundle_dir / "main.py").write_text("print('broken')\n", encoding="utf-8")
+        # Mark the bundle LLM-synthesized: only synthesized scripts are healed.
+        (bundle_dir / "config.yaml").write_text("template: llm_synthesized\n",
+                                                encoding="utf-8")
+        m.context.artifacts["run_bundle"] = str(bundle_dir)
+        m.execute_locally = True
+        m._execution_adapter = _SeqAdapter(results)
+        m._script_doctor = _FakeDoctor(fixed)
+        return m, bundle_dir
+
+    def _failed(self):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+        return ExecutionResult(status=ExecutionStatus.FAILED, exit_code=42,
+                               stdout=self.CRASH)
+
+    def _ok(self):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+        return ExecutionResult(status=ExecutionStatus.SUCCESS, exit_code=0, stdout="{}")
+
+    def test_crash_is_repaired_and_rerun_to_success(self, tmp_path):
+        m, bundle_dir = self._machine(tmp_path, [self._failed(), self._ok()])
+        assert m.execute() == State.INTERPRET
+        assert m.context.execution_status is True
+        assert len(m._execution_adapter.calls) == 2         # failed, then re-ran
+        # the doctor got the real (de-prefixed) traceback, and main.py was healed
+        assert "KeyError: 'W'" in m._script_doctor.failures[0]
+        assert (bundle_dir / "main.py").read_text(encoding="utf-8") == "print('fixed')\n"
+
+    def test_unrepairable_crash_fails_after_one_attempt(self, tmp_path):
+        m, bundle_dir = self._machine(tmp_path, [self._failed()], fixed=None)
+        with pytest.raises(Exception):
+            m.execute()
+        assert len(m._execution_adapter.calls) == 1  # no blind resubmission
+        assert (bundle_dir / "main.py").read_text(encoding="utf-8") == "print('broken')\n"
+
+    def test_non_code_failures_are_never_retried(self, tmp_path):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+        dep = ExecutionResult(status=ExecutionStatus.DEPENDENCY_ERROR, exit_code=1,
+                              stdout="No matching distribution found for psi4")
+        m, _ = self._machine(tmp_path, [dep])
+        with pytest.raises(Exception):
+            m.execute()
+        assert len(m._execution_adapter.calls) == 1
+        assert m._script_doctor.failures == []  # repair never consulted
+
+    def test_budget_env_var_disables_the_loop(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TWAIN_RUNTIME_REPAIR_ATTEMPTS", "0")
+        m, _ = self._machine(tmp_path, [self._failed(), self._ok()])
+        with pytest.raises(Exception):
+            m.execute()
+        assert len(m._execution_adapter.calls) == 1
+        assert m._script_doctor.failures == []
+
+    def test_repair_budget_is_bounded(self, tmp_path):
+        # Every attempt fails and every repair "succeeds": the loop must stop
+        # at the budget (default 2 repairs -> 3 executions), then surface the
+        # failure.
+        m, _ = self._machine(tmp_path, [self._failed()])
+        with pytest.raises(Exception):
+            m.execute()
+        assert len(m._execution_adapter.calls) == 3
+        assert len(m._script_doctor.failures) == 2
+
+    def test_template_bundles_are_not_healed(self, tmp_path):
+        # A deterministic template didn't invent API calls; a crash there is
+        # not the LLM's doing, so the loop stands down.
+        m, bundle_dir = self._machine(tmp_path, [self._failed()])
+        (bundle_dir / "config.yaml").write_text("template: pymatgen_analysis\n",
+                                                encoding="utf-8")
+        with pytest.raises(Exception):
+            m.execute()
+        assert len(m._execution_adapter.calls) == 1
+        assert m._script_doctor.failures == []

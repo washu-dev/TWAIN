@@ -384,9 +384,17 @@ class SlurmExecutionAdapter:
                 return None  # this env serves the bundle; the job will find it
         if not (install_deps and (bundle / "requirements.txt").is_file()):
             return None  # no pip fallback to vet; let the job report precisely
+        # Run the resolver with a pre-provisioned env's python: the login node's
+        # bare `python3` can be ancient (pip < 22.2 has no --dry-run) or off
+        # PATH in a non-login shell, and either way its error text doesn't
+        # match the markers below -- so a conda-only requirement (psi4) used to
+        # fail open here and die in the job instead.
+        pys = " ".join(shlex.quote(p) for p in self.env_pythons)
         result = self.slurm.runner([
             "bash", "-c",
-            f"cd {rd} && python3 -m pip install --dry-run -r requirements.txt",
+            f'cd {rd} && py=python3; for c in {pys}; do '
+            f'[ -x "$c" ] && py="$c" && break; done; '
+            f'"$py" -m pip install --dry-run -r requirements.txt',
         ])
         blob = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
         low = blob.lower()
