@@ -460,6 +460,27 @@ def test_preflight_fails_open_on_ambiguous_pip_verdict(tmp_path):
     assert result.status == ExecutionStatus.SUCCESS
 
 
+def test_preflight_pip_dry_run_uses_an_env_python(tmp_path):
+    # The login node's bare python3 can be ancient (pip < 22.2: no --dry-run)
+    # or off PATH in a non-login shell -- either way the resolver verdict is
+    # ambiguous and a conda-only requirement (psi4) sails through to die in
+    # the job. The dry-run must prefer a pre-provisioned env's python, whose
+    # pip we control.
+    cluster = _happy_cluster_runner()
+    cluster.on(_is_probe, CommandResult(2, ""))
+    cluster.on(_is_pip_dry_run, CommandResult(0, "Would install ase-3.23.0"))
+    adapter = _exec_adapter(
+        tmp_path, cluster,
+        env_pythons=["/envs/gpaw/bin/python", "/envs/default/bin/python"])
+    adapter.execute(str(_bundle(tmp_path)), run_id="s6")
+    dry_runs = [c for c in cluster.calls if _is_pip_dry_run(c)]
+    assert dry_runs, "expected the preflight to consult pip's resolver"
+    # The command tries each env python (first existing wins) before falling
+    # back to the bare python3.
+    assert "/envs/gpaw/bin/python" in dry_runs[0][2]
+    assert "/envs/default/bin/python" in dry_runs[0][2]
+
+
 def test_preflight_skipped_without_env_pythons(tmp_path):
     cluster = _happy_cluster_runner()
     adapter = _exec_adapter(tmp_path, cluster)

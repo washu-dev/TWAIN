@@ -262,6 +262,19 @@ queueing), **edit the spec, commit, and rerun the script**. Never
 `twain-envs/default` silently lost rdkit, and hand edits also race against
 teammates' running jobs.
 
+**The specs also gate planning.** Under `TWAIN_EXECUTE_SLURM`, discovery
+only plans around a library whose packages the cluster can actually get:
+declared by a spec in `scripts/ris/envs/`, or genuinely installable from
+PyPI (checked live, cached; known unbuildable-on-nodes packages like gpaw
+and the conda-only codes are also blockable offline via
+`CONDA_ONLY_PACKAGES` in `dependency_inferencer.py`). Anything else is
+rerouted to a runnable tool at plan time instead of dying in the job's
+`pip install`. So to make a conda-only tool (e.g. Psi4) available on RIS:
+add its spec, provision it, commit — planning picks it up from the spec
+alone. If a run still fails with a Python traceback inside the generated
+script, EXECUTE feeds that traceback back to the repair LLM and resubmits
+automatically (bounded by `TWAIN_RUNTIME_REPAIR_ATTEMPTS`, default 2).
+
 To verify an env exactly the way the Slurm job invokes it (no activation;
 `OPAL_PREFIX` tells OpenMPI where its runtime data lives — always use the
 ABSOLUTE path, a relative mpirun path breaks OpenMPI's prefix

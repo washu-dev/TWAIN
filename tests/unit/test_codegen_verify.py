@@ -235,6 +235,100 @@ class TestSignatureProbeGate:
         assert not any(d.source == "signature-probe" for d in diags)
 
 
+class TestRuntimeRepair:
+    """repair_runtime: the general net EXECUTE uses against real-run crashes."""
+
+    TRACEBACK = (
+        "Traceback (most recent call last):\n"
+        '  File "main.py", line 91, in compute_band_gaps\n'
+        "    path = atoms.cell.bandpath('GXWKGL', npoints=200)\n"
+        "KeyError: 'W'"
+    )
+
+    def test_traceback_drives_a_verified_fix(self):
+        doctor = ScriptDoctor(agent=lambda p: FIXED, brief=_brief(),
+                              verifier=_seq([SmokeOutcome("pass")]))
+        assert doctor.repair_runtime(GUESS, self.TRACEBACK) == FIXED
+
+    def test_no_agent_means_no_repair(self):
+        doctor = ScriptDoctor(agent=None, brief=_brief())
+        assert doctor.repair_runtime(GUESS, self.TRACEBACK) is None
+
+    def test_unchanged_output_is_rejected(self):
+        doctor = ScriptDoctor(agent=lambda p: GUESS, brief=_brief(),
+                              verifier=_seq([SmokeOutcome("pass")]))
+        assert doctor.repair_runtime(GUESS, self.TRACEBACK) is None
+
+    def test_fix_that_fails_static_checks_is_rejected(self):
+        # A "fix" that no longer compiles/references the calculator must never
+        # replace the bundle -- the repair verifies before accepting.
+        doctor = ScriptDoctor(agent=lambda p: "def broken(:\n", brief=_brief())
+        assert doctor.repair_runtime(GUESS, self.TRACEBACK) is None
+
+    def test_fix_that_breaks_smoke_is_rejected(self):
+        # Statically fine but smoke-broken, and every further round returns the
+        # same script -> keep the original bundle (return None).
+        doctor = ScriptDoctor(
+            agent=lambda p: FIXED, brief=_brief(),
+            verifier=_seq([SmokeOutcome("repairable", error="boom")] * 4))
+        assert doctor.repair_runtime(GUESS, self.TRACEBACK) is None
+
+
+class TestBandpathLiteralGate:
+    def test_hardcoded_path_string_is_an_error(self):
+        # Fingerprint of Slurm job 2487027: after an ExpCellFilter relaxation
+        # the (noisy) cell is no longer detected as FCC, so the hardcoded 'W'
+        # in bandpath("GXWKGL") raised KeyError after the ground-state SCF.
+        script = (
+            "import matgl\n"
+            "def bands(atoms):\n"
+            "    return atoms.cell.bandpath('GXWKGL', npoints=200)\n"
+            "if __name__ == '__main__':\n"
+            "    bands(None)\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "bandpath-literal" and d.severity == "error"
+                   for d in diags)
+
+    def test_path_keyword_literal_is_an_error(self):
+        script = (
+            "import matgl\n"
+            "def bands(atoms):\n"
+            "    return atoms.cell.bandpath(path='GXL', npoints=100)\n"
+            "if __name__ == '__main__':\n"
+            "    bands(None)\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "bandpath-literal" for d in diags)
+
+    def test_pathless_bandpath_is_clean(self):
+        # The recommended form: ASE picks the standard path for whatever
+        # lattice it actually detects in the cell.
+        script = (
+            "import matgl\n"
+            "def bands(atoms):\n"
+            "    return atoms.cell.bandpath(npoints=200, pbc=atoms.pbc)\n"
+            "if __name__ == '__main__':\n"
+            "    bands(None)\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "bandpath-literal" for d in diags)
+
+    def test_path_built_from_special_points_is_clean(self):
+        # A path assembled from the detected lattice's own letters is fine --
+        # only literals are flagged.
+        script = (
+            "import matgl\n"
+            "def bands(atoms):\n"
+            "    letters = ''.join(atoms.cell.bandpath().special_points)\n"
+            "    return atoms.cell.bandpath(letters, npoints=200)\n"
+            "if __name__ == '__main__':\n"
+            "    bands(None)\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "bandpath-literal" for d in diags)
+
+
 class TestDftBudgetGate:
     def test_pw_cutoff_above_500_is_an_error(self):
         # Fingerprint of Slurm job 2472788: PW(600) + 12x12x12 k-points on a

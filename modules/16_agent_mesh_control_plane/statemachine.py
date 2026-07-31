@@ -58,6 +58,124 @@ def _module_importable(module: str) -> bool:
         return False
 
 
+_CLUSTER_ENV_PKGS_CACHE: Optional[frozenset] = None
+
+
+def _cluster_env_packages() -> frozenset:
+    """Package names declared across the cluster env specs (scripts/ris/envs).
+
+    These YAML specs are the declarative source of truth for what the shared
+    Slurm environments contain (applied by provision_envs.sh), so they are also
+    the ground truth for "can the cluster run this conda-only library?" --
+    readable locally, no SSH round-trip. Parsed line-wise (``- pkg=ver`` under
+    ``dependencies:``) to avoid a YAML dependency; an unreadable/absent specs
+    dir yields the empty set, which simply means "nothing conda-only is
+    provisioned".
+    """
+    global _CLUSTER_ENV_PKGS_CACHE
+    if _CLUSTER_ENV_PKGS_CACHE is not None:
+        return _CLUSTER_ENV_PKGS_CACHE
+    pkgs = set()
+    specs_dir = twain_paths.REPO_ROOT / "scripts" / "ris" / "envs"
+    try:
+        for spec in sorted(specs_dir.glob("*.yml")):
+            in_deps = False
+            for raw in spec.read_text(encoding="utf-8").splitlines():
+                line = raw.split("#", 1)[0].rstrip()
+                if not line.strip():
+                    continue
+                if line.strip() == "dependencies:":
+                    in_deps = True
+                elif in_deps and line.lstrip().startswith("- "):
+                    name = re.split(r"[=<>!\s]", line.strip()[2:].strip(),
+                                    maxsplit=1)[0]
+                    if name:
+                        pkgs.add(name.lower())
+                elif not line.startswith(" "):
+                    in_deps = False
+    except OSError:
+        pkgs = set()
+    _CLUSTER_ENV_PKGS_CACHE = frozenset(pkgs)
+    return _CLUSTER_ENV_PKGS_CACHE
+
+
+# Cache of PyPI availability verdicts keyed by (package, version): a plan-time
+# network probe must not repeat per candidate per run. Values are True / False /
+# None (= could not determine; treated as available, the preflight and the job
+# remain the authority).
+_PYPI_VERDICTS: dict = {}
+
+
+def _pip_installable(dep) -> Optional[bool]:
+    """Whether PyPI can serve ``dep`` (cached; ``None`` = unknown/offline)."""
+    key = (dep.package.lower(), dep.version)
+    if key not in _PYPI_VERDICTS:
+        _PYPI_VERDICTS[key] = _depinf.is_available_on_pypi(dep.package, dep.version)
+    return _PYPI_VERDICTS[key]
+
+
+def _cluster_cannot_run(library: str) -> bool:
+    """Whether the Slurm cluster has no way to provide ``library``'s packages.
+
+    On the cluster a job only gets the pre-provisioned shared envs plus a pip
+    fallback -- so a library is runnable iff every package it needs is either
+    declared by a cluster env spec (scripts/ris/envs/*.yml) or genuinely
+    installable from PyPI. Anything else is guaranteed to die in
+    ``pip install`` after staging + a queue wait (observed with a Psi4 plan:
+    locally importable via pixi, absent from every cluster env, no PyPI
+    distribution). Callers gate on ``self.execute_slurm`` (the machine's own
+    routing flag) and reroute the plan to a runnable tool instead.
+
+    The verdict is derived, not curated: a package missing from the specs is
+    checked against the known conda-only set (covers "exists on PyPI but can't
+    build on a compute node", e.g. gpaw's sdist) and then against PyPI itself
+    (covers everything else, including tools added later and names the model
+    invented). Offline/ambiguous PyPI answers fail open -- the pre-submit
+    preflight still vets the final requirements before sbatch.
+    """
+    provided = _cluster_env_packages()
+    for dep in _depinf.import_names(library):
+        if dep.package.lower() in provided:
+            continue
+        if dep.package.lower() in _depinf.CONDA_ONLY_PACKAGES:
+            return True
+        if _pip_installable(dep) is False:
+            return True
+    return False
+
+
+# MPI jobs interleave per-rank output as 'rank=N LNN: <line>' (GPAW's rank
+# logger); stripped so a crash traceback parses like a plain one.
+_MPI_RANK_PREFIX = re.compile(r"^rank=\d+\s+L\d+:\s?", re.MULTILINE)
+
+
+def _runtime_traceback(result) -> Optional[str]:
+    """Extract the generated script's own crash traceback from a failed run.
+
+    This is the trigger for EXECUTE's general self-heal loop: whatever novel
+    mistake the synthesized code makes, it surfaces as a Python traceback in
+    the run's output -- no per-incident pattern needed. Returns the last
+    traceback block (capped), or None when repair can't help: dependency
+    errors / timeouts / setup failures have their own handling (hence only
+    ``failed`` status qualifies), and a crash whose frames never touch
+    ``main.py`` happened outside the code we can rewrite.
+    """
+    status = getattr(result, "status", None)
+    if (getattr(status, "value", None) or str(status)) != "failed":
+        return None
+    blob = ((getattr(result, "stdout", "") or "")
+            + "\n" + (getattr(result, "stderr", "") or ""))
+    blob = _MPI_RANK_PREFIX.sub("", blob)
+    marker = "Traceback (most recent call last):"
+    if marker not in blob:
+        return None
+    block = marker + blob.rsplit(marker, 1)[1]
+    block = "\n".join(block.splitlines()[:60])
+    if "main.py" not in block:
+        return None
+    return block
+
+
 _INTENT_MAP_CACHE: Optional[dict] = None
 
 
@@ -675,7 +793,15 @@ class StateMachine:
         ...) and probes it. Returns True/False, or None when it genuinely can't
         tell -- callers treat None as "trust the ranking" rather than dropping a
         candidate on a probe glitch. Injectable via ``library_available``.
+
+        Under Slurm execution the local probe is not enough: a conda-only
+        library can be importable here (pixi installs it from conda-forge) yet
+        unrunnable on the cluster, where jobs only get pre-provisioned envs +
+        a pip fallback. :func:`_cluster_cannot_run` grounds against the
+        declarative env specs (+ PyPI) and vetoes such candidates outright.
         """
+        if self.execute_slurm and _cluster_cannot_run(name):
+            return False
         if self._library_available is not None:
             return self._library_available(name)
         deps = _depinf.import_names(name)
@@ -971,10 +1097,17 @@ class StateMachine:
             # by its clean id; an unlisted/invented name falls through as-is.
             picked = self._candidate_by_name(ranked, recommendation.libraries[0])
             primary_key = picked.entry.id if picked else recommendation.libraries[0]
+            rec_calc = find_calculator(recommendation.calculator)
             if self._library_importable(primary_key) is False:
                 # The model named a library that isn't installed here -- don't
                 # plan around something the run can't import; fall back to the
                 # deterministic, installed pick.
+                recommendation = None
+            elif (rec_calc is not None and self.execute_slurm
+                  and _cluster_cannot_run(rec_calc.id)):
+                # The model attached a calculator the cluster can't run (conda-
+                # only, not in any provisioned env spec); fall back to the
+                # deterministic pick, which filters those out.
                 recommendation = None
         if recommendation is not None:
             libraries = recommendation.libraries
@@ -1166,6 +1299,11 @@ class StateMachine:
         if platform is None:
             platform = current_platform()
         covering = calculators_for_property(requested_property, domain=domain, platform=platform)
+        # Under Slurm execution, a calculator whose packages pip can't install
+        # and no cluster env spec provides (e.g. QE/Abinit binaries) would die
+        # in the job's install step -- never attach one.
+        if self.execute_slurm:
+            covering = [c for c in covering if not _cluster_cannot_run(c.id)]
         if not covering:
             return libraries, None, None
 
@@ -1296,17 +1434,7 @@ class StateMachine:
         if not calc_import and not is_synthesized:
             return State.EXECUTE
 
-        from code_gen.script_doctor import ScriptDoctor
-        # Smoke-run in the interpreter the bundle will actually run in: the sim env
-        # for a calculator run, else the default interpreter -- a library-only run
-        # (e.g. PySCF) resolves there, not in sim.
-        smoke_python = pixi_env_python(SIM_ENV) if calc_import else sys.executable
-        doctor = self._script_doctor or ScriptDoctor(
-            agent=(lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS))
-            if self.verify_codegen else None,
-            brief=self._repair_brief(plan, method),
-            sim_python=smoke_python,
-        )
+        doctor = self._make_script_doctor(plan, method, calc_import)
         original = main_path.read_text(encoding="utf-8")
         report = doctor.heal(original)
         if report.source and report.source != original:
@@ -1315,6 +1443,23 @@ class StateMachine:
             "repair_report", report.to_dict())
         self._log_repair(report)
         return State.EXECUTE
+
+    def _make_script_doctor(self, plan: dict, method: dict, calc_import):
+        """The ScriptDoctor both REPAIR and EXECUTE's self-heal loop use.
+
+        Smoke-runs in the interpreter the bundle will actually run in: the sim
+        env for a calculator run, else the default interpreter -- a
+        library-only run (e.g. PySCF) resolves there, not in sim. The LLM
+        repair channel is attached only when ``verify_codegen`` is on.
+        """
+        from code_gen.script_doctor import ScriptDoctor
+        smoke_python = pixi_env_python(SIM_ENV) if calc_import else sys.executable
+        return self._script_doctor or ScriptDoctor(
+            agent=(lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS))
+            if self.verify_codegen else None,
+            brief=self._repair_brief(plan, method),
+            sim_python=smoke_python,
+        )
 
     def _bundle_config(self, bundle_dir) -> dict:
         """Read the built bundle's config.yaml (empty dict if absent/unreadable).
@@ -1465,8 +1610,7 @@ class StateMachine:
                 # dir so results are discoverable and scoped to this run.
                 adapter = LocalExecutionAdapter(workspace_root=str(self.artifacts_dir))
 
-        result = adapter.execute(
-            bundle_dir,
+        run_kwargs = dict(
             # The sim env / Docker image already ship the whole stack, so never
             # pip-install into a venv there; that only applies to default-interpreter
             # runs -- and to Slurm jobs, whose compute nodes have no TWAIN env at all
@@ -1481,6 +1625,20 @@ class StateMachine:
             python_executable=None if (docker_route or slurm_route) else run_python,
             run_id=self.run_id,  # names the workdir exec_<session_id> for traceability
         )
+        # Self-heal loop: a run that crashes with a Python traceback inside the
+        # generated script gets repaired against that traceback and re-executed
+        # (bounded). The static checks catch the failure modes we've already
+        # seen; this catches the ones we haven't -- the run's own error is the
+        # ground truth, whatever the mistake was.
+        attempts = 1 + self._runtime_repair_budget()
+        for attempt in range(1, attempts + 1):
+            result = adapter.execute(bundle_dir, **run_kwargs)
+            if result.succeeded or attempt >= attempts:
+                break
+            failure = _runtime_traceback(result)
+            if failure is None or not self._heal_runtime_failure(
+                    bundle_dir, failure, attempt):
+                break
         self.context.artifacts["execution_result"] = self._write_artifact(
             "execution_result", result.to_dict()
         )
@@ -1491,6 +1649,52 @@ class StateMachine:
             # guard fail downstream as an opaque "incomplete context".
             raise self._execution_error(result, bundle_dir)
         return State.INTERPRET
+
+    def _runtime_repair_budget(self) -> int:
+        """How many repair-and-re-execute rounds a failed run may consume.
+
+        Each round costs a full execution (on Slurm: staging + a queue wait),
+        so the default is small; ``TWAIN_RUNTIME_REPAIR_ATTEMPTS=0`` disables
+        the loop entirely.
+        """
+        try:
+            return max(0, int(os.getenv("TWAIN_RUNTIME_REPAIR_ATTEMPTS", "2")))
+        except ValueError:
+            return 2
+
+    def _heal_runtime_failure(self, bundle_dir, failure: str, attempt: int) -> bool:
+        """Repair ``main.py`` against the real run's traceback; True if rewritten.
+
+        Only LLM-synthesized bundles are eligible (deterministic templates
+        don't invent API calls) and only when the LLM repair channel is on
+        (``verify_codegen``). The ScriptDoctor re-verifies the fix (static
+        checks + smoke where possible), so a failed repair leaves the bundle
+        untouched and the caller stops retrying.
+        """
+        plan = self._load_artifact("execution_plan") or {}
+        method = plan.get("selected_method") or {}
+        calc_import = method.get("calculator_import")
+        is_synthesized = self._bundle_config(bundle_dir).get("template") == "llm_synthesized"
+        if not calc_import and not is_synthesized:
+            return False
+        main_path = Path(bundle_dir) / "main.py"
+        if not main_path.is_file():
+            return False
+        doctor = self._make_script_doctor(plan, method, calc_import)
+        if doctor.agent is None:
+            return False
+        fixed = doctor.repair_runtime(
+            main_path.read_text(encoding="utf-8"), failure)
+        if not fixed:
+            logger.info("[execute] the run crashed in the generated script, and "
+                        "automatic repair could not produce a better one; "
+                        "surfacing the failure.")
+            return False
+        main_path.write_text(fixed, encoding="utf-8")
+        logger.info("[execute] the run crashed in the generated script; repaired "
+                    "it against the runtime traceback and re-executing "
+                    "(repair round %d).", attempt)
+        return True
 
     def _selected_calculator(self):
         """The CalculatorEntry the plan selected (or None for a plain run)."""
