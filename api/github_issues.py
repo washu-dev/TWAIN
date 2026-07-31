@@ -9,7 +9,7 @@ Token resolution (first match wins):
 
 1. ``GITHUB_ISSUE_TOKEN`` environment variable (local/dev, or an ECS secret).
 2. AWS Secrets Manager entry at ``TWAIN_GITHUB_SECRET_ID``
-   (default ``TWAIN/github/ISSUE_TOKEN``), read via :func:`database.read_secret`.
+   (default ``TWAIN/github/GITHUB_ISSUE_TOKEN``), read via :func:`database.read_secret`.
 
 The PAT needs only *Issues: Read and write* on the target repository.
 
@@ -29,7 +29,7 @@ from database import read_secret
 
 GITHUB_API_URL = os.getenv("GITHUB_API_URL", "https://api.github.com").rstrip("/")
 GITHUB_ISSUE_REPO = os.getenv("GITHUB_ISSUE_REPO", "washu-dev/TWAIN")
-GITHUB_SECRET_ID = os.getenv("TWAIN_GITHUB_SECRET_ID", "TWAIN/github/ISSUE_TOKEN")
+GITHUB_SECRET_ID = os.getenv("TWAIN_GITHUB_SECRET_ID", "TWAIN/github/GITHUB_ISSUE_TOKEN")
 ISSUE_LABELS = [
     label.strip()
     for label in os.getenv("GITHUB_ISSUE_LABELS", "user-submitted").split(",")

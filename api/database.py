@@ -99,11 +99,12 @@ def read_secret(secret_id: str) -> str:
     """Read a single Secrets Manager secret string by its full id.
 
     For features that store one opaque value (e.g. the GitHub issue PAT) rather
-    than the grouped DB connection properties. Honors the same assume-role
-    access model as the DB config loader.
+    than the grouped DB connection properties. Thin wrapper over the cached
+    :func:`get_secret` that raises a friendly ``RuntimeError`` on failure instead
+    of the raw boto exception.
     """
     try:
-        return _secrets_client().get_secret_value(SecretId=secret_id)["SecretString"]
+        return get_secret(secret_id)
     except (ClientError, BotoCoreError) as e:
         raise RuntimeError(f"Failed to load secret '{secret_id}': {e}") from e
 
