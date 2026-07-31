@@ -31,6 +31,7 @@ SSH key for the login node.
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import time
@@ -72,6 +73,12 @@ from plan_synthesizer.execution_plan import SlurmRequest
 # left running on the cluster and the result reports how to check on it.
 DEFAULT_MAX_WAIT = 7200.0
 DEFAULT_POLL_INTERVAL = 30.0
+
+# Runner-environment secrets forwarded into every job (when set). Compute
+# nodes get a fresh shell, so anything a generated script reads from the
+# environment must be exported in the sbatch script explicitly. MP_API_KEY
+# backs Materials Project database-retrieval tasks (MPRester).
+_PASSTHROUGH_ENV = ("MP_API_KEY",)
 
 _STATE_TO_STATUS = {
     JobState.COMPLETED: ExecutionStatus.SUCCESS,
@@ -200,6 +207,15 @@ class SlurmExecutionAdapter:
             )
         tool_name = getattr(bundle, "tool_name", None)
         remote_dir = self.stager.remote_run_dir(run_id)
+        job_env = dict(env or {})
+        # Secrets a generated script may read at run time (currently the
+        # Materials Project key for database-retrieval tasks). A locally
+        # submitted job inherits the runner's environment, but an
+        # SSH-submitted one gets a fresh shell -- export explicitly so both
+        # paths behave the same.
+        for secret in _PASSTHROUGH_ENV:
+            if secret not in job_env and os.environ.get(secret):
+                job_env[secret] = os.environ[secret]
         job = JobSpec(
             job_name=job_name,
             command=self._payload(local_dir, install_deps=install_deps,
@@ -209,7 +225,7 @@ class SlurmExecutionAdapter:
             partition=self.partition,
             container_image=self.container_image,
             container_mounts=[f"{remote_dir}:{remote_dir}"] if self.container_image else [],
-            env=dict(env or {}),
+            env=job_env,
         )
 
         # 2) stage + preflight + submit --------------------------------------------

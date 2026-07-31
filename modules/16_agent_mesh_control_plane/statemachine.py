@@ -33,7 +33,8 @@ from method_discovery.calculator_registry import (
 )
 from method_discovery import llm_discovery
 from PromptCompiler import PromptGenerator
-from code_gen.codegen_engine import SIM_ENV, CodegenEngine, canonical_tool_key, pixi_env_python
+from code_gen.codegen_engine import (SIM_ENV, CodegenEngine, canonical_tool_key,
+                                     mp_lookup_requested, pixi_env_python)
 from code_gen import dependency_inferencer as _depinf
 
 # Output-token budget for LLM code synthesis. A whole main.py runs well past the
@@ -1083,6 +1084,16 @@ class StateMachine:
                     f"(runner/README.md), and TWAIN will run it in the linux-64 container.")
         execution_plan.target_system = intent.get("system_descriptors") or None
         execution_plan.requested_property = requested_property
+        # A Materials Project retrieval is credential-gated: without MP_API_KEY
+        # in the runner's environment the generated lookup script cannot run.
+        # Say so ON THE APPROVAL CARD, before any build or queue time is spent.
+        if (mp_lookup_requested(intent.get("objective"))
+                and not os.environ.get("MP_API_KEY")):
+            execution_plan.safety_notes.append(
+                "The objective asks to RETRIEVE data from the Materials Project, "
+                "but MP_API_KEY is not set in the runner's environment -- the "
+                "lookup will fail until it is added to the deployment's .env "
+                "(free key: https://materialsproject.org/api).")
         execution_plan.summary = self._compose_plan_summary(
             intent, requested_property, libraries, calc_entry, recommendation)
 

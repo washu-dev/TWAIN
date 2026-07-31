@@ -79,7 +79,11 @@ that session.
 ## Run locally
 Requires a reachable Postgres with the schema from `api/migrations/001_web_ui.sql`
 applied, plus the WashU LLM credentials in `.env` (`API_KEY`, `CLIENT_ID`,
-`CLIENT_SECRET`).
+`CLIENT_SECRET`). Optional: `MP_API_KEY` (free key from
+[materialsproject.org/api](https://materialsproject.org/api)) enables
+database-retrieval tasks — prompts that ask to *look up* a stored value from the
+Materials Project rather than compute it. Without the key such runs fail fast at
+BUILD with a message saying to set it.
 
 ```bash
 # refresh the lock after the psycopg2/boto3 additions (one time)

@@ -21,7 +21,9 @@
         "total_energy",
         "forces",
         "dft",
-        "electronic_structure"
+        "electronic_structure",
+        "bulk_modulus",
+        "elastic_constants"
       ],
       "input_kinds": [
         "bulk_crystal",
@@ -129,7 +131,9 @@
         "total_energy",
         "forces",
         "dft",
-        "electronic_structure"
+        "electronic_structure",
+        "bulk_modulus",
+        "elastic_constants"
       ],
       "input_kinds": [
         "bulk_crystal",
@@ -168,7 +172,9 @@
         "total_energy",
         "forces",
         "dft",
-        "electronic_structure"
+        "electronic_structure",
+        "bulk_modulus",
+        "elastic_constants"
       ],
       "input_kinds": [
         "bulk_crystal",
@@ -205,7 +211,9 @@
         "dft",
         "electronic_structure",
         "band_gap",
-        "molecular_dynamics"
+        "molecular_dynamics",
+        "bulk_modulus",
+        "elastic_constants"
       ],
       "input_kinds": [
         "bulk_crystal",

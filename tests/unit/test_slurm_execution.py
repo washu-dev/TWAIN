@@ -294,6 +294,30 @@ def test_execute_happy_path_stages_submits_and_fetches(tmp_path):
     assert transfer.calls[-1][0] == "rsync"
 
 
+def test_mp_api_key_is_forwarded_into_the_job_env(tmp_path, monkeypatch):
+    # A compute node gets a fresh shell, and an SSH-submitted job doesn't
+    # inherit the runner's environment -- the Materials Project key a lookup
+    # script reads must be exported in the sbatch script explicitly.
+    monkeypatch.setenv("MP_API_KEY", "test-mp-key-123")
+    adapter = _exec_adapter(tmp_path, _happy_cluster_runner())
+    bundle = _bundle(tmp_path)
+
+    adapter.execute(str(bundle), run_id="sess-mp")
+
+    script = (bundle / "job.slurm").read_text()
+    assert "export MP_API_KEY=test-mp-key-123" in script
+
+
+def test_no_mp_api_key_means_no_export(tmp_path, monkeypatch):
+    monkeypatch.delenv("MP_API_KEY", raising=False)
+    adapter = _exec_adapter(tmp_path, _happy_cluster_runner())
+    bundle = _bundle(tmp_path)
+
+    adapter.execute(str(bundle), run_id="sess-mp")
+
+    assert "MP_API_KEY" not in (bundle / "job.slurm").read_text()
+
+
 def test_payload_builds_venv_runs_smoke_then_main(tmp_path):
     adapter = _exec_adapter(tmp_path, _happy_cluster_runner())
     bundle = _bundle(tmp_path)

@@ -277,6 +277,33 @@ _SMOKE_LOAD_ONLY = (
 # LLM code-synthesis prompt. The builder asks the gateway for a self-contained
 # main.py tailored to the selected library + calculator + material + property;
 # a deterministic template is the fallback when synthesis is unavailable/invalid.
+# Objective phrasings that ask to RETRIEVE a stored value from the Materials
+# Project instead of computing it. A lookup is a genuinely different route from
+# a calculation -- it needs the mp-api client and an MP_API_KEY at run time --
+# so codegen must be told about it explicitly (property + material alone give
+# the model no way to know; the CaPt2 run failed exactly this way).
+_MP_LOOKUP_NEEDLES = ("materials project", "materialsproject", "mprester", "mp-api")
+_MP_LOOKUP_VERBS = ("retriev", "look up", "lookup", "precomputed", "database",
+                    "stored", "query", "fetch")
+
+
+def mp_lookup_requested(objective) -> bool:
+    """Whether the researcher's objective asks for a Materials Project retrieval.
+
+    Requires BOTH a Materials Project mention and a retrieval verb, so "compare
+    against the Materials Project value" or "the mp-1023 structure" alone do not
+    reroute a compute task into a lookup.
+
+    >>> mp_lookup_requested("retrieve the precomputed bulk modulus from the Materials Project")
+    True
+    >>> mp_lookup_requested("compute the band gap of Si")
+    False
+    """
+    text = (objective or "").lower()
+    return (any(n in text for n in _MP_LOOKUP_NEEDLES)
+            and any(v in text for v in _MP_LOOKUP_VERBS))
+
+
 # The requirements are deliberately domain-agnostic -- they describe *how* to write
 # a reliable script (discover identifiers, don't hardcode constants, exercise the
 # tool in --smoke), never *what* property or material to expect.
@@ -391,7 +418,7 @@ so the module still imports where they are not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{smoke_instruction}
+{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "calculator", "property", and "output_file". Write the same \
 metrics as one CSV row to --output.
@@ -467,7 +494,7 @@ imports where it is not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{smoke_instruction}
+{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "property", and "output_file"; print each metric WITH its \
 physical unit, and for any fitted or derived value also print a fit-quality / \
@@ -854,6 +881,10 @@ class CodegenEngine:
             "structure": structure,
             "acceptance": acceptance,
             "output_file": "results.csv",
+            # Verbatim researcher objective: the property + material fields
+            # can't express a routing decision like "retrieve this from the
+            # Materials Project instead of computing it".
+            "objective": (intent or {}).get("objective") if isinstance(intent, dict) else None,
             # When True, the generated --smoke path runs the real (tiny) computation
             # so an API/keyword error is caught in REPAIR, not at the real run.
             "smoke_compute": smoke_compute,
@@ -872,6 +903,11 @@ class CodegenEngine:
         # requirements + smoke imports cover the whole toolset (every library, plus
         # the calculator when one is attached), deduped.
         requirements_txt = self._requirements_for_toolset(libraries, calculator)
+        if mp_lookup_requested(brief.get("objective")):
+            # A Materials Project retrieval needs the mp-api client, which no
+            # library's dependency info carries -- without this line the venv
+            # fallback installs pymatgen but the lookup dies on import.
+            requirements_txt += "mp-api\n"
         toolset_imports = [d.import_name for lib in libraries for d in _depinf.import_names(lib)]
         if calculator:
             toolset_imports += [d.import_name for d in _depinf.import_names(calculator)]
@@ -983,6 +1019,45 @@ class CodegenEngine:
             )
         else:
             structure_note = ""
+        # The researcher explicitly asked to RETRIEVE the value from the
+        # Materials Project rather than compute it. This route overrides the
+        # compute-protocol requirements above, and it is credential-gated: the
+        # key check must run in --smoke too, so a missing MP_API_KEY fails at
+        # BUILD on the runner (clear, immediate) instead of after a Slurm
+        # queue wait on a compute node.
+        if mp_lookup_requested(brief.get("objective")):
+            database_note = (
+                "- OVERRIDE -- database retrieval, not a calculation: the "
+                "researcher's objective explicitly asks to RETRIEVE this value "
+                "from the Materials Project database instead of computing it. "
+                f"Objective: {json.dumps(brief.get('objective'))}. Do NOT run a "
+                "new calculation and do NOT build the structure. Query the "
+                "database with `MPRester` (`from pymatgen.ext.matproj import "
+                "MPRester`, imported inside the function; the installed "
+                "`mp-api` client backs it), reading the API key from the "
+                "`MP_API_KEY` environment variable. FIRST -- in both the "
+                "--smoke and the real path, before any network call -- check "
+                "the key: if MP_API_KEY is unset or empty, print one clear "
+                "line telling the user to add MP_API_KEY to the runner's .env "
+                "(free key: https://materialsproject.org/api) and exit(3). "
+                "The --smoke path must make NO network request: after the key "
+                "check, `import mp_api` to prove the client is installed, "
+                "then exit 0. In the real run, NEVER trust a provided mp-id "
+                "blindly -- upstream ids are sometimes hallucinated (an "
+                "intent carried mp-1023 for CaPt2, which is actually "
+                "Ho2Co17). Query by id when one is given, but VERIFY the "
+                "returned formula (reduced composition) matches the target "
+                "material; on a mismatch or a missing id, search by formula "
+                "instead and pick the entry matching the requested space "
+                "group/phase when stated (else the lowest energy_above_hull), "
+                "printing which entry was used and why. Retrieve the stored "
+                "property from the appropriate endpoint (e.g. "
+                "elasticity/summary), and include a \"source\" field in the "
+                "JSON output stating the value is a Materials Project "
+                "database retrieval (with the material_id used), not a new "
+                "calculation.\n")
+        else:
+            database_note = ""
         return template.format(
             property=brief["property"],
             material_desc=brief["material_desc"],
@@ -996,6 +1071,7 @@ class CodegenEngine:
             also_available=also_line,
             smoke_instruction=smoke_instruction,
             structure_note=structure_note,
+            database_note=database_note,
         )
 
     @staticmethod
@@ -1018,6 +1094,7 @@ class CodegenEngine:
             "crystal_system": crystal.get("crystal_system"),
             "space_group": crystal.get("space_group"),
             "space_group_number": crystal.get("space_group_number"),
+            "mp_id": crystal.get("mp_id") or sysd.get("mp_id"),
         }
 
     @staticmethod
@@ -1044,6 +1121,10 @@ class CodegenEngine:
         cs = material.get("crystal_system")
         if cs and str(cs).lower() not in base.lower():
             quals.append(str(cs))
+        if material.get("mp_id"):
+            # The database id is the exact handle for a lookup route and a
+            # useful cross-reference for a compute route.
+            quals.append(f"Materials Project id {material['mp_id']}")
         return f"{base}, {', '.join(quals)}" if quals else base
 
     @staticmethod

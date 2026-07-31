@@ -29,6 +29,10 @@ pytest = "*"
 python-dotenv = ">=1.2.2,<2"
 requests = ">=2.34.2,<3"
 pymatgen = ">=2026.5.4,<2027"
+# Materials Project API client: backs database-retrieval tasks ("look up the
+# stored bulk modulus of X") via pymatgen's MPRester. Library-only bundles
+# smoke on this interpreter, so it must be importable here.
+mp-api = "*"
 psutil = ">=7.2.2,<8"
 ase = ">=3.29.0,<4"
 # Runner service (web UI): shared Postgres access + Secrets Manager in AWS.
@@ -125,6 +129,9 @@ psi4 = "*"
 xtb-python = "*"
 openmm = "*"
 openff-toolkit = "*"
+# Materials Project API client (mirrors scripts/ris/envs/default.yml): backs
+# database-retrieval tasks via pymatgen's MPRester at BUILD-smoke time.
+mp-api = "*"
 
 # Full-DFT GPAW only where it has a build (the Linux runner).
 [feature.sim.target.linux-64.dependencies]
