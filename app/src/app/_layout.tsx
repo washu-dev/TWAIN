@@ -48,6 +48,7 @@ function RootNavigator() {
         <Stack.Screen name="chat" options={{ title: 'TWAIN Chat' }} />
         <Stack.Screen name="browse" options={{ title: 'Simulations' }} />
         <Stack.Screen name="report" options={{ title: 'Report' }} />
+        <Stack.Screen name="settings" options={{ title: 'Settings' }} />
       </Stack.Protected>
 
       {/* Login is only reachable while signed out. */}

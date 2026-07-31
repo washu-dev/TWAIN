@@ -115,6 +115,58 @@ class TestMakeNotifier:
         assert seen["recipient"] is None
 
 
+# ── notify_prefs: the owner's Settings-page choices gate every send ────────────
+class TestNotifyPrefs:
+    def _capture(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(
+            notifications, "default_notifier",
+            lambda sid, reason, msg, recipient=None, request=None: sent.append(reason),
+        )
+        return sent
+
+    def test_opted_out_kind_is_skipped(self, monkeypatch):
+        sent = self._capture(monkeypatch)
+        owner = {"email": "r@wustl.edu", "notify_prefs": {"kinds": {"completed": False}}}
+        notify = make_notifier(FakeContactDB(owner))
+        notify(SESSION, "completed", "done")   # opted out
+        notify(SESSION, "failed", "boom")      # still on
+        assert sent == ["failed"]
+
+    def test_master_switch_silences_everything(self, monkeypatch):
+        sent = self._capture(monkeypatch)
+        owner = {"email": "r@wustl.edu", "notify_prefs": {"enabled": False}}
+        notify = make_notifier(FakeContactDB(owner))
+        for reason in notifications.NOTIFY_KINDS:
+            notify(SESSION, reason, "x")
+        assert sent == []
+
+    def test_empty_prefs_send_everything(self, monkeypatch):
+        sent = self._capture(monkeypatch)
+        owner = {"email": "r@wustl.edu", "notify_prefs": {}}
+        make_notifier(FakeContactDB(owner))(SESSION, "terminated", "stopped")
+        assert sent == ["terminated"]
+
+    def test_lookup_failure_fails_open(self, monkeypatch):
+        # A DB blip must not silently mute a user who never opted out.
+        sent = self._capture(monkeypatch)
+        make_notifier(FakeContactDB(raises=True))(SESSION, "completed", "done")
+        assert sent == ["completed"]
+
+    def test_notification_allowed_semantics(self):
+        allowed = notifications.notification_allowed
+        assert allowed(None, "completed")
+        assert allowed({}, "completed")
+        assert not allowed({"enabled": False}, "completed")
+        assert not allowed({"kinds": {"completed": False}}, "completed")
+        assert allowed({"kinds": {"completed": False}}, "terminated")
+        assert allowed("garbage", "completed")  # malformed prefs never mute
+
+    def test_terminated_reason_has_a_label(self):
+        subject, _ = notifications._compose("s-1", "terminated", "stopped")
+        assert "was terminated" in subject
+
+
 # ── log backend (default): names the recipient, never raises ──────────────────
 class TestLogBackend:
     def test_logs_owner_email(self, monkeypatch, caplog):

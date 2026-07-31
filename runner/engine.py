@@ -83,7 +83,7 @@ class _RealEngine:
 
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store,
-        compute_target=None, cancel=None, max_cost=None,
+        cancel=None, max_cost=None,
     ):
         # Real execution is env-gated so the SAME image works everywhere: set
         # TWAIN_EXECUTE_LOCALLY=1 (local `docker run -e ...` or the ECS task
@@ -97,19 +97,14 @@ class _RealEngine:
         # confirmation gates (the heavy-calc prompt here; the plan-approval gate in
         # runner._drive_run). TWAIN_EXECUTE_LOCALLY=1 executes but still asks.
         auto = _env_flag("TWAIN_AUTO_RUN")
-        # Slurm submission (instead of running locally/in Docker): the per-run
-        # choice made in the UI (`compute_target` on the job) wins; when the UI
-        # didn't pick, TWAIN_EXECUTE_SLURM=1 sets the fleet-wide default.
+        # Slurm submission (instead of running locally/in Docker) is a deployment
+        # decision, not a per-run choice: TWAIN_EXECUTE_SLURM=1 routes EXECUTE to
+        # the RIS cluster fleet-wide (the UI no longer offers a local option).
         # TWAIN_SLURM_CLUSTER names the configs/clusters/ profile (default
         # compute2). Requires reachable login nodes (VPN + SSH key) or running
         # on a login node itself (TWAIN_SLURM_HOST="").
-        if compute_target is not None:
-            slurm = compute_target == "slurm"
-        else:
-            slurm = _env_flag("TWAIN_EXECUTE_SLURM")
-        # An explicit UI choice always executes; otherwise env-gated as before.
-        execute = auto or slurm or _env_flag("TWAIN_EXECUTE_LOCALLY") \
-            or compute_target == "local"
+        slurm = _env_flag("TWAIN_EXECUTE_SLURM")
+        execute = auto or slurm or _env_flag("TWAIN_EXECUTE_LOCALLY")
         # Budget caps: a per-run ``max_cost`` (from the user) overrides the
         # deployment default (TWAIN_RUN_MAX_COST); iteration/wall-time rails are
         # deployment-wide. Without this wiring the orchestrator silently fell back
@@ -175,6 +170,30 @@ class _RealEngine:
     def approve_plan(self, orch) -> None:
         """Record a real plan approval so the run may proceed past the BUILD gate."""
         orch.approve_plan()
+
+    def replan_with_feedback(self, orch, feedback: str) -> None:
+        """Fold the researcher's rejection feedback into the run and rewind it.
+
+        The feedback is appended to the intent's ``objective`` — the free-text
+        field every downstream stage reads (discovery's property/lookup cues,
+        the plan brief, and the LLM codegen prompt) — and the run rewinds to
+        DISCOVER so tools, plan, and code are all regenerated with it in view.
+        The updated intent artifact rides the normal checkpoint machinery
+        (capture/rehydrate), so the revision survives process handoffs.
+        """
+        path = orch.sm.context.artifacts.get("intent_spec")
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                intent = json.load(f)
+            objective = str(intent.get("objective") or "").rstrip()
+            intent["objective"] = (
+                f"{objective}\n\nREVISION REQUESTED — the researcher rejected "
+                f"the previous plan with this feedback, which takes precedence "
+                f"where it conflicts with the above: {feedback.strip()}"
+            )
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(intent, f, indent=2)
+        self.rewind(orch, "DISCOVER")
 
     def read_execution_plan(self, orch) -> dict | None:
         path = orch.sm.context.artifacts.get("execution_plan")

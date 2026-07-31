@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { apiClient, ComputeTarget, Conversation, Message } from '@/api/client';
+import { apiClient, Conversation, Message } from '@/api/client';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -22,6 +22,15 @@ const PIPELINE_STATES = [
   'INTAKE', 'CLARIFY', 'DECOMPOSE', 'DISCOVER', 'PLAN',
   'BUILD', 'EXECUTE', 'INTERPRET', 'VALIDATE', 'ACCEPT', 'TERMINATE',
 ];
+
+// Where the off-spine loop states sit on the happy path. Without this, a run
+// that ended while looping (e.g. current_state REPAIR) resolved to index -1 and
+// every row of the "Re-run from…" picker was disabled.
+const LOOP_STATE_ANCHOR: Record<string, string> = {
+  REPAIR: 'BUILD',
+  CORRECT: 'VALIDATE',
+  REPLAN: 'VALIDATE',
+};
 
 // Stages a finished run can be restarted from, with plain-language descriptions
 // of what re-running each one redoes. A re-run resets the chosen stage and every
@@ -87,30 +96,11 @@ function parsePlanSummary(content: string): PlanSummary | null {
   }
 }
 
-function inferComputeTarget(messages: Message[], chosen?: ComputeTarget): ComputeTarget | undefined {
-  if (chosen) return chosen;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = messages[i];
-    if (m.kind === 'approval_request') {
-      const plan = parsePlanSummary(m.content);
-      if (plan?.compute_target === 'slurm' || plan?.compute_target === 'local') {
-        return plan.compute_target;
-      }
-    }
-    if (m.role === 'assistant' && m.content.includes('RIS cluster')) return 'slurm';
-    if (m.role === 'assistant' && m.content.includes('this server')) return 'local';
-  }
-  return undefined;
-}
-
 export const ChatScreen: React.FC = () => {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState('');
-  // Where the run should execute; undefined keeps the runner's default
-  // (locally on the runner host). 'slurm' submits to the WashU RIS cluster.
-  const [computeTarget, setComputeTarget] = useState<ComputeTarget | undefined>(undefined);
   // The researcher's edits to the Slurm resource request, keyed to the approval
   // card they were made on so a fresh card reseeds from its own plan.
   const [slurmEdit, setSlurmEdit] = useState<{ key: string; draft: SlurmDraft } | null>(null);
@@ -140,9 +130,6 @@ export const ChatScreen: React.FC = () => {
   const approvalContent =
     [...messages].reverse().find((m) => m.kind === 'approval_request')?.content ?? null;
   const approvalPlan = approvalContent ? parsePlanSummary(approvalContent) : null;
-  const effectiveTarget =
-    inferComputeTarget(messages, computeTarget) ??
-    (approvalPlan?.compute_target === 'slurm' ? 'slurm' : undefined);
 
   // Editable Slurm fields: the plan's request seeds the values; the
   // researcher's edits (if made on this approval card) override them.
@@ -211,7 +198,7 @@ export const ChatScreen: React.FC = () => {
       if (!conversation) {
         const parsed = budget.trim() ? Number(budget) : NaN;
         const maxCost = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-        const created = await apiClient.startConversation(text, computeTarget, maxCost);
+        const created = await apiClient.startConversation(text, maxCost);
         setConversation(created);
       } else {
         await apiClient.sendMessage(conversation.id, text);
@@ -244,7 +231,7 @@ export const ChatScreen: React.FC = () => {
       let overrides:
         | { cpu_count: number; gpu_count: number; ram: number; max_time: number }
         | undefined;
-      if (decision === 'approve' && effectiveTarget === 'slurm' && slurmDraft) {
+      if (decision === 'approve' && slurmDraft) {
         overrides = {
           cpu_count: Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8),
           gpu_count: Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0),
@@ -279,7 +266,12 @@ export const ChatScreen: React.FC = () => {
   };
 
   // The stages this run reached (so the picker only offers steps that ran).
-  const reachedIndex = conversation ? PIPELINE_STATES.indexOf(conversation.current_state) : -1;
+  // Loop states are anchored back onto the spine so ending mid-loop still
+  // enables the stages the run actually passed through.
+  const reachedState = conversation
+    ? LOOP_STATE_ANCHOR[conversation.current_state] ?? conversation.current_state
+    : null;
+  const reachedIndex = reachedState ? PIPELINE_STATES.indexOf(reachedState) : -1;
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
@@ -310,19 +302,11 @@ export const ChatScreen: React.FC = () => {
         )}
       </View>
 
-      {(conversation || computeTarget) && (
+      {conversation && (
         <View style={styles.targetBadgeRow}>
-          <Text
-            style={[
-              styles.targetBadge,
-              effectiveTarget === 'slurm' ? styles.targetBadgeSlurm : styles.targetBadgeLocal,
-            ]}
-          >
-            {effectiveTarget === 'slurm'
-              ? `RIS / Slurm${approvalPlan?.slurm_cluster ? ` · ${approvalPlan.slurm_cluster}` : ''}`
-              : computeTarget === 'slurm'
-                ? 'RIS / Slurm (selected)'
-                : 'This server'}
+          {/* All runs execute on the RIS cluster; the badge just confirms which one. */}
+          <Text style={[styles.targetBadge, styles.targetBadgeSlurm]}>
+            {`RIS / Slurm${approvalPlan?.slurm_cluster ? ` · ${approvalPlan.slurm_cluster}` : ''}`}
           </Text>
         </View>
       )}
@@ -357,12 +341,8 @@ export const ChatScreen: React.FC = () => {
 
       {awaitingApproval ? (
         <View style={styles.approvalBar}>
-          <Text style={styles.approvalLabel}>
-            {effectiveTarget === 'slurm'
-              ? 'Approve this plan for the RIS cluster?'
-              : 'Approve this plan?'}
-          </Text>
-          {effectiveTarget === 'slurm' && slurmDraft && (
+          <Text style={styles.approvalLabel}>Approve this plan for the RIS cluster?</Text>
+          {slurmDraft && (
             <View style={styles.slurmEditor}>
               <Text style={styles.slurmEditorTitle}>Slurm resources (editable)</Text>
               <View style={styles.slurmRow}>
@@ -397,9 +377,7 @@ export const ChatScreen: React.FC = () => {
               onPress={() => handleApproval('approve')}
               accessibilityRole="button"
             >
-              <Text style={styles.approveText}>
-                {effectiveTarget === 'slurm' ? 'Approve & submit to RIS' : 'Approve & run'}
-              </Text>
+              <Text style={styles.approveText}>Approve & submit to RIS</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.rejectBtn, busy && styles.disabled]}
@@ -437,24 +415,6 @@ export const ChatScreen: React.FC = () => {
         </View>
       ) : (
         <View style={styles.composer}>
-          {/* Compute target is fixed at creation, so only offer it for new runs. */}
-          {!conversation && (
-            <View style={styles.targetBar}>
-              <Text style={styles.targetLabel}>Run on</Text>
-              <View style={styles.targetOptions}>
-                <TargetOption
-                  label="This server"
-                  selected={computeTarget !== 'slurm'}
-                  onPress={() => setComputeTarget(undefined)}
-                />
-                <TargetOption
-                  label="RIS cluster (Slurm)"
-                  selected={computeTarget === 'slurm'}
-                  onPress={() => setComputeTarget('slurm')}
-                />
-              </View>
-            </View>
-          )}
           {!conversation && (
             <View style={styles.budgetRow}>
               <Text style={styles.budgetLabel}>Budget $</Text>
@@ -558,23 +518,6 @@ const SlurmField: React.FC<{
       accessibilityLabel={label}
     />
   </View>
-);
-
-const TargetOption: React.FC<{
-  label: string;
-  selected: boolean;
-  onPress: () => void;
-}> = ({ label, selected, onPress }) => (
-  <TouchableOpacity
-    style={[styles.targetOption, selected && styles.targetOptionSelected]}
-    onPress={onPress}
-    accessibilityRole="button"
-    accessibilityState={{ selected }}
-  >
-    <Text style={[styles.targetOptionText, selected && styles.targetOptionTextSelected]}>
-      {label}
-    </Text>
-  </TouchableOpacity>
 );
 
 const StateStepper: React.FC<{ current: string; status?: string }> = ({ current, status }) => {
@@ -761,7 +704,6 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   targetBadgeSlurm: { color: C.washuGreen },
-  targetBadgeLocal: { color: C.textSecondary },
   stepper: { maxHeight: 62, backgroundColor: C.backgroundElement, flexGrow: 0 },
   stepperContent: { alignItems: 'center', paddingHorizontal: Spacing.three, gap: Spacing.three },
   step: { alignItems: 'center', gap: 4, paddingVertical: Spacing.two },
@@ -814,26 +756,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: C.backgroundElement,
   },
-  targetBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    paddingHorizontal: Spacing.two,
-    paddingTop: Spacing.two,
-  },
-  targetLabel: { fontSize: 13, fontWeight: '600', color: C.textSecondary },
-  targetOptions: { flexDirection: 'row', gap: Spacing.one },
-  targetOption: {
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#DDDDDD',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: 5,
-    backgroundColor: C.washuWhite,
-  },
-  targetOptionSelected: { borderColor: C.washuGreen, backgroundColor: C.washuGreen },
-  targetOptionText: { fontSize: 12, color: C.textSecondary, fontWeight: '600' },
-  targetOptionTextSelected: { color: '#FFFFFF' },
   budgetRow: {
     flexDirection: 'row',
     alignItems: 'center',

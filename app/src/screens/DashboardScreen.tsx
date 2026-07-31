@@ -62,24 +62,24 @@ export const DashboardScreen: React.FC = () => {
         />
 
         <TileButton
-          title={APP_STRINGS.resumeWorkflow}
-          description={APP_STRINGS.resumeWorkflowDesc}
-          accentColor="#215732"
-          onPress={() => showModal(APP_STRINGS.resumeWorkflow, ['Coming soon.'])}
-        />
-
-        <TileButton
           title={APP_STRINGS.browse}
           description={APP_STRINGS.browseDesc}
-          accentColor="#BA0C2F"
+          accentColor="#215732"
           onPress={() => router.push('/browse')}
         />
 
         <TileButton
           title={APP_STRINGS.createIssue}
           description={APP_STRINGS.createIssueDesc}
-          accentColor="#215732"
+          accentColor="#BA0C2F"
           onPress={() => setIssueModalVisible(true)}
+        />
+
+        <TileButton
+          title={APP_STRINGS.settings}
+          description={APP_STRINGS.settingsDesc}
+          accentColor="#215732"
+          onPress={() => router.push('/settings')}
         />
 
         {loading && (

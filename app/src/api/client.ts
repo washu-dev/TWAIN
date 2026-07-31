@@ -11,10 +11,6 @@ export type ConversationStatus =
   | 'rejected'
   | 'cancelled';
 
-// Where the run's EXECUTE stage happens: the runner host itself, or a job
-// submitted to the WashU RIS Slurm cluster. Omitted = the runner's default.
-export type ComputeTarget = 'local' | 'slurm';
-
 export type MessageRole = 'user' | 'assistant' | 'system';
 export type MessageKind =
   | 'chat'
@@ -88,11 +84,30 @@ export interface CreatedIssue {
   repo: string;
 }
 
+// Per-user email notification preferences (users.notify_prefs). A missing kind
+// means "send", so an empty object = all notifications on.
+export interface NotifyPrefs {
+  enabled: boolean;
+  kinds: Record<string, boolean>;
+}
+
+// The notification kinds the runner emails about, in display order. Mirrors
+// NOTIFY_KINDS in api/main.py / runner/notifications.py.
+export const NOTIFY_KINDS = [
+  'input',
+  'approval',
+  'completed',
+  'failed',
+  'terminated',
+] as const;
+export type NotifyKind = (typeof NOTIFY_KINDS)[number];
+
 export interface AuthUser {
   id: string;
   email: string;
   name: string;
   role: 'user' | 'admin';
+  notify_prefs?: Partial<NotifyPrefs> | null;
 }
 
 class APIClient {
@@ -165,16 +180,15 @@ class APIClient {
     return response.data.data;
   }
 
+  // Replace the caller's email notification preferences (Settings page).
+  async updateNotifyPrefs(prefs: NotifyPrefs): Promise<NotifyPrefs> {
+    const response = await this.client.put('/api/me/notifications', prefs);
+    return response.data.data;
+  }
+
   // ── Conversations / chat (Phase 1) ─────────────────────────────────────────
-  async startConversation(
-    request: string,
-    computeTarget?: ComputeTarget,
-    maxCost?: number | null,
-  ): Promise<Conversation> {
-    const body: { request: string; compute_target?: ComputeTarget; max_cost?: number } = {
-      request,
-    };
-    if (computeTarget) body.compute_target = computeTarget;
+  async startConversation(request: string, maxCost?: number | null): Promise<Conversation> {
+    const body: { request: string; max_cost?: number } = { request };
     if (maxCost != null) body.max_cost = maxCost;
     const response = await this.client.post('/api/conversations', body);
     return response.data.data;

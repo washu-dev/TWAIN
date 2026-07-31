@@ -104,6 +104,37 @@ class TestMeEndpoint:
         assert response.status_code == 401
 
 
+class TestNotifyPrefsEndpoint:
+    @patch("main.set_notify_prefs",
+           return_value={"enabled": True, "kinds": {"completed": False}})
+    def test_put_replaces_the_callers_prefs(self, mock_set):
+        app.dependency_overrides[get_current_user] = lambda: REGULAR_USER
+        response = client.put(
+            "/api/me/notifications",
+            json={"enabled": True, "kinds": {"completed": False}},
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["kinds"] == {"completed": False}
+        user_id, prefs = mock_set.call_args.args
+        assert user_id == "u1"
+        assert prefs == {"enabled": True, "kinds": {"completed": False}}
+
+    def test_unknown_kind_is_rejected(self):
+        # The kinds must match what the runner actually emails about, or a typo
+        # silently opts out of nothing.
+        app.dependency_overrides[get_current_user] = lambda: REGULAR_USER
+        response = client.put(
+            "/api/me/notifications",
+            json={"enabled": True, "kinds": {"pager": False}},
+        )
+        assert response.status_code == 422
+        assert "pager" in response.json()["detail"]
+
+    def test_requires_a_token(self):
+        response = client.put("/api/me/notifications", json={"enabled": True})
+        assert response.status_code == 401
+
+
 class TestAdminEndpoints:
     def test_list_users_forbidden_for_regular(self):
         app.dependency_overrides[get_current_user] = lambda: REGULAR_USER

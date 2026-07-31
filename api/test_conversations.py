@@ -40,22 +40,6 @@ class TestStart:
         assert response.status_code == 422
 
     @patch("conversations.create_conversation", return_value=CONVERSATION)
-    def test_start_forwards_compute_target(self, mock_create):
-        response = client.post(
-            "/api/conversations",
-            json={"request": "band gap of silicon", "compute_target": "slurm"},
-        )
-        assert response.status_code == 200
-        assert mock_create.call_args.kwargs["compute_target"] == "slurm"
-
-    def test_start_rejects_unknown_compute_target(self):
-        response = client.post(
-            "/api/conversations",
-            json={"request": "band gap of silicon", "compute_target": "mainframe"},
-        )
-        assert response.status_code == 422
-
-    @patch("conversations.create_conversation", return_value=CONVERSATION)
     def test_start_forwards_max_cost(self, mock_create):
         response = client.post(
             "/api/conversations", json={"request": "predict solubility", "max_cost": 2.5}

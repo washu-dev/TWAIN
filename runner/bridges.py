@@ -38,13 +38,20 @@ from runner.suspend import SuspendRun
 _QUESTION_KINDS = ("clarification", "approval_request")
 
 
-def _fresh_reply(db: RunnerDB, session_id: str, question_kind: str, reply_kind):
-    """The user's pending reply for ``question_kind``, or None.
+# messages.state value marking a user reply a gate has already acted on. A
+# consumed reply must never be re-applied when the same gate is reached again
+# (e.g. a re-run rewinding to BUILD): the gate asks afresh instead.
+_CONSUMED = "consumed"
 
-    Returns the reply content only when (a) the latest question of *any* kind is a
-    ``question_kind`` question and (b) a user reply exists after it. This is what
-    stops a stale CLARIFY answer being read as a heavy-calc or approval answer,
-    and vice-versa.
+
+def _fresh_reply_row(db: RunnerDB, session_id: str, question_kind: str, reply_kind):
+    """The user's pending reply row for ``question_kind``, or None.
+
+    Returns the reply only when (a) the latest question of *any* kind is a
+    ``question_kind`` question, (b) a user reply exists after it, and (c) that
+    reply has not already been consumed by an earlier drive of the run. (a) is
+    what stops a stale CLARIFY answer being read as a heavy-calc or approval
+    answer, and vice-versa.
     """
     latest_any = db.last_question_id(session_id, kinds=_QUESTION_KINDS)
     if latest_any is None:
@@ -52,8 +59,16 @@ def _fresh_reply(db: RunnerDB, session_id: str, question_kind: str, reply_kind):
     mine = db.last_question_id(session_id, kinds=(question_kind,))
     if mine is None or mine != latest_any:
         return None  # the current outstanding question belongs to a different gate
-    replies = db.user_replies_after(session_id, mine, kind=reply_kind)
-    return replies[0]["content"] if replies else None
+    for reply in db.user_replies_after(session_id, mine, kind=reply_kind):
+        if reply.get("state") != _CONSUMED:
+            return reply
+    return None
+
+
+def _fresh_reply(db: RunnerDB, session_id: str, question_kind: str, reply_kind):
+    """Content of the user's pending reply for ``question_kind``, or None."""
+    row = _fresh_reply_row(db, session_id, question_kind, reply_kind)
+    return row["content"] if row else None
 
 
 def _has_outstanding_clarification(db: RunnerDB, session_id: str) -> bool:
@@ -82,15 +97,17 @@ class DbAsk:
 
     def __call__(self, message: str) -> str:
         if not self._consumed:
-            answer = _fresh_reply(
+            reply = _fresh_reply_row(
                 self.db, self.session_id, question_kind="clarification", reply_kind=None
             )
-            if answer is not None:
+            if reply is not None:
                 # Resume: hand the researcher's answer back so the paused handler
-                # continues from where it stopped.
+                # continues from where it stopped. Marked consumed so a later
+                # re-run through CLARIFY asks afresh instead of replaying it.
                 self._consumed = True
+                self.db.mark_reply_consumed(reply["id"])
                 self.db.set_conversation_status(self.session_id, "running")
-                return answer
+                return reply["content"]
             if _has_outstanding_clarification(self.db, self.session_id):
                 # A question is already posted and unanswered (a redundant resume):
                 # stay suspended without re-posting, so the user sees it only once.
@@ -106,6 +123,53 @@ class DbAsk:
         raise SuspendRun(reason="input")
 
 
+REJECT_FEEDBACK_PROMPT = (
+    "You rejected the plan. What should change? Describe what you'd like done "
+    "differently — a different method or tool, other settings, or a different "
+    "property — and I'll revise the plan and post a new one for your approval. "
+    "If you'd rather stop this run entirely, use the Terminate button."
+)
+
+
+def post_reject_feedback_question(
+    db: RunnerDB, session_id: str, notifier=default_notifier
+) -> None:
+    """Ask what should change after a rejection, mark the run waiting, release.
+
+    A rejection no longer ends the run: the gate asks for revision feedback and
+    suspends. The reply is consumed by :func:`consume_reject_feedback` on the
+    resume, folded into the run, and a fresh plan is posted for approval.
+    """
+    db.add_assistant_message(
+        session_id, REJECT_FEEDBACK_PROMPT, kind="clarification", state="BUILD"
+    )
+    db.set_conversation_status(session_id, "awaiting_input")
+    notifier(session_id, "input", REJECT_FEEDBACK_PROMPT)
+
+
+def consume_reject_feedback(db: RunnerDB, session_id: str) -> str | None:
+    """The user's pending plan-revision feedback (one-shot), or None.
+
+    Only meaningful while the run is parked at the BUILD approval gate, where
+    the sole clarification question that can be outstanding is the gate's own
+    "what should change?" (CLARIFY-stage answers were consumed long before the
+    run reached BUILD). Like an approval decision, the reply is consumed so a
+    later visit to the gate asks afresh instead of replaying it.
+    """
+    reply = _fresh_reply_row(
+        db, session_id, question_kind="clarification", reply_kind=None
+    )
+    if reply is None:
+        return None
+    db.mark_reply_consumed(reply["id"])
+    return reply["content"]
+
+
+def awaiting_reject_feedback(db: RunnerDB, session_id: str) -> bool:
+    """True while the gate's "what should change?" question is unanswered."""
+    return _has_outstanding_clarification(db, session_id)
+
+
 def post_plan_for_approval(
     db: RunnerDB, session_id: str, plan: dict | None, notifier=default_notifier,
     *, compute_target: str | None = None, slurm_cluster: str | None = None,
@@ -114,10 +178,17 @@ def post_plan_for_approval(
 
     ``compute_target`` / ``slurm_cluster`` enrich the approval card so the UI can
     show where the run will execute (and, for Slurm, offer editable resources).
-    Idempotent per run: if the plan was already posted (a redundant resume) we
-    don't post it again, so the user sees one approval request.
+    Idempotent per *round*: while the latest posted plan is still awaiting its
+    decision (a redundant resume), we don't post it again, so the user sees one
+    approval request. But when the previous round was already decided and
+    consumed — a re-run rewound to BUILD, or a fresh plan after a rejection —
+    a NEW approval request is posted so the user gets a fresh card instead of
+    the run silently replaying their old decision.
     """
-    if db.last_question_id(session_id, kinds=("approval_request",)) is not None:
+    pending = db.last_question_id(session_id, kinds=("approval_request",))
+    if pending is not None and not db.user_replies_after(
+        session_id, pending, kind="approval_response"
+    ):
         db.set_conversation_status(session_id, "awaiting_approval")
         return
     db.add_assistant_message(
@@ -133,18 +204,22 @@ def post_plan_for_approval(
 def consume_approval(db: RunnerDB, session_id: str) -> tuple[str | None, dict | None]:
     """The user's plan decision + optional Slurm overrides, or ``(None, None)``.
 
-    ``(None, None)`` means the gate hasn't been answered yet — no plan posted, or
-    one posted and still awaiting the response. Otherwise returns
-    ``(decision, slurm_overrides)`` where decision is ``'approve'``/``'reject'``
-    and overrides is the plan-unit ``slurm_request`` dict the user edited on the
-    approval card (ram in GB, max_time in hours), or None.
+    ``(None, None)`` means the gate hasn't been answered yet — no plan posted,
+    one posted and still awaiting the response, or the only response was already
+    consumed by an earlier drive of the run (so a re-run gets a fresh gate
+    rather than replaying the old decision). Otherwise the reply is *consumed*
+    (marked in the DB, one-shot) and returned as ``(decision, slurm_overrides)``
+    where decision is ``'approve'``/``'reject'`` and overrides is the plan-unit
+    ``slurm_request`` dict the user edited on the approval card (ram in GB,
+    max_time in hours), or None.
     """
-    raw = _fresh_reply(
+    reply = _fresh_reply_row(
         db, session_id, question_kind="approval_request", reply_kind="approval_response"
     )
-    if raw is None:
+    if reply is None:
         return None, None
-    return _parse_approval_reply(raw)
+    db.mark_reply_consumed(reply["id"])
+    return _parse_approval_reply(reply["content"])
 
 
 def _parse_approval_reply(raw: str) -> tuple[str, dict | None]:

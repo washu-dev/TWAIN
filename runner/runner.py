@@ -39,7 +39,15 @@ from runner.artifacts import (
     rehydrate_artifacts,
     rematerialize_inputs,
 )
-from runner.bridges import DbAsk, PgEventSink, consume_approval, post_plan_for_approval
+from runner.bridges import (
+    DbAsk,
+    PgEventSink,
+    awaiting_reject_feedback,
+    consume_approval,
+    consume_reject_feedback,
+    post_plan_for_approval,
+    post_reject_feedback_question,
+)
 from runner.db import JobNotifyWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
 from runner.notifications import default_notifier, make_notifier
@@ -105,13 +113,19 @@ def _cancel_check(db: RunnerDB, session_id: str):
     return lambda: db.terminate_requested(session_id)
 
 
-def _finalize_cancelled(db: RunnerDB, session_id: str) -> None:
+def _finalize_cancelled(db: RunnerDB, session_id: str, notifier=None) -> None:
     db.set_conversation_status(session_id, "cancelled")
     db.add_assistant_message(
         session_id,
         "Run terminated by user. Nothing further will be built or executed.",
         kind="chat",
     )
+    # The user asked to stop, but the actual teardown (scancel, settling) can
+    # land minutes after the click -- confirm by email like every other
+    # terminal outcome (opt-out via the Settings page's 'terminated' kind).
+    if notifier is not None:
+        notifier(session_id, "terminated",
+                 "The run was stopped at your request.")
 
 
 def _announce_compute_target(db: RunnerDB, session_id: str, engine, orch) -> None:
@@ -147,9 +161,15 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
 
         # ---- plan-approval gate (driver-level, at BUILD) ---------------------
         if state == build_state:
-            if not _cross_approval_gate(db, session_id, orch, engine, notifier):
-                return  # awaiting the user's decision (or rejected); released
-            status = orch.run()  # leg 2: build → execute → … → terminate
+            outcome = _cross_approval_gate(db, session_id, orch, engine, notifier)
+            if outcome == "released":
+                return  # awaiting the user's decision or revision feedback
+            if outcome == "replanned":
+                # Rejection feedback was folded in and the run rewound: drive
+                # leg 1 again so a fresh plan reaches the gate and is posted.
+                status = orch.run(until=engine.STATE_BUILD)
+            else:  # "proceed"
+                status = orch.run()  # leg 2: build → execute → … → terminate
         else:
             status = orch.run(until=engine.STATE_BUILD)  # leg 1 / continue to gate
 
@@ -175,15 +195,22 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
         return
 
 
-def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
-    """Handle the BUILD approval gate. True to proceed into execution, else release.
+def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
+    """Handle the BUILD approval gate.
+
+    Returns ``'proceed'`` (approved → build and execute), ``'replanned'`` (the
+    user's rejection feedback was folded into the run, which rewound for a fresh
+    plan — keep driving), or ``'released'`` (waiting on the user: plan posted,
+    or the what-should-change question asked).
 
     Unattended mode (TWAIN_AUTO_RUN) approves automatically. Otherwise: consume
     the user's decision if it's in; if not, post the plan (with the compute target
-    + any budget heads-up) and release; a 'reject' stops the run. Crossing the gate
-    records a real plan approval (``engine.approve_plan``) so the BUILD→REPAIR /
-    REPAIR→EXECUTE guards let the run proceed, and applies any Slurm resource
-    overrides the user edited on the approval card.
+    + any budget heads-up) and release. A 'reject' does NOT end the run: the gate
+    asks what should change, and the reply drives a re-plan (rewind to DISCOVER
+    with the feedback folded into the intent) ending in a fresh approval card.
+    Crossing the gate records a real plan approval (``engine.approve_plan``) so
+    the BUILD→REPAIR / REPAIR→EXECUTE guards let the run proceed, and applies any
+    Slurm resource overrides the user edited on the approval card.
     """
     if _env_flag("TWAIN_AUTO_RUN"):
         engine.approve_plan(orch)
@@ -191,7 +218,25 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
             session_id, "Plan auto-approved (unattended mode). Building and executing…",
             kind="chat", state="BUILD",
         )
-        return True
+        return "proceed"
+
+    # ---- rejection-feedback round (takes precedence over a fresh decision) --
+    feedback = consume_reject_feedback(db, session_id)
+    if feedback is not None:
+        db.set_conversation_status(session_id, "running")
+        db.add_assistant_message(
+            session_id,
+            "Revising the plan with your feedback — a new plan will be posted "
+            "for your approval shortly.",
+            kind="chat", state="PLAN",
+        )
+        engine.replan_with_feedback(orch, feedback)
+        return "replanned"
+    if awaiting_reject_feedback(db, session_id):
+        # The question is posted and unanswered (a redundant resume): stay
+        # suspended without re-posting it.
+        db.set_conversation_status(session_id, "awaiting_input")
+        return "released"
 
     decision, slurm_overrides = consume_approval(db, session_id)
     if decision is None:
@@ -206,17 +251,11 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
             compute_target=engine.compute_target_of(orch),
             slurm_cluster=engine.slurm_cluster_of(orch),
         )
-        return False
+        return "released"
     if decision != "approve":
-        db.set_conversation_status(session_id, "rejected")
-        db.add_assistant_message(
-            session_id,
-            "Plan rejected — nothing was built or executed. "
-            "Start a new run, or re-run this one from an earlier step "
-            "(e.g. Discover or Plan) to try a different approach.",
-            kind="chat",
-        )
-        return False
+        # Rejected: ask what should change instead of ending the run.
+        post_reject_feedback_question(db, session_id, notifier=notifier)
+        return "released"
     engine.approve_plan(orch)
     if slurm_overrides:
         engine.apply_slurm_overrides(orch, slurm_overrides)
@@ -228,7 +267,7 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
         db.add_assistant_message(
             session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
         )
-    return True
+    return "proceed"
 
 
 def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier, cancel):
@@ -240,9 +279,6 @@ def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, not
         ask=DbAsk(db, session_id, notifier=notifier),
         sink=PgEventSink(db, session_id),
         store=PgStore(db),
-        # Per-run execution backend picked in the UI ('local' | 'slurm');
-        # None falls back to the runner's env-configured default.
-        compute_target=params.get("compute_target"),
         # Terminate button: checked between stages (raises RunCancelled).
         cancel=cancel,
         # Per-run budget override (falls back to the deployment default in engine).
@@ -302,7 +338,7 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         _drive_run(db, session_id, orch, engine, notifier=notifier)
         if cancel():
             # Terminate arrived too late to interrupt anything; still record it.
-            _finalize_cancelled(db, session_id)
+            _finalize_cancelled(db, session_id, notifier)
     except Exception as exc:  # noqa: BLE001 -- cancelled runs end via exceptions
         # A terminate request aborts stages by raising RunCancelled from the
         # orchestrator. Whatever the exception type, if the user asked to stop,
@@ -311,7 +347,7 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         if not cancel():
             raise
         print(f"[runner] run {session_id} terminated by user ({exc})")
-        _finalize_cancelled(db, session_id)
+        _finalize_cancelled(db, session_id, notifier)
     finally:
         # Best-effort: persist the specs + generated code so the report can show
         # them (also on a suspend, so partial artifacts are visible while waiting).

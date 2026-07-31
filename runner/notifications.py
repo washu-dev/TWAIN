@@ -42,14 +42,46 @@ logger = logging.getLogger("twain.runner.notify")
 SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
 
 # A short, human-facing reason label per reason. The first two are *suspend*
-# reasons (the run needs the user); "completed"/"failed" are terminal reasons
-# (the run finished) — see _drive_run in runner.py.
+# reasons (the run needs the user); the rest are terminal reasons (the run
+# finished) — see _drive_run / _finalize_cancelled in runner.py.
 _REASON_LABEL = {
     "input": "needs your input",
     "approval": "is waiting for your approval",
     "completed": "has finished",
     "failed": "failed",
+    "terminated": "was terminated",
 }
+
+# Every reason a user can opt in/out of on the Settings page. Keep in lockstep
+# with _REASON_LABEL and the api's notification-preferences endpoint.
+NOTIFY_KINDS = tuple(_REASON_LABEL)
+
+
+def notification_allowed(prefs: dict | None, reason: str) -> bool:
+    """Whether the owner's preferences permit sending this ``reason``.
+
+    ``prefs`` is the ``users.notify_prefs`` JSONB:
+    ``{"enabled": bool, "kinds": {reason: bool, ...}}`` — every key optional,
+    and a missing key means "send" (so ``{}``/None keep today's behavior and a
+    malformed value can never silence a user who didn't opt out).
+
+    >>> notification_allowed(None, "completed")
+    True
+    >>> notification_allowed({"enabled": False}, "completed")
+    False
+    >>> notification_allowed({"kinds": {"completed": False}}, "completed")
+    False
+    >>> notification_allowed({"kinds": {"completed": False}}, "terminated")
+    True
+    """
+    if not isinstance(prefs, dict):
+        return True
+    if prefs.get("enabled") is False:
+        return False
+    kinds = prefs.get("kinds")
+    if isinstance(kinds, dict) and kinds.get(reason) is False:
+        return False
+    return True
 
 
 def _resume_hint(session_id: str) -> str:
@@ -97,6 +129,15 @@ def make_notifier(db):
         except Exception as exc:  # noqa: BLE001 -- routing must never fail the notify
             logger.warning("[notify] owner lookup failed for %s: %s", session_id, exc)
             recipient = None
+        # Honor the owner's Settings-page preferences. Only an explicit opt-out
+        # suppresses the send; a failed lookup (recipient None) falls through so
+        # a DB blip can't silently mute someone who wanted the email.
+        if not notification_allowed((recipient or {}).get("notify_prefs"), reason):
+            logger.info(
+                "[notify] %s: owner opted out of '%s' notifications; skipping",
+                session_id, reason,
+            )
+            return
         try:
             request = db.run_title(session_id)
         except Exception as exc:  # noqa: BLE001 -- a missing title must not fail the notify
