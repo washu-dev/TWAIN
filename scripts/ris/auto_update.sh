@@ -93,8 +93,12 @@ pixi install >/dev/null
 log "restarting runner tmux session"
 tmux kill-session -t twain-runner 2>/dev/null || true
 sleep 1
+# 9>&-: do NOT let the tmux server inherit the flock fd. Without it, the
+# daemonized tmux (which outlives this script) held .auto-update.lock forever,
+# so every later cron tick exited silently at the flock and the box never
+# updated again after its first successful auto-update.
 tmux new-session -d -s twain-runner \
-  "bash $RIS_DIR/scripts/ris/start_runner.sh 2>&1 | tee -a $RIS_DIR/runner-ris.log"
+  "bash $RIS_DIR/scripts/ris/start_runner.sh 2>&1 | tee -a $RIS_DIR/runner-ris.log" 9>&-
 sleep 5
 if pgrep -f "runner.runner" >/dev/null; then
   log "runner restarted on $(git rev-parse --short HEAD)"
