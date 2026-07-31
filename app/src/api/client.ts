@@ -115,6 +115,7 @@ class APIClient {
   private token: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
   private onUnauthorized: (() => void) | null = null;
+  private refreshHandler: (() => Promise<string | null>) | null = null;
 
   constructor() {
     this.client = axios.create({
@@ -134,16 +135,49 @@ class APIClient {
       }
       return config;
     });
-    // Drop the session on any 401 so the auth guard routes back to the login screen.
+    // On a 401, try a silent token refresh and retry the request once; only when
+    // that fails (no refresh token, or Entra rejected it) drop the session so the
+    // auth guard routes back to the login screen. Without the retry, the first
+    // request after the access token expired logged the user out mid-session.
     this.client.interceptors.response.use(
       (response) => response,
-      (error) => {
+      async (error) => {
+        const original = error?.config as
+          | (typeof error.config & { _retried?: boolean })
+          | undefined;
+        if (
+          error?.response?.status === 401 &&
+          original &&
+          !original._retried &&
+          this.refreshHandler
+        ) {
+          original._retried = true;
+          let fresh: string | null = null;
+          try {
+            fresh = await this.refreshHandler();
+          } catch {
+            fresh = null;
+          }
+          if (fresh) {
+            original.headers = original.headers ?? {};
+            original.headers.Authorization = `Bearer ${fresh}`;
+            return this.client.request(original);
+          }
+        }
         if (error?.response?.status === 401) {
           this.onUnauthorized?.();
         }
         return Promise.reject(error);
       },
     );
+  }
+
+  /**
+   * Register a silent-refresh hook: returns a fresh bearer token to retry a
+   * 401'd request with, or `null` when the session cannot be recovered.
+   */
+  setRefreshHandler(handler: (() => Promise<string | null>) | null) {
+    this.refreshHandler = handler;
   }
 
   /**
