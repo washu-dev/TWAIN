@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Modal,
   View,
@@ -40,13 +40,18 @@ export const IssueModal: React.FC<IssueModalProps> = ({
   const [created, setCreated] = useState<CreatedIssue | null>(null);
 
   // Seed the form each time the modal opens (closing always clears it, so a
-  // caller-provided draft must be re-applied on the next open).
-  useEffect(() => {
+  // caller-provided draft must be re-applied on the next open). Done as a
+  // render-time state adjustment -- the sanctioned alternative to setState in
+  // an effect (react-hooks/set-state-in-effect); React re-renders immediately
+  // without painting the stale frame.
+  const [wasVisible, setWasVisible] = useState(visible);
+  if (visible !== wasVisible) {
+    setWasVisible(visible);
     if (visible) {
       setTitle(initialTitle ?? '');
       setBody(initialBody ?? '');
     }
-  }, [visible, initialTitle, initialBody]);
+  }
 
   const canSubmit = title.trim().length > 0 && !submitting;
 
