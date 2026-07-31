@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import * as AuthSession from 'expo-auth-session';
@@ -56,6 +57,23 @@ function errMessage(e: unknown, fallback: string): string {
   if (typeof detail === 'string' && detail) return detail;
   if (e instanceof Error && e.message) return e.message;
   return fallback;
+}
+
+// Whether the bearer JWT expires within `skewSeconds`. Used to renew the token
+// *before* a request goes out with a stale one; unparseable tokens are treated
+// as "not expiring" so the request proceeds and the 401 path decides.
+function expiresSoon(jwt: string, skewSeconds = 120): boolean {
+  try {
+    const payload = JSON.parse(
+      atob(jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')),
+    );
+    return (
+      typeof payload.exp === 'number' &&
+      payload.exp * 1000 < Date.now() + skewSeconds * 1000
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -128,7 +146,59 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, [applyToken]);
 
-  // On a 401 from any request, drop the session so the guard routes to login.
+  // Silently mint a fresh bearer from the stored refresh token. Deduplicated:
+  // concurrent callers (several in-flight requests hitting expiry at once)
+  // share one round-trip to Entra. Returns the new bearer, or null when the
+  // session can't be recovered (no refresh token, or Entra rejected it).
+  const refreshInFlight = useRef<Promise<string | null> | null>(null);
+  const refreshSession = useCallback(async (): Promise<string | null> => {
+    const { refreshToken } = loadTokens();
+    if (!refreshToken || !discovery || !ENTRA_CONFIG.clientId) return null;
+    if (!refreshInFlight.current) {
+      refreshInFlight.current = (async () => {
+        try {
+          const refreshed = await AuthSession.refreshAsync(
+            { clientId: ENTRA_CONFIG.clientId, refreshToken, scopes },
+            discovery,
+          );
+          const bearer = USE_ID_TOKEN ? refreshed.idToken : refreshed.accessToken;
+          if (!bearer) return null;
+          saveTokens({
+            accessToken: bearer,
+            refreshToken: refreshed.refreshToken ?? refreshToken,
+          });
+          applyToken(bearer);
+          return bearer;
+        } catch {
+          return null;
+        } finally {
+          refreshInFlight.current = null;
+        }
+      })();
+    }
+    return refreshInFlight.current;
+  }, [discovery, scopes, applyToken]);
+
+  // Keep the session alive across access-token expiry (the "logged out after a
+  // few minutes idle" bug): each request renews a nearly-expired token up front,
+  // and a 401 triggers one refresh-and-retry (client.ts) — the session only
+  // ends when the refresh token itself is gone or rejected.
+  useEffect(() => {
+    if (AUTH_DISABLED) return;
+    apiClient.setTokenProvider(async () => {
+      const { accessToken } = loadTokens();
+      if (accessToken && !expiresSoon(accessToken)) return accessToken;
+      return (await refreshSession()) ?? accessToken;
+    });
+    apiClient.setRefreshHandler(() => refreshSession());
+    return () => {
+      apiClient.setTokenProvider(null);
+      apiClient.setRefreshHandler(null);
+    };
+  }, [refreshSession]);
+
+  // On an unrecoverable 401 (refresh failed too), drop the session so the
+  // guard routes to login.
   useEffect(() => {
     apiClient.setUnauthorizedHandler(() => {
       resetSession();
