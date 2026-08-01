@@ -91,14 +91,17 @@ class FakeAgent:
 
 
 class TruncatingAgent(FakeAgent):
-    """First reply is cut mid-string (the 1024-token truncation failure mode);
-    subsequent replies are whole."""
+    """First JSON reply is cut mid-string (the 1024-token truncation failure
+    mode); subsequent replies are whole. The intake off-topic filter prompt is
+    answered in-domain without counting, so ``calls`` counts JSON calls only."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.calls = 0
 
     def call_agent(self, prompt, **kwargs):
+        if "intake filter" in str(prompt):
+            return {"content": [{"text": "SIMULATION"}]}
         self.calls += 1
         if self.calls == 1:
             return {"content": [{"text": self._intent_json[:80]}]}
@@ -154,6 +157,7 @@ class TestStateEnum:
 class TestGuardTable:
     EXPECTED_TRANSITIONS = {
         (State.INTAKE, State.CLARIFY),
+        (State.INTAKE, State.TERMINATE),  # off-topic decline at intake
         (State.CLARIFY, State.DECOMPOSE),
         (State.CLARIFY, State.CLARIFY),  # clarification Q&A self-loop
         (State.DECOMPOSE, State.INTAKE),  # no intent yet -> go back to intake
@@ -413,6 +417,67 @@ class TestAgentJsonRobustness:
         m = _offline_machine(tmp_path, agent=lambda prompt: '{"unterminated": "trunca')
         with pytest.raises(json.JSONDecodeError):
             m._agent_json("prompt", retries=1)
+
+
+class TestOffTopicDecline:
+    """The intake filter declines non-simulation asks before intent extraction."""
+
+    @staticmethod
+    def _routing_agent(verdict):
+        """Answers the intake-filter prompt with ``verdict``; everything else
+        gets the canned in-domain IntentSpec."""
+        def agent(prompt):
+            if "intake filter" in str(prompt):
+                return verdict
+            return json.dumps(VALID_INTENT)
+        return agent
+
+    def test_off_topic_request_terminates_with_a_decline(self, tmp_path):
+        m = _offline_machine(tmp_path, agent=self._routing_agent("OFF_TOPIC: cryptocurrency"))
+        m._request = "explain how bitcoin mining works"
+        assert m.intake() == State.TERMINATE
+        declined = m._load_artifact("declined")
+        assert declined["category"] == "cryptocurrency"
+        assert "materials-science" in declined["message"]
+        # Nothing was extracted: the run never paid for the intent call.
+        assert m._load_artifact("intent_spec") is None
+
+    def test_in_domain_request_proceeds_to_clarify(self, tmp_path):
+        m = _offline_machine(tmp_path, agent=self._routing_agent("SIMULATION"))
+        m._request = "band gap of silicon with PBE"
+        assert m.intake() == State.CLARIFY
+        assert "declined" not in m.context.artifacts
+        assert m._load_artifact("intent_spec")["objective"] == VALID_INTENT["objective"]
+
+    def test_filter_fails_open_on_agent_error(self, tmp_path):
+        # A broken filter must never block real work: an agent error during
+        # classification means "proceed" (the JSON call still succeeds).
+        def flaky(prompt):
+            if "intake filter" in str(prompt):
+                raise RuntimeError("LLM down")
+            return json.dumps(VALID_INTENT)
+
+        m = _offline_machine(tmp_path, agent=flaky)
+        m._request = "band gap of silicon"
+        assert m.intake() == State.CLARIFY
+
+    def test_unparseable_verdict_fails_open(self, tmp_path):
+        m = _offline_machine(tmp_path, agent=self._routing_agent("I think maybe not?"))
+        m._request = "band gap of silicon"
+        assert m.intake() == State.CLARIFY
+
+    def test_verdict_without_category_gets_a_generic_one(self, tmp_path):
+        m = _offline_machine(tmp_path, agent=self._routing_agent("OFF_TOPIC"))
+        m._request = "write me a poem"
+        assert m.intake() == State.TERMINATE
+        assert m._load_artifact("declined")["category"] == \
+            "something other than a simulation"
+
+    def test_intake_to_terminate_is_a_legal_transition(self, tmp_path):
+        m = _offline_machine(tmp_path, agent=self._routing_agent("OFF_TOPIC: finance"))
+        m._request = "should I invest in gold ETFs"
+        m.run()  # drives intake through the guard table -- must not raise
+        assert m.current_state == State.TERMINATE
 
 
 class TestGuardRejection:

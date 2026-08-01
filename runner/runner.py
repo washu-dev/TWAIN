@@ -179,6 +179,16 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
         if status == "paused":
             return  # suspended for user input (clarify / heavy-calc); released
         if status == "completed":
+            # Off-topic decline: intake refused the request before planning
+            # anything. Post the explanation and mark the run rejected (nothing
+            # executed) instead of the misleading "run complete" summary; no
+            # email -- the decline lands seconds after submission, while the
+            # researcher is still looking at the screen.
+            decline = engine.decline_reason(orch)
+            if decline:
+                db.add_assistant_message(session_id, decline, kind="chat", state="TERMINATE")
+                db.set_conversation_status(session_id, "rejected")
+                return
             summary = engine.final_summary(orch)
             db.add_assistant_message(session_id, summary, kind="chat", state="TERMINATE")
             notifier(session_id, "completed", summary)

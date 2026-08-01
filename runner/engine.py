@@ -230,6 +230,20 @@ class _RealEngine:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(plan, f, indent=2)
 
+    def decline_reason(self, orch) -> str | None:
+        """The off-topic decline message when intake refused the request, or None.
+
+        Intake writes a ``declined`` artifact (with the user-facing message) and
+        ends the run without planning or executing anything; the runner posts
+        this instead of the generic "run complete" summary and marks the
+        conversation rejected.
+        """
+        path = orch.sm.context.artifacts.get("declined")
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                return json.load(f).get("message")
+        return None
+
     def final_summary(self, orch) -> str:
         state = getattr(getattr(orch, "sm", None), "current_state", None)
         name = state.name if state is not None else "unknown"
