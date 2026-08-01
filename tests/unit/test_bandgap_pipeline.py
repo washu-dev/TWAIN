@@ -530,6 +530,24 @@ class TestHeavyCalcGate:
         # the run can still wind down cleanly
         assert m.context.execution_status is True
 
+    def test_ui_button_payloads_parse_correctly(self, tmp_path):
+        # The web UI's heavy-gate buttons send exactly "yes" / "no" (ChatScreen
+        # handleYesNo). Pin those payloads to the parser so a wording change in
+        # _confirm_heavy_execution can't silently break the buttons.
+        m = self._machine_ready_to_execute(tmp_path, answer="yes")
+        assert m._confirm_heavy_execution() is True
+        m = self._machine_ready_to_execute(tmp_path, answer="no")
+        assert m._confirm_heavy_execution() is False
+
+    def test_heavy_prompt_carries_the_yn_marker(self, tmp_path):
+        # The UI shows Yes/No buttons only when the pending clarification
+        # contains "[y/N]" -- the marker the confirmation prompt must keep.
+        asked = []
+        m = self._machine_ready_to_execute(tmp_path, answer="n")
+        m.ask = lambda message: asked.append(message) or "n"
+        assert m._confirm_heavy_execution() is False
+        assert asked and "[y/N]" in asked[0]
+
     def test_auto_approve_proceeds_without_prompting(self, tmp_path):
         # Unattended mode: a heavy calculator runs without any confirmation, even
         # with no `ask` bridge and no tty (which would otherwise defer).

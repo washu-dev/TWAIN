@@ -145,6 +145,16 @@ export const ChatScreen: React.FC = () => {
 
   const messages = conversation?.messages ?? [];
   const awaitingApproval = status === 'awaiting_approval';
+
+  // The heavy-calculation gate (e.g. a GPAW DFT run) asks a yes/no question —
+  // its prompt always ends with "[y/N]" (statemachine._confirm_heavy_execution).
+  // Offer buttons instead of making the user type y/n; the answer goes through
+  // the same reply channel the typed answer would.
+  const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+  const yesNoPending =
+    status === 'awaiting_input' &&
+    lastAssistant?.kind === 'clarification' &&
+    /\[y\/n\]/i.test(lastAssistant.content);
   const approvalContent =
     [...messages].reverse().find((m) => m.kind === 'approval_request')?.content ?? null;
   const approvalPlan = approvalContent ? parsePlanSummary(approvalContent) : null;
@@ -251,6 +261,22 @@ export const ChatScreen: React.FC = () => {
       setInput('');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Answer the heavy-calc yes/no gate with a tap; "yes"/"no" is exactly what
+  // the state machine's confirmation parser expects from a typed reply.
+  const handleYesNo = async (answer: 'yes' | 'no') => {
+    if (!conversation || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiClient.sendMessage(conversation.id, answer);
+      await refresh(conversation.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to send your answer');
     } finally {
       setBusy(false);
     }
@@ -533,6 +559,28 @@ export const ChatScreen: React.FC = () => {
               accessibilityRole="button"
             >
               <Text style={styles.sendText}>Revise</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : yesNoPending ? (
+        <View style={styles.approvalBar}>
+          <Text style={styles.approvalLabel}>Run the heavy calculation now?</Text>
+          <View style={styles.approvalButtons}>
+            <TouchableOpacity
+              style={[styles.approveBtn, busy && styles.disabled]}
+              onPress={() => handleYesNo('yes')}
+              disabled={busy}
+              accessibilityRole="button"
+            >
+              <Text style={styles.approveText}>Yes, run it</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.rejectBtn, busy && styles.disabled]}
+              onPress={() => handleYesNo('no')}
+              disabled={busy}
+              accessibilityRole="button"
+            >
+              <Text style={styles.rejectText}>No, don’t run it</Text>
             </TouchableOpacity>
           </View>
         </View>
