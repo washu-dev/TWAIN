@@ -166,7 +166,8 @@ class FakeOrchestrator:
     compare the plan estimate against.
     """
 
-    def __init__(self, ask, sink, *, clarifies=False, heavy=False, max_cost=1.0):
+    def __init__(self, ask, sink, *, clarifies=False, heavy=False, max_cost=1.0,
+                 declines=False):
         self.ask = ask
         self.sink = sink
         self.sm = types.SimpleNamespace(
@@ -177,6 +178,7 @@ class FakeOrchestrator:
         self._clarified = not clarifies
         self._heavy = heavy
         self._heavy_done = False
+        self._declines = declines
 
     def _set(self, name):
         self.sm.current_state = types.SimpleNamespace(name=name)
@@ -189,6 +191,12 @@ class FakeOrchestrator:
             return "paused"
 
     def _run(self, until):
+        # An off-topic decline ends the run at INTAKE, before clarification or
+        # the approval gate -- leg 1 completes immediately instead of pausing.
+        if self._declines:
+            self._set("TERMINATE")
+            self.sink.publish(_event("run.completed", {"state": "TERMINATE"}))
+            return "completed"
         if not self._clarified:
             self._set("CLARIFY")
             self.ask("What temperature?")  # may raise SuspendRun (suspend) or return
@@ -210,10 +218,11 @@ class FakeEngine:
     STATE_BUILD = "BUILD"
 
     def __init__(self, plan=None, clarifies=False, heavy=False,
-                 compute_target="local", slurm_cluster="compute2"):
+                 compute_target="local", slurm_cluster="compute2", decline=None):
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
         self._clarifies = clarifies
         self._heavy = heavy
+        self._decline = decline     # off-topic decline message, or None
         self._compute_target = compute_target
         self._slurm_cluster = slurm_cluster
         self.built_with = None       # records build_orchestrator kwargs for assertions
@@ -233,6 +242,7 @@ class FakeEngine:
         return FakeOrchestrator(
             ask, sink, clarifies=self._clarifies, heavy=self._heavy,
             max_cost=max_cost if max_cost is not None else 1.0,
+            declines=self._decline is not None,
         )
 
     def current_state_name(self, orch):
@@ -265,6 +275,9 @@ class FakeEngine:
 
     def read_execution_plan(self, orch):
         return self._plan
+
+    def decline_reason(self, orch):
+        return self._decline
 
     def final_summary(self, orch):
         return "Run complete."
@@ -386,6 +399,19 @@ class TestProcessJob:
         assert "approval_request" in db.kinds()
         assert db.status == "awaiting_approval"
         assert not any(e["event_type"] == "run.completed" for e in db.events)
+
+    def test_off_topic_run_declines_before_the_gate(self):
+        # Intake refused the request (e.g. "explain bitcoin"): the decline
+        # message is the final chat post, the conversation is marked rejected
+        # (nothing planned or executed), and no approval card ever appears.
+        db = FakeDB()
+        msg = "This doesn't look like a computational chemistry request."
+        runner.process_job(self._job(), db, FakeEngine(decline=msg))
+        assert db.status == "rejected"
+        assert db.messages[-1]["content"] == msg
+        assert db.messages[-1]["kind"] == "chat"
+        assert "approval_request" not in db.kinds()
+        assert "clarification" not in db.kinds()
 
     def test_approved_run_completes(self):
         # Decision already recorded (e.g. arrived before the runner reached BUILD,

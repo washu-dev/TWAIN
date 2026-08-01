@@ -194,6 +194,41 @@ def _cluster_node_limits() -> dict:
     }.items() if v is not None}
 
 
+# Intake filter: one tiny LLM call classifying the RAW request before any
+# intent extraction. The intent schema force-fits `domain` into its enum
+# (materials/quantum), so an off-topic ask ("explain bitcoin") gets
+# misclassified rather than flagged -- it then dies much later, deep in the
+# pipeline, with a confusing "no engine could run this" error after burning
+# clarification rounds and planning calls. Asking the model directly, before
+# extraction, is the general check; any parse/agent failure fails OPEN so a
+# broken filter can never block real science.
+INTAKE_FILTER_PROMPT = """\
+You are the intake filter for TWAIN, an agent that plans and runs computational \
+chemistry and materials-science simulations (properties of molecules, crystals, \
+and materials via DFT, tight binding, ML surrogates, or database lookups).
+
+Classify the researcher's request below. Reply with EXACTLY one line and nothing else:
+SIMULATION -- if it plausibly asks to compute, simulate, estimate, or look up a \
+chemistry or materials property or system
+OFF_TOPIC: <subject> -- otherwise, where <subject> names what the request is \
+actually about in 1-3 words
+
+Request: {query}
+"""
+
+
+def _decline_message(category: str) -> str:
+    """The user-facing decline for an off-topic request (posted as the run's end)."""
+    return (
+        f"This doesn't look like a computational chemistry or materials-science "
+        f"request -- it reads as a question about {category}. TWAIN plans and "
+        f"runs simulations (properties of molecules, crystals, and materials), "
+        f"so nothing was planned or executed. If you did mean a simulation, "
+        f"start a new run describing the system (a material, molecule, or "
+        f"formula) and the property you want computed."
+    )
+
+
 # Stable lead-in for the "your best-fit engine can't run here" safety note.
 # The approval card keys off this exact prefix to offer a one-tap "request it
 # via GitHub issue" action, so change it in both places or not at all
@@ -282,6 +317,10 @@ _STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
 
 GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.INTAKE, State.CLARIFY): lambda c: True,
+    # Off-topic decline: intake refuses a request that isn't a chemistry /
+    # materials simulation ask (e.g. "explain bitcoin") and ends the run
+    # immediately -- nothing is clarified, planned, or executed.
+    (State.INTAKE, State.TERMINATE): lambda c: True,
     (State.CLARIFY, State.DECOMPOSE): lambda c: c.clarified,
     (State.CLARIFY, State.CLARIFY) : lambda c: True,
     (State.DECOMPOSE, State.DISCOVER): lambda c: True,
@@ -642,10 +681,40 @@ class StateMachine:
         # A pre-supplied request (orchestrator/UI/test) skips the interactive
         # prompt; otherwise fall back to asking on stdin.
         query = self._request if self._request else self._ask_user(self._WELCOME)
+        # Decline off-topic asks HERE, before intent extraction: one cheap
+        # classification of the raw request beats a late, confusing engine
+        # failure after clarification and planning were already paid for.
+        category = self._off_topic_category(query)
+        if category:
+            message = _decline_message(category)
+            self.context.artifacts["declined"] = self._write_artifact(
+                "declined", {"category": category, "message": message})
+            logger.info("[intake] declined off-topic request (%s)", category)
+            return State.TERMINATE
         prompt = self.prompt_generator.json_schema_prompt(schema, query)
         intent = self._agent_json(prompt)
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
         return State.CLARIFY
+
+    def _off_topic_category(self, query) -> Optional[str]:
+        """What an off-topic request is actually about, or None when in-domain.
+
+        One short LLM call on the raw request (see ``INTAKE_FILTER_PROMPT``).
+        Fails OPEN -- no agent, an errored call, or an unparseable verdict all
+        mean "proceed": the filter exists to save the researcher from a slow
+        confusing failure, never to block real work.
+        """
+        if not str(query or "").strip():
+            return None
+        try:
+            verdict = str(self._agent_text(
+                INTAKE_FILTER_PROMPT.format(query=query))).strip()
+        except Exception:  # noqa: BLE001 -- fail open, whatever broke
+            return None
+        if not verdict.upper().startswith("OFF_TOPIC"):
+            return None
+        category = verdict.split(":", 1)[1].strip() if ":" in verdict else ""
+        return category or "something other than a simulation"
 
     def clarify(self) -> State:
         """Raise IntentSpec confidence to the threshold, then mark clarified.
