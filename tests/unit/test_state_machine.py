@@ -960,6 +960,23 @@ class TestSlurmClusterGrounding:
         assert len(calls) == 1
 
 
+class TestAtomCountSuggestion:
+    """_atom_count feeds the suggested Slurm CPU request (~1 CPU per atom)."""
+
+    def test_structure_atom_list_wins_over_formula(self):
+        sd = {"formula": "Si", "structure": {"atoms": [{}, {}, {}, {}]}}
+        assert SM._atom_count(sd) == 4
+
+    def test_formula_multiplicities_are_counted(self):
+        assert SM._atom_count({"formula": "CaPt2"}) == 3
+        assert SM._atom_count({"crystal": {"formula": "C9H8O4"}}) == 21
+
+    def test_unknown_system_yields_none(self):
+        assert SM._atom_count(None) is None
+        assert SM._atom_count({}) is None
+        assert SM._atom_count({"formula": ""}) is None
+
+
 class TestRuntimeTracebackExtraction:
     """_runtime_traceback: the trigger for EXECUTE's general self-heal loop."""
 

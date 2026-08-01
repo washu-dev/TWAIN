@@ -71,6 +71,25 @@ def test_profile_rejects_named_partition_not_in_list():
         )
 
 
+def test_compute2_profile_carries_node_ceilings():
+    # Per-node maxima (verified via sinfo on the live cluster) feed the
+    # approval card's field labels and clamp what the user can request.
+    profile = ClusterProfile.load("compute2")
+    assert profile.max_cpus_per_node == 64
+    assert profile.max_gpus_per_node == 4
+    assert profile.max_ram_gb == 900
+
+
+def test_profile_rejects_non_positive_node_ceilings():
+    for field in ("max_cpus_per_node", "max_gpus_per_node", "max_ram_gb"):
+        with pytest.raises(ValueError):
+            ClusterProfile(
+                name="x", login_nodes=["h"], account="a",
+                partitions=[{"name": "general"}],
+                **{field: 0},
+            )
+
+
 def test_partition_admits():
     short = Partition(name="general-short", max_minutes=30, gpus=False)
     assert short.admits(minutes=20, needs_gpu=False)

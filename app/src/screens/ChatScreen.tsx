@@ -90,6 +90,14 @@ type PlanSummary = {
     ram?: number;
     max_time?: number;
   };
+  // Per-node ceilings of the cluster (same units as slurm_request), shown on
+  // the editable fields and used to clamp what the user can request.
+  slurm_limits?: {
+    cpu_count?: number;
+    gpu_count?: number;
+    ram?: number;
+    max_time?: number;
+  } | null;
   acceptance_metrics?: { metric_name?: string; target_value?: number; tolerance?: number }[] | null;
   safety_notes?: string[] | null;
   note?: string;
@@ -164,8 +172,11 @@ export const ChatScreen: React.FC = () => {
       ].join('\n')
     : undefined;
 
-  // Editable Slurm fields: the plan's request seeds the values; the
-  // researcher's edits (if made on this approval card) override them.
+  const slurmLimits = approvalPlan?.slurm_limits ?? null;
+
+  // Editable Slurm fields: the plan's request seeds the values (TWAIN's
+  // suggestion — ~1 CPU per atom of the system); the researcher's edits (if
+  // made on this approval card) override them, clamped to the node ceilings.
   const seededSlurmDraft: SlurmDraft | null = approvalPlan?.slurm_request
     ? {
         cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
@@ -265,17 +276,39 @@ export const ChatScreen: React.FC = () => {
         | { cpu_count: number; gpu_count: number; ram: number; max_time: number }
         | undefined;
       if (decision === 'approve' && slurmDraft) {
+        // Clamp each field to the cluster's per-node ceiling (when known) so
+        // an over-ask can't produce an unschedulable sbatch.
+        const cap = (v: number, max?: number) => (max != null ? Math.min(v, max) : v);
         overrides = {
-          cpu_count: Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8),
-          gpu_count: Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0),
-          ram: Math.max(MIN_RAM_GB, parseInt(slurmDraft.ram, 10) || MIN_RAM_GB),
-          max_time: Math.max(10 / 60, parseFloat(slurmDraft.max_time) || 0.17),
+          cpu_count: cap(Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8), slurmLimits?.cpu_count),
+          gpu_count: cap(Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0), slurmLimits?.gpu_count),
+          ram: cap(Math.max(MIN_RAM_GB, parseInt(slurmDraft.ram, 10) || MIN_RAM_GB), slurmLimits?.ram),
+          max_time: cap(Math.max(10 / 60, parseFloat(slurmDraft.max_time) || 0.17), slurmLimits?.max_time),
         };
       }
       await apiClient.sendApproval(conversation.id, decision, overrides);
       await refresh(conversation.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to submit decision');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Mid-session revision: on a finished run, a typed message becomes "here's
+  // what to change" — TWAIN folds it into the run's intent, re-plans, and
+  // posts a fresh plan for approval, all within this conversation.
+  const handleRevise = async () => {
+    const text = input.trim();
+    if (!text || !conversationId || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiClient.rerunConversation(conversationId, 'DISCOVER', text);
+      setInput('');
+      await refresh(conversationId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to revise the run');
     } finally {
       setBusy(false);
     }
@@ -396,26 +429,43 @@ export const ChatScreen: React.FC = () => {
           {slurmDraft && (
             <View style={styles.slurmEditor}>
               <Text style={styles.slurmEditorTitle}>Slurm resources (editable)</Text>
+              <Text style={styles.slurmSuggestHint}>
+                Pre-filled with TWAIN’s suggestion (~1 CPU per atom of your system).
+                {slurmLimits
+                  ? ` Node limits: ${[
+                      slurmLimits.cpu_count != null ? `${slurmLimits.cpu_count} CPUs` : null,
+                      slurmLimits.gpu_count != null ? `${slurmLimits.gpu_count} GPUs` : null,
+                      slurmLimits.ram != null ? `${slurmLimits.ram} GB RAM` : null,
+                      slurmLimits.max_time != null ? `${slurmLimits.max_time} h wall` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}.`
+                  : ''}
+              </Text>
               <View style={styles.slurmRow}>
                 <SlurmField
-                  label="CPUs"
+                  label={`CPUs${slurmLimits?.cpu_count != null ? ` (max ${slurmLimits.cpu_count})` : ''}`}
                   value={slurmDraft.cpu_count}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, cpu_count: v })}
                 />
                 <SlurmField
-                  label="GPUs"
+                  label={`GPUs${slurmLimits?.gpu_count != null ? ` (max ${slurmLimits.gpu_count})` : ''}`}
                   value={slurmDraft.gpu_count}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, gpu_count: v })}
                 />
               </View>
               <View style={styles.slurmRow}>
                 <SlurmField
-                  label={`RAM (GB, min ${MIN_RAM_GB})`}
+                  label={
+                    slurmLimits?.ram != null
+                      ? `RAM (GB, ${MIN_RAM_GB}–${slurmLimits.ram})`
+                      : `RAM (GB, min ${MIN_RAM_GB})`
+                  }
                   value={slurmDraft.ram}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, ram: v })}
                 />
                 <SlurmField
-                  label="Wall time (hours)"
+                  label={`Wall time (hours${slurmLimits?.max_time != null ? `, max ${slurmLimits.max_time}` : ''})`}
                   value={slurmDraft.max_time}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, max_time: v })}
                 />
@@ -461,6 +511,28 @@ export const ChatScreen: React.FC = () => {
               <Text style={styles.reportText}>
                 {status === 'completed' ? 'View results' : 'View report'}
               </Text>
+            </TouchableOpacity>
+          </View>
+          {/* Mid-session revision: type what should change and the run
+              re-plans with it, ending in a fresh approval card. */}
+          <View style={styles.inputBar}>
+            <TextInput
+              style={styles.input}
+              value={input}
+              onChangeText={setInput}
+              placeholder="Want changes? Describe what to update and TWAIN will revise the plan…"
+              placeholderTextColor={C.textSecondary}
+              editable={!busy}
+              onSubmitEditing={handleRevise}
+              multiline
+            />
+            <TouchableOpacity
+              style={[styles.sendBtn, (busy || !input.trim()) && styles.disabled]}
+              onPress={handleRevise}
+              disabled={busy || !input.trim()}
+              accessibilityRole="button"
+            >
+              <Text style={styles.sendText}>Revise</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -895,6 +967,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   slurmEditorTitle: { fontSize: 13, fontWeight: '700', color: C.text },
+  slurmSuggestHint: { fontSize: 12, color: C.textSecondary, lineHeight: 17 },
   slurmRow: { flexDirection: 'row', gap: Spacing.two },
   slurmField: { flex: 1, gap: 4 },
   slurmFieldLabel: { fontSize: 11, color: C.textSecondary, fontWeight: '600' },

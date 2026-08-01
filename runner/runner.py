@@ -320,9 +320,23 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         # process has none of the original run's artifact files on disk).
         engine.rewind(orch, target)
         rematerialize_inputs(db, session_id, orch)
-        db.add_assistant_message(
-            session_id, f"↩︎ Re-running from {target}…", kind="chat", state=target,
-        )
+        feedback = (params.get("feedback") or "").strip()
+        if feedback:
+            # Mid-session revision: fold the researcher's "here's what to
+            # change" into the run's intent (same machinery as a plan
+            # rejection) so discovery/plan/codegen all see it. Must run after
+            # rematerialize -- it edits the intent artifact on disk.
+            engine.replan_with_feedback(orch, feedback)
+            db.add_assistant_message(
+                session_id,
+                "↩︎ Revising the run with your feedback — a new plan will be "
+                "posted for your approval.",
+                kind="chat", state=target,
+            )
+        else:
+            db.add_assistant_message(
+                session_id, f"↩︎ Re-running from {target}…", kind="chat", state=target,
+            )
     else:
         # A fresh start announces where it will execute (RIS vs local) up front.
         if kind == "start":

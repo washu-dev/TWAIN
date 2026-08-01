@@ -348,6 +348,24 @@ class TestApprovalGate:
         db.add_user("APPROVE", kind="approval_response")
         assert consume_approval(db, SESSION) == ("approve", None)
 
+    def test_slurm_card_carries_node_ceilings(self):
+        # A Slurm-routed plan's approval card includes the cluster's per-node
+        # maxima (from configs/clusters/compute2.json) so the editable resource
+        # fields can show and enforce how far a request can go.
+        from runner.bridges import _plan_summary
+        summary = _plan_summary(
+            {"metadata": {}}, compute_target="slurm", slurm_cluster="compute2")
+        limits = summary["slurm_limits"]
+        assert limits["cpu_count"] == 64
+        assert limits["gpu_count"] == 4
+        assert limits["ram"] == 900
+        assert limits["max_time"] == 360.0  # longest partition wall, in hours
+
+    def test_local_card_has_no_slurm_limits(self):
+        from runner.bridges import _plan_summary
+        summary = _plan_summary({"metadata": {}}, compute_target="local")
+        assert "slurm_limits" not in summary
+
 
 # ── process_job / the drive loop ──────────────────────────────────────────────
 class TestProcessJob:
@@ -434,6 +452,26 @@ class TestProcessJob:
         db = FakeDB()
         with pytest.raises(ValueError):
             runner.process_job(self._job(kind="rerun"), db, FakeEngine())
+
+    def test_rerun_with_feedback_folds_it_in_before_replanning(self):
+        # The mid-session revision path: a 'rerun' job carrying the researcher's
+        # "here's what to change" folds it into the intent (replan_with_feedback,
+        # same machinery as a plan rejection) and re-drives to a fresh approval
+        # card, all within the same conversation.
+        db = FakeDB()
+        engine = FakeEngine()
+        runner.process_job(
+            self._job(kind="rerun", target_state="DISCOVER",
+                      feedback="use xtb instead of DFT",
+                      researcher_id="u", request="r"),
+            db, engine,
+        )
+        assert engine.replanned_with == ["use xtb instead of DFT"]
+        assert engine.rewound_to == "DISCOVER"
+        assert any("Revising" in m["content"] for m in db.messages)  # marker
+        # The run re-drove to the gate and posted a fresh plan for approval.
+        assert "approval_request" in [m["kind"] for m in db.messages]
+        assert db.status == "awaiting_approval"
 
     def test_feedback_reply_triggers_replan_and_a_fresh_card(self):
         # Reject → the gate asks what to change → the reply is folded into the

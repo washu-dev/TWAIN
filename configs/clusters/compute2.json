@@ -16,6 +16,9 @@
   "default_partition": "general-cpu",
   "gpu_partition": "general-gpu",
   "short_partition": "general-short",
+  "max_cpus_per_node": 64,
+  "max_gpus_per_node": 4,
+  "max_ram_gb": 900,
   "partitions": [
     { "name": "general-cpu", "max_minutes": 21600, "gpus": false },
     { "name": "general-gpu", "max_minutes": 21600, "gpus": true },

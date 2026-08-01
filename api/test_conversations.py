@@ -151,7 +151,7 @@ class TestRerun:
         response = client.post("/api/conversations/conv-1/rerun", json={"state": "CLARIFY"})
         assert response.status_code == 200
         assert response.json()["data"]["current_state"] == "CLARIFY"
-        mock_rerun.assert_called_once_with("conv-1", "user-1", "CLARIFY")
+        mock_rerun.assert_called_once_with("conv-1", "user-1", "CLARIFY", feedback=None)
 
     @patch("conversations.rerun_conversation",
            return_value={**CONVERSATION, "current_state": "PLAN"})
@@ -159,7 +159,21 @@ class TestRerun:
     def test_rerun_normalizes_state_case(self, _conv, mock_rerun):
         response = client.post("/api/conversations/conv-1/rerun", json={"state": "plan"})
         assert response.status_code == 200
-        mock_rerun.assert_called_once_with("conv-1", "user-1", "PLAN")
+        mock_rerun.assert_called_once_with("conv-1", "user-1", "PLAN", feedback=None)
+
+    @patch("conversations.rerun_conversation",
+           return_value={**CONVERSATION, "status": "running", "current_state": "DISCOVER"})
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_rerun_forwards_revision_feedback(self, _conv, mock_rerun):
+        # Mid-session revision: the researcher's "here's what to change" rides
+        # the rerun job so the runner folds it into the intent before replanning.
+        response = client.post(
+            "/api/conversations/conv-1/rerun",
+            json={"state": "DISCOVER", "feedback": "  use xtb instead of DFT  "},
+        )
+        assert response.status_code == 200
+        mock_rerun.assert_called_once_with(
+            "conv-1", "user-1", "DISCOVER", feedback="use xtb instead of DFT")
 
     @patch("conversations.get_conversation", return_value=CONVERSATION)
     def test_rerun_rejects_unknown_state(self, _conv):

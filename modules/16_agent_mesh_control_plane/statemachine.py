@@ -144,6 +144,56 @@ def _cluster_cannot_run(library: str) -> bool:
     return False
 
 
+# Formula tokens for counting atoms: an element symbol + optional multiplier.
+_FORMULA_TOKEN = re.compile(r"([A-Z][a-z]?)(\d*)")
+
+
+def _atom_count(system_descriptors) -> Optional[int]:
+    """Best-effort atom count of the run's target system, or None.
+
+    Prefers a resolved structure's explicit atom list (the exact simulation
+    cell); falls back to counting element multiplicities in the formula
+    (CaPt2 -> 3, C9H8O4 -> 21). Drives the suggested Slurm CPU request
+    (~1 CPU per atom), so a rough answer is fine and None just keeps the
+    generic default.
+    """
+    if not isinstance(system_descriptors, dict):
+        return None
+    structure = system_descriptors.get("structure")
+    if isinstance(structure, dict):
+        atoms = structure.get("atoms")
+        if isinstance(atoms, list) and atoms:
+            return len(atoms)
+    formula = system_descriptors.get("formula")
+    if not isinstance(formula, str):
+        crystal = system_descriptors.get("crystal")
+        formula = crystal.get("formula") if isinstance(crystal, dict) else None
+    if isinstance(formula, str) and formula.strip():
+        total = sum(int(count) if count else 1
+                    for symbol, count in _FORMULA_TOKEN.findall(formula) if symbol)
+        return total or None
+    return None
+
+
+def _cluster_node_limits() -> dict:
+    """Per-node resource ceilings of the configured Slurm cluster.
+
+    Read from the cluster profile (configs/clusters/<name>.json); empty when
+    the profile is missing or carries no limits. Used to cap the suggested
+    CPU request -- the approval card shows the same numbers to the researcher.
+    """
+    try:
+        from execution_adapter.cluster_profile import ClusterProfile
+        profile = ClusterProfile.load(os.environ.get("TWAIN_SLURM_CLUSTER", "compute2"))
+    except Exception:
+        return {}
+    return {k: v for k, v in {
+        "cpu_count": profile.max_cpus_per_node,
+        "gpu_count": profile.max_gpus_per_node,
+        "ram": profile.max_ram_gb,
+    }.items() if v is not None}
+
+
 # Stable lead-in for the "your best-fit engine can't run here" safety note.
 # The approval card keys off this exact prefix to offer a one-tap "request it
 # via GitHub issue" action, so change it in both places or not at all
@@ -1261,6 +1311,15 @@ class StateMachine:
                     f"(runner/README.md), and TWAIN will run it in the linux-64 container.")
         execution_plan.target_system = intent.get("system_descriptors") or None
         execution_plan.requested_property = requested_property
+        # Suggested CPU request: ~1 CPU per atom beats the flat default -- a
+        # 2-atom Si cell stops over-requesting and a big supercell gets real
+        # parallelism. Floored at 2 (k-point/domain parallel needs a partner)
+        # and capped at the cluster's per-node CPU count; still editable on
+        # the approval card, which shows the node ceilings alongside.
+        atoms = _atom_count(intent.get("system_descriptors"))
+        if atoms:
+            max_cpus = _cluster_node_limits().get("cpu_count") or 64
+            execution_plan.slurm_request.cpu_count = max(2, min(atoms, max_cpus))
         # A Materials Project retrieval is credential-gated: without MP_API_KEY
         # in the runner's environment the generated lookup script cannot run.
         # Say so ON THE APPROVAL CARD, before any build or queue time is spent.

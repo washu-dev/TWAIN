@@ -295,7 +295,10 @@ def request_termination(conversation_id: str) -> dict:
         conn.close()
 
 
-def rerun_conversation(conversation_id: str, user_id: str, target_state: str) -> dict | None:
+def rerun_conversation(
+    conversation_id: str, user_id: str, target_state: str,
+    feedback: str | None = None,
+) -> dict | None:
     """Re-run a finished conversation from an earlier pipeline stage.
 
     Requires the run to be finished: re-running an in-flight run would race the
@@ -306,6 +309,12 @@ def rerun_conversation(conversation_id: str, user_id: str, target_state: str) ->
     the run. All writes share one transaction. Returns the refreshed conversation;
     None when it doesn't exist or isn't the caller's; raises ValueError when the
     run is still active.
+
+    ``feedback`` is the mid-session revision path: the researcher's "here's what
+    to change" message (typed into the chat of a finished run) is recorded on
+    the transcript and carried on the job, where the runner folds it into the
+    run's intent before re-planning -- so the revised plan reflects it and
+    comes back for a fresh approval.
     """
     conn = get_connection()
     try:
@@ -346,6 +355,8 @@ def rerun_conversation(conversation_id: str, user_id: str, target_state: str) ->
         params = {"researcher_id": user_id, "request": request, "target_state": target_state}
         if max_cost is not None:
             params["max_cost"] = max_cost
+        if feedback:
+            params["feedback"] = feedback
 
         cursor.execute(
             """
@@ -356,12 +367,27 @@ def rerun_conversation(conversation_id: str, user_id: str, target_state: str) ->
             (target_state, conversation_id),
         )
         conversation = cursor.fetchone()
+        if feedback:
+            # Show the researcher's revision request on the transcript, then the
+            # marker; the runner folds the feedback into the intent (marked
+            # consumed there so it can't be mistaken for a gate answer later).
+            cursor.execute(
+                """
+                INSERT INTO messages (conversation_id, role, content, kind, state)
+                VALUES (%s, 'user', %s, 'chat', 'consumed');
+                """,
+                (conversation_id, feedback),
+            )
+        marker = (
+            f"↩︎ Revising the run with your feedback (re-planning from {target_state})."
+            if feedback else f"↩︎ Re-running from {target_state}."
+        )
         cursor.execute(
             """
             INSERT INTO messages (conversation_id, role, content, kind, state)
             VALUES (%s, 'assistant', %s, 'chat', %s);
             """,
-            (conversation_id, f"↩︎ Re-running from {target_state}.", target_state),
+            (conversation_id, marker, target_state),
         )
         cursor.execute(
             "INSERT INTO jobs (session_id, kind, params) VALUES (%s, 'rerun', %s);",
