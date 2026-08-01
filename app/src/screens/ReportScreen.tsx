@@ -53,7 +53,16 @@ export const ReportScreen: React.FC = () => {
         <Text style={styles.title} numberOfLines={1}>
           {report?.conversation?.title ?? 'Report'}
         </Text>
-        <View style={{ width: 48 }} />
+        {/* Always reachable path back to the run's chat — from here the user
+            can re-run from a step or ask for changes. Works even when the
+            report was opened directly (Browse / URL), where Back can't. */}
+        <TouchableOpacity
+          onPress={() => router.push({ pathname: '/chat', params: { id: id as string } })}
+          accessibilityRole="button"
+          accessibilityLabel="Open the conversation for this run"
+        >
+          <Text style={styles.openChat}>Chat ›</Text>
+        </TouchableOpacity>
       </View>
 
       {loading && <ActivityIndicator style={{ marginTop: Spacing.five }} color={C.washuRed} />}
@@ -378,6 +387,7 @@ const styles = StyleSheet.create({
     backgroundColor: C.washuRed,
   },
   back: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', width: 48 },
+  openChat: { color: '#FFFFFF', fontSize: 15, fontWeight: '600', width: 48, textAlign: 'right' },
   title: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
   scroll: { flex: 1 },
   content: { padding: Spacing.three, gap: Spacing.three },

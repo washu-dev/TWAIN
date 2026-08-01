@@ -211,6 +211,9 @@ class RerunConversation(BaseModel):
     # Pipeline stage to restart from (e.g. "CLARIFY"). Validated against
     # convo.RERUNNABLE_STATES in the handler.
     state: str
+    # Optional mid-session revision: the researcher's "here's what to change"
+    # message, folded into the run's intent before re-planning.
+    feedback: str | None = None
 
 
 def _require_own_conversation(conversation_id: str, user: dict) -> dict:
@@ -304,7 +307,10 @@ async def rerun_conversation(conversation_id: str, body: RerunConversation, user
             detail=f"state must be one of: {', '.join(convo.RERUNNABLE_STATES)}",
         )
     try:
-        conversation = convo.rerun_conversation(conversation_id, user["id"], state)
+        conversation = convo.rerun_conversation(
+            conversation_id, user["id"], state,
+            feedback=(body.feedback or "").strip() or None,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if conversation is None:

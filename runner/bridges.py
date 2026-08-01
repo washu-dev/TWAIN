@@ -29,6 +29,8 @@ since. Once the pipeline moves on and asks something else, an older answer is no
 longer pending. See :func:`_fresh_reply`.
 """
 import json
+from functools import lru_cache
+from pathlib import Path
 
 from runner.db import RunnerDB
 from runner.notifications import default_notifier
@@ -280,7 +282,38 @@ def _plan_summary(
             "cpu_count": "cores",
             "gpu_count": "GPUs",
         }
+        limits = _cluster_limits(summary["slurm_cluster"])
+        if limits:
+            summary["slurm_limits"] = limits
     return summary
+
+
+@lru_cache(maxsize=4)
+def _cluster_limits(cluster: str) -> dict | None:
+    """Per-node resource ceilings for the editable Slurm fields, or None.
+
+    Read straight from the cluster profile JSON (configs/clusters/<name>.json,
+    same units as the plan's slurm_request: cores / GPUs / GB / hours) so the
+    approval card can label each field with how far it can go. ``max_time`` is
+    the longest partition wall limit. Missing profile or fields -> None/absent;
+    the card simply shows no maximum then.
+    """
+    path = (Path(__file__).resolve().parents[1]
+            / "configs" / "clusters" / f"{cluster}.json")
+    try:
+        profile = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    minutes = [p.get("max_minutes") for p in profile.get("partitions") or []
+               if isinstance(p, dict) and isinstance(p.get("max_minutes"), (int, float))]
+    limits = {
+        "cpu_count": profile.get("max_cpus_per_node"),
+        "gpu_count": profile.get("max_gpus_per_node"),
+        "ram": profile.get("max_ram_gb"),
+        "max_time": round(max(minutes) / 60.0, 2) if minutes else None,
+    }
+    limits = {k: v for k, v in limits.items() if v is not None}
+    return limits or None
 
 
 class PgEventSink:

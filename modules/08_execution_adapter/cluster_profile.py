@@ -81,6 +81,13 @@ class ClusterProfile:
     default_partition: Optional[str] = None
     gpu_partition: Optional[str] = None
     short_partition: Optional[str] = None
+    # Per-node resource ceilings (from `sinfo -e -o '%P %c %m %G'` on the live
+    # cluster) for the partitions jobs actually land on. Surfaced on the
+    # approval card so the researcher knows how far the editable Slurm request
+    # can go; None = unknown (the card then shows no maximum).
+    max_cpus_per_node: Optional[int] = None
+    max_gpus_per_node: Optional[int] = None
+    max_ram_gb: Optional[int] = None
     description: str = ""
 
     def __post_init__(self):
@@ -116,6 +123,10 @@ class ClusterProfile:
             raise ValueError("ClusterProfile gpu_type must be a str or None")
         if self.envs_root is not None and type(self.envs_root) is not str:
             raise ValueError("ClusterProfile envs_root must be a str or None")
+        for attr in ("max_cpus_per_node", "max_gpus_per_node", "max_ram_gb"):
+            value = getattr(self, attr)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError(f"ClusterProfile {attr} must be a positive int or None")
 
         # Named partitions, when set, must actually exist in the partition list.
         for attr in ("default_partition", "gpu_partition", "short_partition"):

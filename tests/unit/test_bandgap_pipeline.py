@@ -244,6 +244,29 @@ class TestPlanningSelectsCalculator:
         assert not any("not installed" in n and "GPAW" in n
                        for n in plan["safety_notes"])
 
+    def test_cpu_request_scales_with_system_size(self, tmp_path):
+        # Suggested Slurm CPUs follow ~1 CPU per atom instead of a flat 8:
+        # silicon's formula counts 1 atom, floored to 2 (k-point/domain
+        # parallelism needs a partner). Still editable on the approval card.
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path)
+        m.decompose()
+        m.discover()
+        with patch.object(SM, "current_platform", return_value="linux-64"):
+            m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert plan["slurm_request"]["cpu_count"] == 2
+
+    def test_cpu_request_counts_formula_atoms(self, tmp_path):
+        # Aspirin (C9H8O4) counts 21 atoms -> 21 suggested CPUs.
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path, ASPIRIN_INTENT)
+        m.decompose()
+        m.discover()
+        m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert plan["slurm_request"]["cpu_count"] == 21
+
     def test_no_engine_note_when_everything_is_runnable(self, tmp_path):
         # Off-Slurm (or nothing vetoed): the note never appears.
         m = _machine(tmp_path)
