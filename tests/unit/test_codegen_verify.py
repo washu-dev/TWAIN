@@ -329,6 +329,47 @@ class TestBandpathLiteralGate:
         assert not any(d.source == "bandpath-literal" for d in diags)
 
 
+class TestScfGridBandgapGate:
+    """bandgap() must read a fixed-density band-path pass, not the SCF grid.
+
+    Fingerprint of the "silicon gap = 0.81 eV" run: `bandgap(calc)` right
+    after the ground state searches extrema only among the SCF grid's
+    k-points, but silicon's CBM sits at ~0.85 of Gamma->X -- between grid
+    points -- so the gap comes out ~0.2 eV too large while the script runs
+    cleanly.
+    """
+
+    def test_bandgap_on_scf_calc_alone_is_an_error(self):
+        script = (
+            "from ase.dft.bandgap import bandgap\n"
+            "def gap(calc):\n"
+            "    g, p1, p2 = bandgap(calc, direct=False)\n"
+            "    return g\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert any(d.source == "bandgap-on-scf-grid" and d.severity == "error"
+                   for d in diags)
+
+    def test_fixed_density_band_path_two_step_is_clean(self):
+        # The recommended method: non-SCF pass along the standard path, then
+        # extrema from that calculation.
+        script = (
+            "from ase.dft.bandgap import bandgap\n"
+            "def gap(atoms, calc):\n"
+            "    path = atoms.cell.bandpath(npoints=200, pbc=atoms.pbc)\n"
+            "    bs_calc = calc.fixed_density(kpts=path, symmetry='off')\n"
+            "    g, p1, p2 = bandgap(bs_calc, direct=False)\n"
+            "    return g\n"
+        )
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "bandgap-on-scf-grid" for d in diags)
+
+    def test_script_without_bandgap_calls_is_unaffected(self):
+        script = "def total_energy(atoms):\n    return atoms.get_potential_energy()\n"
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not any(d.source == "bandgap-on-scf-grid" for d in diags)
+
+
 class TestDftBudgetGate:
     def test_pw_cutoff_above_500_is_an_error(self):
         # Fingerprint of Slurm job 2472788: PW(600) + 12x12x12 k-points on a

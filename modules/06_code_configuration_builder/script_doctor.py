@@ -427,6 +427,20 @@ class ScriptDoctor:
                 "pbc=atoms.pbc)` with NO path string so ASE picks the standard "
                 "path for the detected lattice, or build the string only from "
                 "letters in `atoms.cell.bandpath().special_points`.", line))
+        for line in _scf_grid_bandgap_calls(source):
+            diags.append(Diagnostic(
+                "bandgap-on-scf-grid", "error",
+                "reads the fundamental band gap straight off the SCF k-grid "
+                "(`bandgap(calc)` after the ground state): band extrema "
+                "generally lie BETWEEN grid points (silicon's CBM is at ~0.85 "
+                "of Gamma->X, which no uniform grid samples), so the gap comes "
+                "out too large -- the script runs cleanly and the number is "
+                "silently wrong. Converge the density on the SCF grid, then "
+                "run a NON-self-consistent fixed-density pass along the "
+                "standard path and take extrema from THAT: `bs_calc = "
+                "calc.fixed_density(kpts=atoms.cell.bandpath(npoints=200, "
+                "pbc=atoms.pbc), symmetry='off')` then "
+                "`bandgap(bs_calc, direct=False)`.", line))
         diags.extend(self._primitive_cell_diagnostics(source))
         diags.extend(self._dft_budget_diagnostics(source))
         return diags
@@ -871,6 +885,45 @@ def _hardcoded_bandpath_calls(source: str) -> List[int]:
             and isinstance(kw.value.value, str)
             for kw in node.keywords)
         if literal:
+            lines.append(node.lineno)
+    return lines
+
+
+def _scf_grid_bandgap_calls(source: str) -> List[int]:
+    """Lines reading the fundamental gap straight off the SCF k-grid.
+
+    The silent-wrong-answer behind the "silicon gap = 0.81 eV" run: calling
+    ``ase.dft.bandgap.bandgap(calc)`` right after the ground state searches for
+    band extrema only among the SCF grid's k-points -- but extrema generally
+    lie BETWEEN grid points (silicon's CBM sits at ~0.85 of Gamma->X, which no
+    8x8x8 Monkhorst-Pack grid samples), so the reported gap is the minimum over
+    sampled points and comes out too large (0.81 eV vs the true ~0.6 eV PBE
+    value). The script runs cleanly, so only this gate catches it.
+
+    Flags every ``bandgap(...)`` call when the script has no non-SCF band-path
+    machinery at all -- no ``fixed_density`` (GPAW's fixed-density second pass)
+    and no ``bandpath`` call anywhere. Presence of either is taken as the
+    two-step method being used; which calc object each call reads is beyond a
+    static check.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    has_path_machinery = any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("fixed_density", "bandpath")
+        for node in ast.walk(tree))
+    if has_path_machinery:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name == "bandgap":
             lines.append(node.lineno)
     return lines
 

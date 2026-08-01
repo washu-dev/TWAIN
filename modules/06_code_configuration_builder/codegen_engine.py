@@ -405,6 +405,14 @@ actual cell, and a wrong guess raises KeyError after the whole SCF has already b
 paid for. Use the cell's own default path (e.g. \
 `atoms.cell.bandpath(npoints=..., pbc=atoms.pbc)` with no path string), or build the \
 path only from letters present in `atoms.cell.bandpath().special_points`.
+- For a fundamental band gap, NEVER read it off the SCF k-grid (`bandgap(calc)` \
+right after the ground state): band extrema generally lie BETWEEN grid points \
+(silicon's CBM sits at ~0.85 of Gamma->X, which no uniform grid samples), so the \
+gap comes out too large while the script runs cleanly. Two-step method: converge \
+the density on the SCF grid, then run a non-self-consistent fixed-density pass \
+along the standard path and take the extrema from THAT calculation -- e.g. \
+`bs_calc = calc.fixed_density(kpts=atoms.cell.bandpath(npoints=200, \
+pbc=atoms.pbc), symmetry='off')` then `bandgap(bs_calc, direct=False)`.
 - Make output MPI-safe: when the calculator can run under MPI, every rank executes the \
 script, so write files and print through rank-0-only helpers (e.g. \
 `ase.parallel.parprint` and `ase.parallel.paropen`, or an explicit \
