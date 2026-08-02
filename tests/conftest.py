@@ -37,7 +37,6 @@ _PACKAGE_ALIASES = {
     "self_correction": MODULES / "12_self_correction_reflection",
     "provenance_memory": MODULES / "14_provenance_memory",
     "code_gen": MODULES / "06_code_configuration_builder",
-    "execution_adapter": MODULES / "08_execution_adapter",
 }
 
 # Dirs whose modules import siblings by bare name (e.g. `from states import State`). Feel free to add more directories here.

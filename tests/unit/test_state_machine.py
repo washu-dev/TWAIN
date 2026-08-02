@@ -805,6 +805,9 @@ class TestRewind:
             "script": "/x/run_bundle/main.py",          # BUILD
             "repair_report": "/x/repair_report.json",   # REPAIR (folded into BUILD)
             "execution_result": "/x/execution_result.json",  # EXECUTE
+            "normalized_result": "/x/normalized_result.json",  # INTERPRET
+            "validation_report": "/x/validation_report.json",  # VALIDATE
+            "correction_plan": "/x/correction_plan.json",  # CORRECT (folded into VALIDATE)
         })
         m.current_state = State.TERMINATE
         return m
@@ -841,11 +844,33 @@ class TestRewind:
         # needed to re-run only the calculation).
         assert m.context.plan_approved is True
 
+    def test_rewind_to_interpret_drops_the_epic6_artifacts(self, tmp_path):
+        """A re-interpretation must not read the previous pass's normalized
+        result, validation report, or correction plan -- they are re-derived."""
+        m = self._seed_full_run(tmp_path)
+        m.rewind_to(State.INTERPRET)
+        assert m.context.artifacts["execution_result"] == "/x/execution_result.json"
+        for stale in ("normalized_result", "validation_report", "correction_plan"):
+            assert stale not in m.context.artifacts
+        assert m.context.validation_result is None
+
     def test_rewind_resets_clarify_round_counter(self, tmp_path):
         m = self._seed_full_run(tmp_path)
         m._clarify_rounds = 3
         m.rewind_to(State.DISCOVER)
         assert m._clarify_rounds == 0
+
+    def test_rewind_resets_the_correction_loop_counter(self, tmp_path):
+        """A rerun that inherited the finished run's iteration count would hit
+        the cap immediately and refuse to correct anything."""
+        m = self._seed_full_run(tmp_path)
+        m._rerun.iteration = m._rerun.policy.max_iterations
+        m._rerun.record_metric(0.4)
+        m.rewind_to(State.EXECUTE)
+        assert m._rerun.iteration == 0
+        assert m._rerun.metric_history == []
+        assert m._rerun.decide(expected_benefit=1.0,
+                               estimated_cost=0.0).should_rerun is True
 
     def test_rewind_persists_new_state_to_storage(self, tmp_path):
         m = self._seed_full_run(tmp_path)
