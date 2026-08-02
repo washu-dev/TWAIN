@@ -35,6 +35,7 @@ failing the run.
 import json
 import logging
 import os
+import urllib.parse
 import urllib.request
 
 logger = logging.getLogger("twain.runner.notify")
@@ -85,9 +86,21 @@ def notification_allowed(prefs: dict | None, reason: str) -> bool:
 
 
 def _resume_hint(session_id: str) -> str:
-    """A link back to the conversation, if the app URL is configured."""
-    base = os.getenv("TWAIN_APP_URL", "").rstrip("/")
-    return f" Open {base}/conversations/{session_id} to continue." if base else ""
+    """A link back to the conversation, if the app URL is configured.
+
+    The base is normalized to its ORIGIN (scheme + host): operators tend to
+    paste the URL of whatever page they had open (".../dashboard") into
+    ``TWAIN_APP_URL``, and the ``/conversations/<id>`` deep link only exists at
+    the site root -- a leftover page path made every email link land on
+    expo-router's "Unmatched route" screen.
+    """
+    base = os.getenv("TWAIN_APP_URL", "").strip().rstrip("/")
+    if not base:
+        return ""
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme and parsed.netloc:
+        base = f"{parsed.scheme}://{parsed.netloc}"
+    return f" Open {base}/conversations/{session_id} to continue."
 
 
 def _short_id(session_id: str) -> str:

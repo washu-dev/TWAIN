@@ -46,6 +46,27 @@ class TestCompose:
         assert "abcd1234" in subject
 
 
+# ── _resume_hint: the email's "return to your run" link ───────────────────────
+class TestResumeHint:
+    def test_link_appends_the_conversation_path(self, monkeypatch):
+        monkeypatch.setenv("TWAIN_APP_URL", "https://app.example.edu")
+        assert "https://app.example.edu/conversations/conv-1" in \
+            notifications._resume_hint("conv-1")
+
+    def test_page_path_in_app_url_is_stripped_to_the_origin(self, monkeypatch):
+        # Operators paste whatever page they had open (".../dashboard") into
+        # TWAIN_APP_URL; the deep link only exists at the site root, and the
+        # leftover path made every email link hit "Unmatched route".
+        monkeypatch.setenv("TWAIN_APP_URL", "https://app.example.edu/dashboard")
+        hint = notifications._resume_hint("conv-1")
+        assert "https://app.example.edu/conversations/conv-1" in hint
+        assert "/dashboard" not in hint
+
+    def test_unset_app_url_means_no_hint(self, monkeypatch):
+        monkeypatch.delenv("TWAIN_APP_URL", raising=False)
+        assert notifications._resume_hint("conv-1") == ""
+
+
 class FakeContactDB:
     """Minimal RunnerDB stand-in: the owner_contact + run_title lookups the notifier uses."""
 
