@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import math
@@ -21,7 +22,7 @@ from result_interpreter.result_package import ResultPackage
 from result_interpreter.extractors.base import (ParsedField, ParsedOutput,
                                                 ParserError, get_parser)
 from result_interpreter.metric_normalizer import NormalizedResult, normalize
-from cross_validation.acceptance_judge import cross_validate
+from cross_validation.acceptance_judge import AcceptanceThresholds, cross_validate
 from cross_validation.baseline_validator import Prediction
 from self_correction.failure_classifier import RunEvidence
 from self_correction.reflection import reflect
@@ -299,6 +300,40 @@ def _json_safe(value):
     return value
 
 
+# Verdict ranking: a run is only as good as its worst check.
+_SEVERITY = {"accepted": 0, "needs_review": 1, "rejected": 2}
+
+
+def _as_float(cell):
+    """``cell`` as a finite float, or None when it is not a number."""
+    try:
+        value = float(str(cell).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _split_header_unit(header: str):
+    """``"logS (mol/L)"`` -> ``("logS", "mol/L")``; ``"logS"`` -> ``("logS", None)``."""
+    match = re.match(r"^\s*(.*?)\s*[\(\[]\s*([^\)\]]+?)\s*[\)\]]\s*$", str(header))
+    if match:
+        return match.group(1), match.group(2)
+    return str(header).strip(), None
+
+
+def _stamp_sample_count(normalized, parsed, primary_name: str):
+    """Record how many samples the primary metric was aggregated from.
+
+    One number that is the mean of many rows is a different claim from one
+    number that was measured once, and validation has to tell them apart before
+    comparing against a single reference value.
+    """
+    field = parsed.get(primary_name)
+    if field is not None:
+        normalized.metadata["primary_samples"] = len(field.values)
+    return normalized
+
+
 def _finite_fields(parsed):
     """``parsed`` with non-finite samples dropped, or None if nothing survives.
 
@@ -397,7 +432,12 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.VALIDATE, State.CORRECT): lambda c: c.validation_result == "needs_review",
     (State.ACCEPT, State.TERMINATE): lambda c: True,
     (State.REPLAN, State.PLAN): lambda c: True,
-    (State.CORRECT, State.BUILD): lambda c: c.plan_approved,
+    # Unguarded for the same reason as PLAN->BUILD above: crossing it only
+    # *reaches* BUILD. A correction that switches the method withdraws the
+    # approval (the researcher approved a different plan), and the run parks at
+    # BUILD for a fresh decision -- BUILD->REPAIR is still the gate that stops
+    # anything being built or executed unapproved.
+    (State.CORRECT, State.BUILD): lambda c: True,
 }
 
 
@@ -2271,8 +2311,16 @@ class StateMachine:
             logger.info("[interpret] no numeric metrics could be extracted from "
                         "the run output; delivering without validation.")
             return State.VALIDATE
+        payload = normalized.to_dict()
+        # A benchmark table's per-row identities, so VALIDATE can compare each
+        # system against its OWN literature value instead of grading the mean.
+        entities = self._per_entity_rows(result)
+        if entities:
+            payload["entities"] = entities
+            logger.info("[interpret] %d systems in the result table",
+                        len(entities))
         self.context.artifacts["normalized_result"] = self._write_artifact(
-            "normalized_result", normalized.to_dict())
+            "normalized_result", payload)
         metric = normalized.primary_metric
         unit = f" {metric.unit}" if metric.unit else ""
         logger.info("[interpret] %s = %.6g%s +/- %.2g (%s)", metric.name,
@@ -2405,12 +2453,66 @@ class StateMachine:
                 continue
             primary = self._pick_metric(finite.field_names(), hints)
             if primary is not None:
-                return normalize(finite, primary=primary)
+                return _stamp_sample_count(normalize(finite, primary=primary),
+                                           finite, primary)
             if first_fallback is None:
                 first_fallback = finite
         if hints or first_fallback is None:
             return None
-        return normalize(first_fallback)
+        return _stamp_sample_count(normalize(first_fallback), first_fallback,
+                                   first_fallback.fields[0].name)
+
+    # Header names that identify WHICH system a row is about, most specific
+    # first. A benchmark table pairs one of these with the metric column.
+    _ENTITY_COLUMNS = ("molecule", "compound", "name", "system", "material",
+                       "formula", "smiles", "id")
+
+    def _per_entity_rows(self, result: dict) -> list:
+        """One (entity, metric, value) row per system in a benchmark table.
+
+        A run over many molecules writes a row per molecule, but the normalizer
+        collapses the metric column to a single aggregate -- and comparing that
+        mean against ONE molecule's literature value can land inside the
+        tolerance and report a false ACCEPT for a benchmark that is nowhere near
+        right. The identifiers live in a text column, which the numeric CSV
+        parser necessarily drops, so the table is re-read here to recover the
+        per-row identity. Empty when the output has no identifier column or only
+        one row (the ordinary single-system run).
+        """
+        import csv as _csv
+        rows = []
+        for parser_name, content in self._output_candidates(result):
+            if parser_name != "csv":
+                continue
+            try:
+                reader = _csv.DictReader(io.StringIO(content))
+                records = list(reader)
+            except (_csv.Error, ValueError):
+                continue
+            if len(records) < 2 or not reader.fieldnames:
+                continue
+            headers = {str(h).strip().lower(): h for h in reader.fieldnames if h}
+            entity_col = next((headers[c] for c in self._ENTITY_COLUMNS
+                               if c in headers), None)
+            if entity_col is None:
+                continue
+            numeric = [h for h in reader.fieldnames
+                       if h and h != entity_col
+                       and all(_as_float(r.get(h)) is not None for r in records)]
+            if not numeric:
+                continue
+            metric_col = self._pick_metric(numeric, self._metric_hints()) or numeric[0]
+            for record in records:
+                entity = str(record.get(entity_col) or "").strip()
+                value = _as_float(record.get(metric_col))
+                if entity and value is not None and math.isfinite(value):
+                    rows.append({"entity": entity,
+                                 "metric": _split_header_unit(metric_col)[0],
+                                 "unit": _split_header_unit(metric_col)[1],
+                                 "value": value})
+            if rows:
+                return rows
+        return rows
 
     def validate(self) -> State:
         """Cross-validate the interpreted result and route on the verdict (6.2).
@@ -2504,15 +2606,34 @@ class StateMachine:
                 and not isinstance(m.get("value"), bool)
                 and math.isfinite(m["value"])]
 
+    def _baseline_property(self, name) -> str:
+        """A metric name as the baseline DB spells the property."""
+        text = str(name)
+        return self._BASELINE_PROPERTY_ALIASES.get(text.strip().lower(), text)
+
     def _predictions(self, normalized: dict, molecule: str) -> list:
-        """Adapt normalized metrics into baseline-DB predictions."""
+        """Adapt the interpreted result into baseline-DB predictions.
+
+        A benchmark table becomes one prediction per system, each matched to its
+        own literature value -- which is also what lets the validator compute
+        RMSE and a correlation, both undefined for a single point.
+        """
+        entities = normalized.get("entities")
+        if isinstance(entities, list) and entities:
+            return [
+                Prediction(molecule=str(row["entity"]),
+                           property=self._baseline_property(row.get("metric")),
+                           value=float(row["value"]), unit=row.get("unit"))
+                for row in entities
+                if isinstance(row, dict) and row.get("entity")
+                and isinstance(row.get("value"), (int, float))
+            ]
         predictions = []
         for m in self._normalized_metrics(normalized):
-            name = str(m["name"])
-            prop = self._BASELINE_PROPERTY_ALIASES.get(name.strip().lower(), name)
             predictions.append(Prediction(
-                molecule=molecule, property=prop, value=float(m["value"]),
-                unit=m.get("unit"), uncertainty=m.get("uncertainty")))
+                molecule=molecule, property=self._baseline_property(m["name"]),
+                value=float(m["value"]), unit=m.get("unit"),
+                uncertainty=m.get("uncertainty")))
         return predictions
 
     def _cross_validate(self, normalized: dict) -> str:
@@ -2527,21 +2648,28 @@ class StateMachine:
         """
         molecule = self._run_molecule()
         predictions = self._predictions(normalized, molecule) if molecule else []
+        thresholds = self._acceptance_thresholds()
         result, verdict, report = cross_validate(
             predictions,
+            thresholds=thresholds,
             report_id=f"val-{self.run_id}",
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
         artifact = asdict(report)
         artifact["rationale"] = verdict.rationale
         artifact["cross_validation"] = result.to_dict()
+        artifact["thresholds"] = asdict(thresholds)
         status = verdict.status
         gap = result.mean_relative_error
         # How ``gap`` should be read downstream: a fraction of the literature
         # value, or a multiple of the tolerance the researcher set. correct()
         # needs the distinction to turn it into a calibrated-range signal.
         basis = "relative_error"
-        if not result.comparisons:
+        ungraded = self._ungradable_aggregate(normalized, result)
+        if ungraded is not None:
+            status, artifact["rationale"], gap = ungraded, self._AGGREGATE_NOTE, None
+            artifact["acceptance_status"] = status
+        elif not result.comparisons:
             # No literature baseline covers this molecule/property: judge
             # against the plan's own acceptance criteria instead of parking
             # every novel system in needs_review.
@@ -2549,6 +2677,18 @@ class StateMachine:
             artifact["acceptance_status"] = status
             artifact["rationale"] = rationale
             basis = "tolerance_multiples"
+        else:
+            # A matching baseline must not silently retire the researcher's own
+            # acceptance criteria: both are checked and the stricter wins, so a
+            # result that agrees with the literature but misses the tolerance
+            # they asked for is not reported as a clean pass.
+            own_status, own_rationale, _ = self._acceptance_fallback(normalized)
+            if _SEVERITY.get(own_status, 0) > _SEVERITY.get(status, 0):
+                status = own_status
+                artifact["acceptance_status"] = status
+                artifact["rationale"] = (
+                    f"{artifact['rationale']} Held to the run's own acceptance "
+                    f"criteria, which are stricter: {own_rationale}")
         artifact["gap"] = gap
         artifact["gap_basis"] = basis
         logger.info("[validate] %s -- %s", status, artifact["rationale"])
@@ -2557,6 +2697,65 @@ class StateMachine:
         self.context.artifacts["validation_report"] = self._write_artifact(
             "validation_report", artifact)
         return final
+
+    _AGGREGATE_NOTE = (
+        "This run produced results for several systems, but the output does not "
+        "say which row belongs to which system, so the values were averaged into "
+        "one number. A mean cannot be checked against a single system's "
+        "literature value -- agreement here would not mean the run is right. "
+        "Add an identifying column (molecule, formula or SMILES) to the results "
+        "table and re-run to have each system validated against its own "
+        "reference."
+    )
+
+    def _ungradable_aggregate(self, normalized: dict, result) -> Optional[str]:
+        """``"needs_review"`` when the result is a mean nothing can be checked
+        against, else None.
+
+        Averaging a benchmark's predictions and comparing that against ONE
+        molecule's literature value can land inside the tolerance and report a
+        confident ACCEPT for a run that is nowhere near right -- errors in
+        opposite directions cancel. When the rows carry identities each is
+        compared to its own reference (no aggregate is involved); when they do
+        not, the honest answer is that this cannot be graded.
+        """
+        if normalized.get("entities"):
+            return None
+        samples = (normalized.get("metadata") or {}).get("primary_samples")
+        if not isinstance(samples, int) or samples < 2:
+            return None
+        if not result.comparisons:
+            return None
+        return "needs_review"
+
+    def _acceptance_thresholds(self) -> AcceptanceThresholds:
+        """The agreement thresholds to grade against.
+
+        Defaults are Story 6.2's 15% / 30%, overridable per deployment via
+        ``TWAIN_ACCEPT_BELOW`` / ``TWAIN_REVIEW_BELOW`` (fractions, not
+        percentages) and per run via ``acceptance_thresholds`` on the execution
+        plan, so a researcher whose property needs a looser or tighter bar is
+        not stuck with the built-in one. A malformed value falls back to the
+        default rather than failing the run.
+        """
+        plan = (self._load_artifact("execution_plan") or {})
+        configured = plan.get("acceptance_thresholds")
+        configured = configured if isinstance(configured, dict) else {}
+        defaults = AcceptanceThresholds()
+        values = {}
+        for field_name, env in (("accept_below", "TWAIN_ACCEPT_BELOW"),
+                                ("review_below", "TWAIN_REVIEW_BELOW")):
+            raw = configured.get(field_name, os.environ.get(env))
+            try:
+                values[field_name] = float(raw)
+            except (TypeError, ValueError):
+                values[field_name] = getattr(defaults, field_name)
+        try:
+            return AcceptanceThresholds(**values)
+        except ValueError:  # e.g. accept_below > review_below
+            logger.info("[validate] ignoring incoherent acceptance thresholds "
+                        "%s; using the defaults.", values)
+            return defaults
 
     def _acceptance_fallback(self, normalized: dict):
         """Judge against the plan's acceptance criteria (target +/- tolerance).
@@ -2575,7 +2774,6 @@ class StateMachine:
         by_name = {str(m["name"]): m for m in metrics}
 
         checked, worst_status, worst_gap = [], "accepted", None
-        severity = {"accepted": 0, "needs_review": 1, "rejected": 2}
         for criterion in criteria:
             match = self._pick_metric(list(by_name), [criterion["metric_name"]])
             if match is None:
@@ -2596,7 +2794,7 @@ class StateMachine:
             checked.append(
                 f"{criterion['metric_name']}: {value:.4g} vs target {target:.4g} "
                 f"+/- {tolerance:.4g} -> {status}")
-            if severity[status] > severity[worst_status]:
+            if _SEVERITY[status] > _SEVERITY[worst_status]:
                 worst_status = status
             rel_miss = miss / tolerance if tolerance else miss
             worst_gap = rel_miss if worst_gap is None else max(worst_gap, rel_miss)
@@ -2654,6 +2852,28 @@ class StateMachine:
         """
         if status == "accepted":
             return status
+        # A rerun is only worth its compute if something about the next run
+        # would actually differ. Corrections are applied by switching to an
+        # untried method; with none left, the rebuild reproduces this result
+        # exactly and the loop then calls the 0% change "converged" -- a full
+        # calculation spent to learn nothing. Stop now and say why. Requires
+        # the discovery slate to know: absent it, "no candidate" means "cannot
+        # tell", and the iteration cap remains the bound.
+        if (self.context.artifacts.get("discovery")
+                and self._next_discovery_candidate() is None):
+            artifact["rerun"] = {
+                "decision": "stop",
+                "stop_reason": "no_untried_method",
+                "reason": ("Every method discovery found has been tried, so "
+                           "rerunning would repeat this result unchanged."),
+                "iteration": self._rerun.iteration,
+                "final_verdict": status,
+                "disposition": "delivered_for_researcher_review",
+            }
+            logger.info("[validate] no untried method remains; delivering the "
+                        "result flagged for review (verdict on record: %s).",
+                        status)
+            return "accepted"
         if gap is not None:
             self._rerun.record_metric(gap)
         # There is no per-iteration cost model yet, so the cost-benefit arm of
@@ -2751,6 +2971,7 @@ class StateMachine:
                 confidence=reflection.diagnosis.confidence,
             )
         plan["diagnosis_detail"] = reflection.diagnosis.to_dict()
+        plan["applied"] = self._apply_correction(plan)
         self.context.artifacts["correction_plan"] = self._write_artifact(
             "correction_plan", plan)
         proposals = ", ".join(
@@ -2762,6 +2983,54 @@ class StateMachine:
                     reflection.diagnosis.confidence, proposals,
                     self._rerun.iteration, self._rerun.policy.max_iterations)
         return State.BUILD
+
+    def _apply_correction(self, correction_plan: dict) -> list:
+        """Apply the proposed corrections to the plan; return what was applied.
+
+        A correction that is only *recorded* changes nothing: the rebuild runs
+        the same method on the same inputs, reproduces the same number, and the
+        loop then reads the 0% change as convergence -- a whole calculation
+        spent to confirm the previous one. Only ``switch_model`` is applied
+        here, because it is the one lever whose effect is unambiguous, and the
+        stale bundle is dropped so BUILD regenerates against the new method.
+
+        Switching the method makes this a different plan from the one the
+        researcher approved, so the approval is withdrawn and the run returns
+        to the gate (the orchestrator parks on entering BUILD unapproved).
+        """
+        applied = []
+        plan = self._load_artifact("execution_plan")
+        if not plan:
+            return applied
+        for correction in correction_plan.get("proposed_corrections") or []:
+            if not isinstance(correction, dict):
+                continue
+            if correction.get("modification_type") != "switch_model":
+                continue
+            candidate = correction.get("new_value")
+            if not isinstance(candidate, str) or not candidate.strip():
+                continue  # e.g. {"needs": "alternative_candidate"} -- nothing to apply
+            method = dict(plan.get("selected_method") or {})
+            previous = method.get("tool_name")
+            if str(previous or "").strip().lower() == candidate.strip().lower():
+                continue
+            method["tool_name"] = candidate
+            # The version/import belonged to the tool being replaced.
+            for stale in ("tool_version", "calculator", "calculator_import"):
+                method.pop(stale, None)
+            plan["selected_method"] = method
+            self.context.artifacts["execution_plan"] = self._write_artifact(
+                "execution_plan", plan)
+            for stale in ("run_bundle", "script", "repair_report"):
+                self.context.artifacts.pop(stale, None)
+            self.context.plan_approved = False
+            applied.append({"modification_type": "switch_model",
+                            "from": previous, "to": candidate})
+            logger.info("[correct] switched the plan from %s to %s; the new "
+                        "plan needs approval before it runs.",
+                        previous, candidate)
+            break
+        return applied
 
     def _run_evidence(self, report: dict, gap: Optional[float]) -> RunEvidence:
         """Collect the diagnostic signals this pipeline can honestly report.

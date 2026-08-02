@@ -656,3 +656,160 @@ def test_stdout_json_prefers_the_last_object_and_backtracks(machine, tmp_path):
     for indent in (None, 0, 2):
         assert SM.StateMachine._stdout_json(
             json.dumps([{"logS": -1.7}], indent=indent)) is None
+
+
+# -- Epic 6 gaps: benchmark grading, applied corrections, thresholds -----------
+
+_BENCHMARK_CSV = (
+    "molecule,logS\n"
+    "aspirin,-1.72\n"       # each agrees with its own literature value
+    "caffeine,-0.87\n"
+)
+
+# Two molecules whose errors cancel: the mean is near aspirin's -1.72 while
+# neither prediction is anywhere near its own reference.
+_CANCELLING_CSV = (
+    "molecule,logS\n"
+    "aspirin,-4.72\n"
+    "caffeine,1.28\n"
+)
+
+
+def _seed_csv(machine, tmp_path, text, name="results.csv"):
+    outdir = tmp_path / "exec_testrun"
+    outdir.mkdir(exist_ok=True)
+    (outdir / name).write_text(text)
+    _seed_execution(machine, tmp_path, stdout="done", artifacts_dir=str(outdir))
+    return outdir
+
+
+def test_benchmark_rows_are_graded_per_molecule(machine, tmp_path):
+    """Each system must be compared against its OWN literature value, which is
+    also what makes RMSE and a correlation computable."""
+    _seed_planning(machine, tmp_path)
+    _seed_csv(machine, tmp_path, _BENCHMARK_CSV)
+    machine.interpret()
+
+    normalized = machine._load_artifact("normalized_result")
+    assert [r["entity"] for r in normalized["entities"]] == ["aspirin", "caffeine"]
+
+    assert machine.validate() == State.ACCEPT
+    cross = machine._load_artifact("validation_report")["cross_validation"]
+    assert {c["molecule"] for c in cross["comparisons"]} == {"aspirin", "caffeine"}
+    assert cross["rmse"] is not None      # undefined for a single point
+    assert cross["pearson"] is not None
+
+
+def test_a_benchmark_whose_errors_cancel_is_not_accepted(machine, tmp_path):
+    """Regression: averaging the column hid two badly wrong predictions.
+
+    -4.72 and 1.28 average to -1.72, exactly aspirin's literature value, so the
+    aggregate scored ~0% relative error and the run was ACCEPTED while both
+    molecules were wildly off.
+    """
+    _seed_planning(machine, tmp_path)
+    _seed_csv(machine, tmp_path, _CANCELLING_CSV)
+    machine.interpret()
+
+    assert machine.validate() != State.ACCEPT
+    report = machine._load_artifact("validation_report")
+    assert report["acceptance_status"] == "rejected"
+
+
+def test_an_unidentifiable_aggregate_is_not_graded(machine, tmp_path):
+    """With no identifier column the rows cannot be matched to references, so
+    the mean must not be graded against one molecule's literature value."""
+    _seed_planning(machine, tmp_path)
+    _seed_csv(machine, tmp_path, "logS\n-4.72\n1.28\n")
+    machine.interpret()
+    normalized = machine._load_artifact("normalized_result")
+    assert "entities" not in normalized
+    assert normalized["metadata"]["primary_samples"] == 2
+
+    machine.validate()
+    report = machine._load_artifact("validation_report")
+    assert report["acceptance_status"] == "needs_review"
+    assert "does not say which row belongs to which system" in report["rationale"]
+
+
+def test_a_single_measurement_is_still_graded_normally(machine, tmp_path):
+    """The aggregate guard must not fire on an ordinary one-system run."""
+    _seed_planning(machine, tmp_path)
+    _seed_normalized(machine, tmp_path, -1.70)
+    assert machine.validate() == State.ACCEPT
+    assert machine._load_artifact("validation_report")["acceptance_status"] == "accepted"
+
+
+def test_the_researchers_tolerance_survives_a_matching_baseline(machine, tmp_path):
+    """A result can agree with the literature yet miss the tolerance the
+    researcher asked for; the stricter of the two verdicts must win."""
+    strict = dict(PLAN, acceptance_metrics=[
+        {"metric_name": "logS", "target_value": -1.72, "tolerance": 0.001}])
+    _seed(machine, tmp_path, "intent_spec", INTENT)
+    _seed(machine, tmp_path, "execution_plan", strict)
+    _seed_normalized(machine, tmp_path, -1.80)  # ~4.7% off: baseline says accept
+
+    assert machine.validate() != State.ACCEPT
+    report = machine._load_artifact("validation_report")
+    assert report["acceptance_status"] == "rejected"
+    assert "stricter" in report["rationale"]
+
+
+def test_acceptance_thresholds_are_configurable(machine, tmp_path, monkeypatch):
+    """Story 6.2 requires the thresholds be adjustable, not hardcoded 15/30."""
+    _seed_planning(machine, tmp_path)
+    _seed_normalized(machine, tmp_path, -1.80)  # ~4.7% off: accepted by default
+
+    monkeypatch.setenv("TWAIN_ACCEPT_BELOW", "0.01")   # 1% -- much stricter
+    monkeypatch.setenv("TWAIN_REVIEW_BELOW", "0.02")
+    machine.validate()
+    report = machine._load_artifact("validation_report")
+    assert report["thresholds"]["accept_below"] == 0.01
+    assert report["acceptance_status"] == "rejected"
+
+
+def test_incoherent_thresholds_fall_back_to_the_defaults(machine, tmp_path, monkeypatch):
+    monkeypatch.setenv("TWAIN_ACCEPT_BELOW", "0.9")   # accept > review: invalid
+    monkeypatch.setenv("TWAIN_REVIEW_BELOW", "0.1")
+    _seed_planning(machine, tmp_path)
+    _seed_normalized(machine, tmp_path, -1.70)
+    machine.validate()
+    assert machine._load_artifact("validation_report")["thresholds"] == {
+        "accept_below": 0.15, "review_below": 0.30}
+
+
+def test_a_correction_actually_changes_the_plan(machine, tmp_path):
+    """Regression: corrections were recorded but never applied, so the rerun
+    reproduced the identical result and the loop called that convergence."""
+    _seed_planning(machine, tmp_path)
+    _seed_validation_report(machine, tmp_path)
+    _seed(machine, tmp_path, "discovery", {"candidates": [
+        {"rank": 1, "id": "rdkit", "name": "RDKit"},
+        {"rank": 2, "id": "pymatgen", "name": "Pymatgen"},
+    ]})
+    machine.context.plan_approved = True
+    machine.context.artifacts["run_bundle"] = "/stale/bundle"
+
+    assert machine.correct() == State.BUILD
+    plan = machine._load_artifact("execution_plan")
+    assert plan["selected_method"]["tool_name"] == "Pymatgen"   # actually applied
+    assert "tool_version" not in plan["selected_method"]        # belonged to RDKit
+    assert "run_bundle" not in machine.context.artifacts        # rebuilt, not reused
+    # the researcher approved a plan naming RDKit; this one names Pymatgen
+    assert machine.context.plan_approved is False
+    assert machine._load_artifact("correction_plan")["applied"][0]["to"] == "Pymatgen"
+
+
+def test_no_rerun_is_spent_when_no_untried_method_remains(machine, tmp_path):
+    """With every discovered method already tried, a rerun would repeat the
+    same result; the loop must stop rather than burn a calculation."""
+    _seed_planning(machine, tmp_path)
+    _seed(machine, tmp_path, "discovery", {"candidates": [
+        {"rank": 1, "id": "rdkit", "name": "RDKit"},   # the tool already in use
+    ]})
+    _seed_normalized(machine, tmp_path, -2.05)
+
+    assert machine.validate() == State.ACCEPT  # delivered, not looped
+    report = machine._load_artifact("validation_report")
+    assert report["rerun"]["stop_reason"] == "no_untried_method"
+    assert report["acceptance_status"] == "needs_review"
