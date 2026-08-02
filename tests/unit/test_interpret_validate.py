@@ -778,38 +778,38 @@ def test_incoherent_thresholds_fall_back_to_the_defaults(machine, tmp_path, monk
         "accept_below": 0.15, "review_below": 0.30}
 
 
-def test_a_correction_actually_changes_the_plan(machine, tmp_path):
-    """Regression: corrections were recorded but never applied, so the rerun
-    reproduced the identical result and the loop called that convergence."""
-    _seed_planning(machine, tmp_path)
+def test_correct_never_rewrites_the_selected_method(machine, tmp_path):
+    """Regression: a live run died in EXECUTE because CORRECT re-selected the tool.
+
+    An aqueous-solubility run planned around the xtb calculator was corrected to
+    the next-ranked discovery candidate (Pymatgen) by editing
+    selected_method.tool_name. That silently re-templated the bundle as a crystal
+    structure analysis, which cannot compute a solubility -- the smoke test died
+    with "no structure to analyse". Method selection is PLAN's job: it grounds
+    the choice against the calculator registry and picks a matching template, so
+    CORRECT must record the proposal, not act on it.
+    """
+    calculator_plan = dict(PLAN, selected_method={
+        "tool_name": "xtb", "calculator": "xtb",
+        "calculator_import": "xtb", "libraries": ["xtb", "RDKit", "ASE"]})
+    _seed(machine, tmp_path, "intent_spec", INTENT)
+    _seed(machine, tmp_path, "execution_plan", calculator_plan)
     _seed_validation_report(machine, tmp_path)
     _seed(machine, tmp_path, "discovery", {"candidates": [
-        {"rank": 1, "id": "rdkit", "name": "RDKit"},
+        {"rank": 1, "id": "xtb", "name": "xtb"},
         {"rank": 2, "id": "pymatgen", "name": "Pymatgen"},
     ]})
     machine.context.plan_approved = True
-    machine.context.artifacts["run_bundle"] = "/stale/bundle"
+    machine.context.artifacts["run_bundle"] = "/built/bundle"
 
     assert machine.correct() == State.BUILD
-    plan = machine._load_artifact("execution_plan")
-    assert plan["selected_method"]["tool_name"] == "Pymatgen"   # actually applied
-    assert "tool_version" not in plan["selected_method"]        # belonged to RDKit
-    assert "run_bundle" not in machine.context.artifacts        # rebuilt, not reused
-    # the researcher approved a plan naming RDKit; this one names Pymatgen
-    assert machine.context.plan_approved is False
-    assert machine._load_artifact("correction_plan")["applied"][0]["to"] == "Pymatgen"
+    # the plan the researcher approved is untouched, in every part
+    assert machine._load_artifact("execution_plan")["selected_method"] == \
+        calculator_plan["selected_method"]
+    assert machine.context.artifacts["run_bundle"] == "/built/bundle"
+    assert machine.context.plan_approved is True   # CORRECT->BUILD is guarded on it
 
-
-def test_no_rerun_is_spent_when_no_untried_method_remains(machine, tmp_path):
-    """With every discovered method already tried, a rerun would repeat the
-    same result; the loop must stop rather than burn a calculation."""
-    _seed_planning(machine, tmp_path)
-    _seed(machine, tmp_path, "discovery", {"candidates": [
-        {"rank": 1, "id": "rdkit", "name": "RDKit"},   # the tool already in use
-    ]})
-    _seed_normalized(machine, tmp_path, -2.05)
-
-    assert machine.validate() == State.ACCEPT  # delivered, not looped
-    report = machine._load_artifact("validation_report")
-    assert report["rerun"]["stop_reason"] == "no_untried_method"
-    assert report["acceptance_status"] == "needs_review"
+    plan = machine._load_artifact("correction_plan")
+    assert plan["application"]["applied"] == []
+    assert plan["application"]["requires_replanning"] == ["switch_model"]
+    assert "PLAN's job" in plan["application"]["note"]

@@ -432,12 +432,7 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.VALIDATE, State.CORRECT): lambda c: c.validation_result == "needs_review",
     (State.ACCEPT, State.TERMINATE): lambda c: True,
     (State.REPLAN, State.PLAN): lambda c: True,
-    # Unguarded for the same reason as PLAN->BUILD above: crossing it only
-    # *reaches* BUILD. A correction that switches the method withdraws the
-    # approval (the researcher approved a different plan), and the run parks at
-    # BUILD for a fresh decision -- BUILD->REPAIR is still the gate that stops
-    # anything being built or executed unapproved.
-    (State.CORRECT, State.BUILD): lambda c: True,
+    (State.CORRECT, State.BUILD): lambda c: c.plan_approved,
 }
 
 
@@ -2852,28 +2847,6 @@ class StateMachine:
         """
         if status == "accepted":
             return status
-        # A rerun is only worth its compute if something about the next run
-        # would actually differ. Corrections are applied by switching to an
-        # untried method; with none left, the rebuild reproduces this result
-        # exactly and the loop then calls the 0% change "converged" -- a full
-        # calculation spent to learn nothing. Stop now and say why. Requires
-        # the discovery slate to know: absent it, "no candidate" means "cannot
-        # tell", and the iteration cap remains the bound.
-        if (self.context.artifacts.get("discovery")
-                and self._next_discovery_candidate() is None):
-            artifact["rerun"] = {
-                "decision": "stop",
-                "stop_reason": "no_untried_method",
-                "reason": ("Every method discovery found has been tried, so "
-                           "rerunning would repeat this result unchanged."),
-                "iteration": self._rerun.iteration,
-                "final_verdict": status,
-                "disposition": "delivered_for_researcher_review",
-            }
-            logger.info("[validate] no untried method remains; delivering the "
-                        "result flagged for review (verdict on record: %s).",
-                        status)
-            return "accepted"
         if gap is not None:
             self._rerun.record_metric(gap)
         # There is no per-iteration cost model yet, so the cost-benefit arm of
@@ -2971,7 +2944,7 @@ class StateMachine:
                 confidence=reflection.diagnosis.confidence,
             )
         plan["diagnosis_detail"] = reflection.diagnosis.to_dict()
-        plan["applied"] = self._apply_correction(plan)
+        plan["application"] = self._correction_applicability(plan)
         self.context.artifacts["correction_plan"] = self._write_artifact(
             "correction_plan", plan)
         proposals = ", ".join(
@@ -2984,53 +2957,40 @@ class StateMachine:
                     self._rerun.iteration, self._rerun.policy.max_iterations)
         return State.BUILD
 
-    def _apply_correction(self, correction_plan: dict) -> list:
-        """Apply the proposed corrections to the plan; return what was applied.
+    def _correction_applicability(self, correction_plan: dict) -> dict:
+        """Why the proposed corrections are recorded rather than applied here.
 
-        A correction that is only *recorded* changes nothing: the rebuild runs
-        the same method on the same inputs, reproduces the same number, and the
-        loop then reads the 0% change as convergence -- a whole calculation
-        spent to confirm the previous one. Only ``switch_model`` is applied
-        here, because it is the one lever whose effect is unambiguous, and the
-        stale bundle is dropped so BUILD regenerates against the new method.
+        CORRECT deliberately does NOT re-select the method. Method selection is
+        PLAN's job, and it is not a field edit: PLAN grounds a choice against
+        the calculator registry, picks the toolset and the code template to
+        match, and checks the engine is installable here. Hand-writing
+        ``selected_method.tool_name`` skips all of that and yields a plan whose
+        pieces disagree -- swapping an xtb solubility run to the next-ranked
+        candidate (Pymatgen) silently re-templated it as a crystal structure
+        analysis, which cannot compute a solubility and died in its smoke test
+        with "no structure to analyse". A candidate is ranked against the
+        objective; that does not mean it can compute the requested property.
 
-        Switching the method makes this a different plan from the one the
-        researcher approved, so the approval is withdrawn and the run returns
-        to the gate (the orchestrator parks on entering BUILD unapproved).
+        So a correction needing a different method is out of scope here and says
+        so. Re-running from the planning stage is the route to a new method. The
+        rebuild is still worth its pass on its own: BUILD re-synthesizes the
+        script, and a fresh sample can fix a subtly wrong calculation without
+        changing the method at all.
         """
-        applied = []
-        plan = self._load_artifact("execution_plan")
-        if not plan:
-            return applied
-        for correction in correction_plan.get("proposed_corrections") or []:
-            if not isinstance(correction, dict):
-                continue
-            if correction.get("modification_type") != "switch_model":
-                continue
-            candidate = correction.get("new_value")
-            if not isinstance(candidate, str) or not candidate.strip():
-                continue  # e.g. {"needs": "alternative_candidate"} -- nothing to apply
-            method = dict(plan.get("selected_method") or {})
-            previous = method.get("tool_name")
-            if str(previous or "").strip().lower() == candidate.strip().lower():
-                continue
-            method["tool_name"] = candidate
-            # The version/import belonged to the tool being replaced.
-            for stale in ("tool_version", "calculator", "calculator_import"):
-                method.pop(stale, None)
-            plan["selected_method"] = method
-            self.context.artifacts["execution_plan"] = self._write_artifact(
-                "execution_plan", plan)
-            for stale in ("run_bundle", "script", "repair_report"):
-                self.context.artifacts.pop(stale, None)
-            self.context.plan_approved = False
-            applied.append({"modification_type": "switch_model",
-                            "from": previous, "to": candidate})
-            logger.info("[correct] switched the plan from %s to %s; the new "
-                        "plan needs approval before it runs.",
-                        previous, candidate)
-            break
-        return applied
+        needs_replan = sorted({
+            str(c.get("modification_type"))
+            for c in correction_plan.get("proposed_corrections") or []
+            if isinstance(c, dict) and c.get("modification_type") == "switch_model"
+        })
+        return {
+            "applied": [],
+            "requires_replanning": needs_replan,
+            "note": ("Recorded, not applied: changing the method is PLAN's job. "
+                     "Editing the selected tool here would leave the template, "
+                     "calculator and toolset disagreeing. Re-run from the "
+                     "planning stage to act on this.") if needs_replan
+                    else "No proposed correction needed a change outside BUILD.",
+        }
 
     def _run_evidence(self, report: dict, gap: Optional[float]) -> RunEvidence:
         """Collect the diagnostic signals this pipeline can honestly report.

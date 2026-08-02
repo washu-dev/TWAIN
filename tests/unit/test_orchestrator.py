@@ -311,13 +311,8 @@ class TestErrorHandling:
         assert env["notes"], "researcher must be notified"
 
     def test_correction_loop_is_bounded(self, env):
-        # correct() is stubbed as well as validate(): the real handler applies a
-        # method switch and withdraws the plan approval, which parks the run at
-        # the approval gate (see TestApprovalGate). This test is about the
-        # orchestrator's own backstop, so the loop is kept running here.
         ctx = dict(HAPPY, validation_result="needs_review")
-        sm = make_sm(env["tmp"], context=ctx, validate=lambda: State.CORRECT,
-                     correct=lambda: State.BUILD)
+        sm = make_sm(env["tmp"], context=ctx, validate=lambda: State.CORRECT)
         o = build(env, "correct", sm=sm, max_corrections=2)
         assert o.run() == RunStatus.ERROR
         assert o.run_session.correct_count == 3
