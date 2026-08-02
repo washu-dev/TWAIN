@@ -117,8 +117,14 @@ class Orchestrator:
         provenance: bool = True,
         step_timeouts: bool = True,
         step_retries: int = 0,
-        max_replans: int = 3,
-        max_corrections: int = 3,
+        # Backstops against a state machine that will not stop looping -- NOT
+        # the intended limit. The state machine's own rerun controller bounds
+        # the correction loop gracefully (it delivers the flagged result for
+        # review); these must stay above its budget, or they abort the run
+        # first and the researcher loses the result and the rationale instead
+        # of receiving them flagged. See StateMachine._gate_rerun.
+        max_replans: int = 6,
+        max_corrections: int = 6,
         max_transitions: int = 100,
         budget_tracker: Optional[BudgetTracker] = None,
         run_max_cost: float = 1.0,
@@ -531,6 +537,19 @@ class Orchestrator:
                 "from": state.name, "to": entered.name,
                 "budget": self.run_budget.to_dict(),
             })
+
+            # 4a) park at the approval gate. Entering BUILD without an approved
+            #     plan means the run needs the researcher: on a fresh run the
+            #     driver already stops here via ``until``, but a replan re-enters
+            #     BUILD mid-leg with a *new* plan and a cleared approval. Pausing
+            #     hands it back to the driver to post a fresh approval card;
+            #     driving on would run build() and then trip the BUILD->REPAIR
+            #     guard, failing a run that is merely waiting on a human.
+            if entered == State.BUILD and not self.sm.context.plan_approved:
+                self.run_session.set_status(RunStatus.PAUSED)
+                self._checkpoint()
+                self._publish("run.paused", {"state": entered.name})
+                return RunStatus.PAUSED
 
             # 4b) post-step budget gate. The pre-step gate (step 0) only sees the
             #     cost *before* this stage ran; re-check now that this stage's LLM

@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 from intake.intent_spec import IntentSpec
 from result_interpreter.result_package import ResultPackage
-from result_interpreter.extractors.base import ParserError, get_parser
+from result_interpreter.extractors.base import (ParsedField, ParsedOutput,
+                                                ParserError, get_parser)
 from result_interpreter.metric_normalizer import NormalizedResult, normalize
 from cross_validation.acceptance_judge import cross_validate
 from cross_validation.baseline_validator import Prediction
@@ -278,6 +279,46 @@ def _runtime_traceback(result) -> Optional[str]:
 
 
 _INTENT_MAP_CACHE: Optional[dict] = None
+
+
+def _json_safe(value):
+    """Replace non-finite floats with None so an artifact is valid JSON.
+
+    ``json.dump`` writes bare ``NaN``/``Infinity`` by default, which strict
+    readers reject: Starlette serializes API responses with ``allow_nan=False``,
+    so a single NaN anywhere in an artifact turns the whole report endpoint into
+    a 500 rather than degrading one field. Null is the honest JSON spelling of
+    "this number does not exist".
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def _finite_fields(parsed):
+    """``parsed`` with non-finite samples dropped, or None if nothing survives.
+
+    A NaN is the absence of a measurement, not a measurement -- but it arrives
+    mixed in with real ones (one diverged row in a 200-row prediction CSV, a
+    diagnostic column that is NaN beside a perfectly good primary metric).
+    Discarding the whole field, or the whole output, would throw away every
+    valid sample alongside it, so only the non-finite points are dropped and a
+    field is removed only when it has no finite sample left at all.
+    """
+    kept = []
+    for fld in parsed.fields:
+        values = [v for v in fld.values if math.isfinite(v)]
+        if not values:
+            continue
+        kept.append(ParsedField(name=fld.name, values=values,
+                                unit=fld.unit, source=fld.source))
+    if not kept:
+        return None
+    return ParsedOutput(fields=kept, metadata=dict(parsed.metadata))
 
 
 def _intent_map() -> dict:
@@ -556,7 +597,7 @@ class StateMachine:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         path = self.artifacts_dir / f"{name}_{self.run_id}.json"
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
+            json.dump(_json_safe(data), f, indent=2, default=str)
         return str(path)
 
     _WELCOME = (
@@ -2210,6 +2251,11 @@ class StateMachine:
         no-op through to VALIDATE, which then routes on whatever verdict the
         context was seeded with.
         """
+        # INTERPRET owns ``normalized_result``, so it must clear the previous
+        # pass's before deciding: on a correction loop whose rerun was skipped
+        # or deferred, leaving it in place lets VALIDATE re-grade the earlier
+        # run's numbers and report them as this run's result.
+        self.context.artifacts.pop("normalized_result", None)
         result = self._load_artifact("execution_result")
         if not result or not result.get("succeeded"):
             return State.VALIDATE
@@ -2276,22 +2322,31 @@ class StateMachine:
         pretty-prints (``json.dumps(..., indent=2)``) spans lines, so the tail
         starting at the last line-initial ``{`` is tried as a block too."""
         text = stdout or ""
-        for line in reversed(text.splitlines()):
-            line = line.strip()
-            if line.startswith("{") and line.endswith("}"):
-                try:
-                    json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                return line
-        start = text.rfind("\n{")
-        if start == -1 and text.lstrip().startswith("{"):
-            start = text.find("{") - 1
-        if start != -1:
+        # A top-level array is not a metric summary, and its elements sit at
+        # line-initial '{' when it is pretty-printed -- without this, one of
+        # them would be picked up as though it were the summary.
+        if text.lstrip().startswith("["):
+            return None
+        # Every offset a JSON object could start at: index 0 (a summary that IS
+        # the whole of stdout, which the generic template prints) plus every
+        # line-initial '{'.
+        offsets = set()
+        if text.lstrip().startswith("{"):
+            offsets.add(text.index("{"))
+        found = text.find("\n{")
+        while found != -1:
+            offsets.add(found + 1)
+            found = text.find("\n{", found + 1)
+        # Latest first: the summary is printed last, and raw_decode stops at the
+        # end of the object, so trailing text on the same line is harmless.
+        # Trying earlier candidates in turn means a later line that only looks
+        # like JSON -- a Python dict repr, a truncated object -- cannot bury a
+        # valid summary printed above it.
+        for offset in sorted(offsets, reverse=True):
             try:
-                obj, _ = json.JSONDecoder().raw_decode(text[start + 1:])
+                obj, _ = json.JSONDecoder().raw_decode(text[offset:])
             except json.JSONDecodeError:
-                return None
+                continue
             if isinstance(obj, dict):
                 return json.dumps(obj)
         return None
@@ -2339,23 +2394,23 @@ class StateMachine:
         quantity, whatever the field is called.
         """
         hints = self._metric_hints()
-        first_fallback = None  # (parsed, primary) when the researcher named no metric
+        first_fallback = None  # parsed output when the researcher named no metric
         for parser_name, content in self._output_candidates(result):
             try:
                 parsed = get_parser(parser_name).parse(content)
             except (ParserError, ValueError):
                 continue
-            finite = [f.name for f in parsed.fields
-                      if all(math.isfinite(v) for v in f.values)]
-            primary = self._pick_metric(finite, hints)
+            finite = _finite_fields(parsed)
+            if finite is None:
+                continue
+            primary = self._pick_metric(finite.field_names(), hints)
             if primary is not None:
-                return normalize(parsed, primary=primary)
-            if first_fallback is None and finite:
-                first_fallback = (parsed, finite[0])
+                return normalize(finite, primary=primary)
+            if first_fallback is None:
+                first_fallback = finite
         if hints or first_fallback is None:
             return None
-        parsed, primary = first_fallback
-        return normalize(parsed, primary=primary)
+        return normalize(first_fallback)
 
     def validate(self) -> State:
         """Cross-validate the interpreted result and route on the verdict (6.2).
@@ -2382,12 +2437,51 @@ class StateMachine:
         normalized = self._load_artifact("normalized_result")
         if normalized is not None:
             self.context.validation_result = self._cross_validate(normalized)
+        elif self.context.artifacts.get("validation_report"):
+            self.context.validation_result = self._stop_unproductive_loop()
         verdict = self.context.validation_result
         if verdict == "rejected":
+            # A replan re-runs method selection and can land on a different
+            # tool than the one the researcher approved. Building and executing
+            # that on the original approval would spend their compute on a plan
+            # they never saw, so the new plan must go back through the gate.
+            self.context.plan_approved = False
             return State.REPLAN
         if verdict == "needs_review":
             return State.CORRECT
         return State.ACCEPT
+
+    def _stop_unproductive_loop(self) -> str:
+        """End a correction loop whose rerun produced nothing to grade.
+
+        The bounded gate lives in ``_cross_validate``, which only runs when
+        there IS a result. If a correction pass comes back empty -- the rebuilt
+        run was deferred or skipped, so INTERPRET had nothing to normalize --
+        routing on the previous pass's verdict sends the run straight back to
+        CORRECT/REPLAN without ever advancing the iteration counter meant to
+        stop it, and it loops until the orchestrator's backstop fails the run.
+
+        Nothing new was measured, so another identical round cannot help.
+        Deliver what the last graded pass found, flagged, and record why. Only
+        reachable once a report exists, so a seeded or first-pass verdict (the
+        runner seeds one to satisfy the stub guards) is never overridden.
+        """
+        report = self._load_artifact("validation_report") or {}
+        verdict = report.get("acceptance_status") or self.context.validation_result
+        report["rerun"] = {
+            "decision": "stop",
+            "stop_reason": "no_new_result",
+            "reason": ("The corrected run produced no result to grade, so "
+                       "another identical round cannot improve on it."),
+            "final_verdict": verdict,
+            "disposition": "delivered_for_researcher_review",
+        }
+        self.context.artifacts["validation_report"] = self._write_artifact(
+            "validation_report", report)
+        logger.info("[validate] the corrected run produced nothing to grade; "
+                    "delivering the previous result flagged for review "
+                    "(verdict on record: %s).", verdict)
+        return "accepted"
 
     def _run_molecule(self) -> Optional[str]:
         """The molecule/material this run is about (baseline DB lookup key)."""
@@ -2443,6 +2537,10 @@ class StateMachine:
         artifact["cross_validation"] = result.to_dict()
         status = verdict.status
         gap = result.mean_relative_error
+        # How ``gap`` should be read downstream: a fraction of the literature
+        # value, or a multiple of the tolerance the researcher set. correct()
+        # needs the distinction to turn it into a calibrated-range signal.
+        basis = "relative_error"
         if not result.comparisons:
             # No literature baseline covers this molecule/property: judge
             # against the plan's own acceptance criteria instead of parking
@@ -2450,7 +2548,11 @@ class StateMachine:
             status, rationale, gap = self._acceptance_fallback(normalized)
             artifact["acceptance_status"] = status
             artifact["rationale"] = rationale
+            basis = "tolerance_multiples"
+        artifact["gap"] = gap
+        artifact["gap_basis"] = basis
         logger.info("[validate] %s -- %s", status, artifact["rationale"])
+        self._restore_rerun_budget()
         final = self._gate_rerun(status, gap, artifact)
         self.context.artifacts["validation_report"] = self._write_artifact(
             "validation_report", artifact)
@@ -2509,6 +2611,37 @@ class StateMachine:
                 "baseline): " + "; ".join(checked),
                 worst_gap)
 
+    def _restore_rerun_budget(self) -> None:
+        """Rehydrate the correction budget from the last validation report.
+
+        ``_rerun`` lives in memory, but a run does NOT stay in one process: the
+        runner drives it in slices, and a rejected result now hands control back
+        for a fresh approval, so the next pass is a new StateMachine with the
+        counter at zero. Left that way the iteration cap could never be reached
+        and the loop would run until the orchestrator's backstop failed the run
+        -- the exact abort the cap exists to replace. The previous report is the
+        durable record (it is written every pass and rehydrated with the other
+        artifacts), so the budget is restored from it.
+
+        Only restores when this process has not counted anything yet, so a
+        multi-pass run inside one process keeps its live counter.
+        """
+        if self._rerun.iteration or self._rerun.metric_history:
+            return
+        previous = (self._load_artifact("validation_report") or {}).get("rerun")
+        if not isinstance(previous, dict):
+            return
+        iteration = previous.get("iteration")
+        if isinstance(iteration, int) and iteration > 0:
+            self._rerun.iteration = min(iteration, self._rerun.policy.max_iterations)
+        history = previous.get("metric_history")
+        if isinstance(history, list):
+            self._rerun.metric_history = [
+                float(v) for v in history
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v)
+            ]
+
     def _gate_rerun(self, status: str, gap: Optional[float], artifact: dict) -> str:
         """Bound the correction loop (Story 6.3) and return the routing verdict.
 
@@ -2535,12 +2668,17 @@ class StateMachine:
             artifact["rerun"] = {
                 "decision": "rerun",
                 "iteration": self._rerun.iteration,
+                # Carried so the next slice -- a different process, with a fresh
+                # controller -- can restore the budget instead of starting over.
+                "metric_history": list(self._rerun.metric_history),
                 "reason": decision.reason,
             }
             return status
         artifact["rerun"] = {
             "decision": "stop",
             "stop_reason": decision.stop_reason,
+            "iteration": self._rerun.iteration,
+            "metric_history": list(self._rerun.metric_history),
             "reason": decision.reason,
             "final_verdict": status,
             "disposition": "delivered_for_researcher_review",
@@ -2566,7 +2704,9 @@ class StateMachine:
         """
         report = self._load_artifact("validation_report") or {}
         cross = report.get("cross_validation") or {}
-        gap = cross.get("mean_relative_error")
+        gap = report.get("gap")
+        if gap is None:
+            gap = cross.get("mean_relative_error")
         context = CorrectionContext(
             validation_report_id=str((report.get("metadata") or {}).get("ID") or ""),
             iteration_count=self._rerun.iteration,
@@ -2577,7 +2717,7 @@ class StateMachine:
             plan_id=f"corr-{self.run_id}",
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
-        reflection = reflect(RunEvidence(relative_error=gap), context)
+        reflection = reflect(self._run_evidence(report, gap), context)
         plan = reflection.correction_plan
         if plan is None:
             # UNKNOWN failure mode -- no strategy owns it. Record an honest
@@ -2622,6 +2762,35 @@ class StateMachine:
                     reflection.diagnosis.confidence, proposals,
                     self._rerun.iteration, self._rerun.policy.max_iterations)
         return State.BUILD
+
+    def _run_evidence(self, report: dict, gap: Optional[float]) -> RunEvidence:
+        """Collect the diagnostic signals this pipeline can honestly report.
+
+        The classifier grades four failure modes off specific signals -- a
+        rejected input, activations outside the model's calibrated range, a
+        diverged or plateaued loss curve, an out-of-distribution score -- and
+        this pipeline currently collects none of them: EXECUTE keeps stdout,
+        an exit code and resource metrics, and VALIDATE knows only how far the
+        answer sits from a reference. So the diagnosis is UNKNOWN, and correct()
+        records the generic next-candidate plan instead of a mode-specific one.
+
+        That is deliberate. It is tempting to synthesize ``activation_magnitude``
+        by dividing the gap by the run's reported uncertainty, but that
+        uncertainty is a numerical-precision estimate (repeat spread, or a flat
+        10% fallback), not the accuracy range the method claims for this class
+        of system. Dividing by it makes the diagnosis a function of how tightly
+        the script converged and how it printed its number, so the same physics
+        would read as "model mismatch" or "unknown" depending on output
+        formatting -- a confident, authoritative, wrong answer. Reaching CORRECT
+        at all means the verdict was *marginal*, which is weak evidence for any
+        specific mode. Feeding the real signals in belongs with the code that
+        can observe them (input validation at BUILD, convergence traces from
+        EXECUTE); until then, saying "undetermined" is the honest report.
+
+        ``relative_error`` is passed through for the record even though no
+        scorer reads it, so the evidence object shows what was known.
+        """
+        return RunEvidence(relative_error=gap)
 
     def _next_discovery_candidate(self) -> Optional[str]:
         """The highest-ranked discovery candidate that isn't the tool just used."""

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -345,13 +346,30 @@ async def stream_conversation(conversation_id: str, user: CurrentUser):
     )
 
 
+def _json_safe(value):
+    """Replace non-finite floats with None so the response can be serialized.
+
+    ``json.loads`` accepts the bare ``NaN``/``Infinity`` that a generated script
+    prints and that older artifacts still contain, but Starlette renders
+    responses with ``allow_nan=False``. Letting one through does not degrade a
+    field -- it raises during rendering and turns the whole report into a 500.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 def _load_json_artifact(conversation_id: str, name: str):
     """Fetch an artifact and parse it as JSON, or return raw text / None."""
     artifact = convo.get_artifact(conversation_id, name)
     if artifact is None:
         return None
     try:
-        return json.loads(artifact["content"])
+        return _json_safe(json.loads(artifact["content"]))
     except (ValueError, TypeError):
         return artifact["content"]
 
@@ -378,7 +396,8 @@ def _extract_result(execution_result):
                 continue
             if isinstance(parsed, dict):
                 result = parsed
-    return result
+    # json.loads accepts bare NaN; the response renderer does not.
+    return _json_safe(result)
 
 
 @app.get("/api/conversations/{conversation_id}/report")

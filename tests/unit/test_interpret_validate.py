@@ -421,3 +421,238 @@ def test_correct_noops_gracefully_without_report(machine):
     """Even with nothing seeded, correct() records a plan and returns BUILD."""
     assert machine.correct() == State.BUILD
     assert machine._load_artifact("correction_plan") is not None
+
+
+# -- regressions found in review ----------------------------------------------
+
+def test_interpret_reads_a_summary_that_is_the_whole_of_stdout(machine, tmp_path):
+    """Regression: the pretty-printed summary starting at offset 0.
+
+    The generic template does json.dump(summary, sys.stdout, indent=2) with
+    nothing printed before it, so the object begins at index 0. Treating -1 as
+    "no brace found" discarded exactly that case and failed a run that had
+    computed the right answer.
+    """
+    _seed_planning(machine, tmp_path)
+    _seed_execution(machine, tmp_path,
+                    stdout='{\n  "logS": -1.70,\n  "n_molecules": 1\n}')
+    assert machine.interpret() == State.VALIDATE
+    normalized = machine._load_artifact("normalized_result")
+    assert normalized["primary_metric"]["name"] == "logS"
+    assert normalized["primary_metric"]["value"] == pytest.approx(-1.70)
+
+
+def test_interpret_keeps_a_series_that_has_one_bad_row(machine, tmp_path):
+    """Regression: one diverged row must not discard 199 good predictions."""
+    outdir = tmp_path / "exec_testrun"
+    outdir.mkdir()
+    rows = "\n".join(["-1.60"] * 199)
+    (outdir / "predictions.csv").write_text(f"logS\n{rows}\nnan\n")
+    _seed_planning(machine, tmp_path)
+    _seed_execution(machine, tmp_path, stdout="done", artifacts_dir=str(outdir))
+
+    assert machine.interpret() == State.VALIDATE
+    normalized = machine._load_artifact("normalized_result")
+    assert normalized["primary_metric"]["value"] == pytest.approx(-1.60)
+
+
+def test_written_artifacts_are_strict_json(machine, tmp_path):
+    """Regression: a bare NaN in an artifact 500s the whole report endpoint.
+
+    json.dump emits NaN by default; Starlette serializes with allow_nan=False,
+    so one non-finite diagnostic took down the entire report page rather than
+    degrading a single field.
+    """
+    path = machine._write_artifact("probe", {
+        "finite": 1.5,
+        "not_a_number": float("nan"),
+        "infinite": float("inf"),
+        "nested": {"values": [1.0, float("nan")]},
+    })
+    raw = Path(path).read_text()
+    assert "NaN" not in raw and "Infinity" not in raw
+    # json.loads is lenient about NaN; the strict parse is what the API does.
+    reloaded = json.loads(raw, parse_constant=_reject_constant)
+    assert reloaded["finite"] == 1.5
+    assert reloaded["not_a_number"] is None
+    assert reloaded["nested"]["values"] == [1.0, None]
+
+
+def _reject_constant(name):
+    raise AssertionError(f"artifact contains non-JSON constant {name!r}")
+
+
+def test_interpret_clears_a_stale_result_when_the_rerun_did_not_run(machine, tmp_path):
+    """Regression: a correction loop whose rerun was deferred re-graded the
+    previous pass's numbers and reported them as this run's result."""
+    _seed_planning(machine, tmp_path)
+    _seed_execution(machine, tmp_path, stdout='{"logS": -1.70}')
+    machine.interpret()
+    assert "normalized_result" in machine.context.artifacts
+
+    # second pass: the heavy-calc gate declined, so nothing actually ran
+    _seed_execution(machine, tmp_path, succeeded=False)
+    assert machine.interpret() == State.VALIDATE
+    assert "normalized_result" not in machine.context.artifacts
+    assert machine.validate() == State.ACCEPT  # nothing to grade, not a re-grade
+
+
+def test_rejected_result_sends_the_new_plan_back_to_the_approval_gate(machine, tmp_path):
+    """A replan re-runs method selection and can pick a different tool; the
+    researcher must approve that before it is built and executed."""
+    _seed_planning(machine, tmp_path)
+    machine.context.plan_approved = True
+    _seed_normalized(machine, tmp_path, -3.0)
+
+    assert machine.validate() == State.REPLAN
+    assert machine.context.plan_approved is False
+
+
+def test_marginal_result_keeps_the_approval_for_the_correction_loop(machine, tmp_path):
+    """CORRECT rebuilds the SAME approved plan, so it must not re-gate --
+    CORRECT->BUILD is guarded on plan_approved and would deadlock."""
+    _seed_planning(machine, tmp_path)
+    machine.context.plan_approved = True
+    _seed_normalized(machine, tmp_path, -2.05)
+
+    assert machine.validate() == State.CORRECT
+    assert machine.context.plan_approved is True
+
+
+def test_correct_reports_an_undetermined_failure_mode(machine, tmp_path):
+    """The four failure modes need signals this pipeline does not yet collect
+    (rejected input, activation range, loss curve, OOD score); a marginal
+    disagreement supports none of them.
+
+    So UNKNOWN is the honest diagnosis and the generic next-candidate plan is
+    the designed outcome -- NOT a bug to be papered over by synthesizing a
+    z-score out of the run's numerical-precision uncertainty, which would make
+    the diagnosis depend on how tightly the script converged rather than on the
+    science. See StateMachine._run_evidence.
+    """
+    _seed_planning(machine, tmp_path)
+    _seed(machine, tmp_path, "discovery", {"candidates": [
+        {"rank": 1, "id": "rdkit", "name": "RDKit"},
+        {"rank": 2, "id": "pymatgen", "name": "Pymatgen"},
+    ]})
+    _seed_normalized(machine, tmp_path, -2.05)
+    machine.validate()
+
+    assert machine.correct() == State.BUILD
+    plan = machine._load_artifact("correction_plan")
+    assert plan["diagnosis_detail"]["mode"] == "unknown"
+    # the generic plan still proposes the best untried lever, and says why
+    assert plan["proposed_corrections"][0]["new_value"] == "Pymatgen"
+    assert plan["fallback_strategy"]
+    plan_for_schema = {k: v for k, v in plan.items() if k != "diagnosis_detail"}
+    _validator("correction_plan.schema.json").validate(plan_for_schema)
+
+
+def test_correct_records_the_measured_gap_for_the_forecast(machine, tmp_path):
+    """The gap must reach the CorrectionPlan even on the acceptance-criteria
+    path, where cross_validation carries no mean_relative_error."""
+    plan_no_baseline = _plan_for("unobtainium-oxide", [
+        {"metric_name": "logS", "target_value": -2.0, "tolerance": 0.1}])
+    _seed(machine, tmp_path, "execution_plan", plan_no_baseline)
+    _seed_normalized(machine, tmp_path, -2.15)  # 1.5x tolerance -> needs_review
+
+    assert machine.validate() == State.CORRECT
+    report = machine._load_artifact("validation_report")
+    assert report["gap_basis"] == "tolerance_multiples"
+    assert report["gap"] == pytest.approx(1.5)
+
+
+def test_the_rerun_budget_fits_inside_the_orchestrator_backstop():
+    """The state machine must stop the loop gracefully BEFORE the orchestrator's
+    runaway-loop backstop aborts the run -- otherwise the researcher loses the
+    result and the rationale instead of receiving them flagged for review."""
+    import inspect
+    # The orchestrator lives in a digit-prefixed dir that can't be imported by
+    # dotted name; put it on sys.path the way test_orchestrator.py does.
+    sys.path.insert(0, str(REPO_ROOT / "modules" / "07_runtime_orchestrator"))
+    import orchestrator  # noqa: E402
+
+    params = inspect.signature(orchestrator.Orchestrator.__init__).parameters
+    budget = SM.RerunController().policy.max_iterations
+    assert params["max_replans"].default > budget
+    assert params["max_corrections"].default > budget
+
+
+def test_a_run_with_nothing_to_interpret_does_not_loop(machine, tmp_path):
+    """Regression: clearing the stale result removed the only thing advancing
+    the correction loop.
+
+    _gate_rerun (which owns the iteration cap) runs only when there IS a result
+    to cross-validate. A pass that produced nothing would otherwise route on the
+    PREVIOUS verdict, straight back into CORRECT, forever -- until the
+    orchestrator's backstop failed the run.
+    """
+    _seed_planning(machine, tmp_path)
+    _seed_normalized(machine, tmp_path, -2.05)
+    assert machine.validate() == State.CORRECT  # pass 1 asks for a correction
+
+    # pass 2: the rebuilt run was deferred, so there is nothing new to grade
+    _seed_execution(machine, tmp_path, succeeded=False)
+    assert machine.interpret() == State.VALIDATE
+    assert machine.validate() == State.ACCEPT
+    assert machine.context.validation_result == "accepted"
+
+    report = machine._load_artifact("validation_report")
+    assert report["rerun"]["stop_reason"] == "no_new_result"
+    assert report["acceptance_status"] == "needs_review"  # true verdict kept
+
+
+def test_a_seeded_verdict_is_not_overridden_before_anything_is_graded(machine, tmp_path):
+    """The runner seeds validation_result to satisfy the stub guards; a run that
+    has graded nothing yet must route on that seed untouched."""
+    machine.context.validation_result = "rejected"
+    _seed_execution(machine, tmp_path, succeeded=False)
+
+    assert machine.interpret() == State.VALIDATE
+    assert machine.validate() == State.REPLAN
+    assert machine.context.validation_result == "rejected"
+
+
+def test_the_rerun_budget_survives_a_new_process(machine, tmp_path):
+    """Regression: the runner drives a run in slices, and a rejected result now
+    hands control back for re-approval, so the next pass is a NEW StateMachine.
+    An in-memory-only counter would restart at zero every pass and the cap could
+    never be reached."""
+    _seed_planning(machine, tmp_path)
+    _seed_normalized(machine, tmp_path, -10.0)
+    machine.validate()
+    carried = machine._load_artifact("validation_report")["rerun"]
+    assert carried["iteration"] == 1
+    assert carried["metric_history"]
+
+    # a fresh machine for the next slice, pointed at the same artifacts
+    with patch.object(DataStorage, "load", return_value=None):
+        resumed = SM.StateMachine(data_path=str(tmp_path / "state2.json"),
+                                  run_id="testrun")
+    resumed.artifacts_dir = tmp_path
+    resumed.context.artifacts = dict(machine.context.artifacts)
+    assert resumed._rerun.iteration == 0  # nothing counted in this process yet
+
+    _seed_normalized(resumed, tmp_path, -9.0)
+    resumed.validate()
+    assert resumed._rerun.iteration == 2  # continued, not restarted
+
+
+def test_stdout_json_prefers_the_last_object_and_backtracks(machine, tmp_path):
+    """Regression: an earlier single-line object beat the real summary, and a
+    trailing line that merely looked like JSON buried a valid one."""
+    pretty = json.dumps({"logS": -1.70, "tool": "RDKit"}, indent=2)
+
+    # a progress line before the summary must not win
+    assert json.loads(SM.StateMachine._stdout_json(
+        '{"logS": -9.99, "stage": "init"}\n' + pretty))["logS"] == -1.70
+    # a Python dict repr after the summary must not bury it
+    assert json.loads(SM.StateMachine._stdout_json(
+        pretty + "\n{'converged': True}\n"))["logS"] == -1.70
+    # a truncated trailing object must not bury it either
+    assert json.loads(SM.StateMachine._stdout_json(
+        pretty + "\n{ elapsed 3s\n"))["logS"] == -1.70
+    # a top-level array is not a summary, however it is indented
+    for indent in (None, 0, 2):
+        assert SM.StateMachine._stdout_json(
+            json.dumps([{"logS": -1.7}], indent=indent)) is None
