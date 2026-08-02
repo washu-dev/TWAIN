@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import logging
@@ -394,7 +395,8 @@ _STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
     State.DECOMPOSE: {"artifacts": ["goal_graph", "goal_graph_error"], "flags": []},
     State.DISCOVER:  {"artifacts": ["discovery"], "flags": []},
     State.PLAN:      {"artifacts": ["execution_plan"], "flags": []},
-    State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report"], "flags": ["plan_approved"]},
+    State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report"],
+                      "flags": ["plan_approved", "approved_plan"]},
     State.EXECUTE:   {"artifacts": ["execution_result"], "flags": ["execution_status"]},
     State.INTERPRET: {"artifacts": ["normalized_result"], "flags": []},
     State.VALIDATE:  {"artifacts": ["validation_report", "correction_plan"],
@@ -620,7 +622,33 @@ class StateMachine:
         engine-level enforcement point for "no execution without an approved plan".
         """
         self.context.plan_approved = approved
+        # Remember WHAT was approved, so a later re-plan can tell whether this
+        # decision still covers it (see _plan_fingerprint).
+        self.context.approved_plan = self._plan_fingerprint() if approved else None
         self.storage.commit(self.current_state, self.context)
+
+    def _plan_fingerprint(self) -> Optional[str]:
+        """A digest of the parts of the plan an approval is actually about.
+
+        The approval card shows the researcher the method and the resources it
+        will consume, so those are what their decision covers. Everything else in
+        the plan (rationales, cost estimates, generated ids, timestamps) can
+        change without invalidating it.
+        """
+        plan = self._load_artifact("execution_plan")
+        if not plan:
+            return None
+        method = plan.get("selected_method") or {}
+        material = {
+            "tool_name": method.get("tool_name"),
+            "calculator": method.get("calculator"),
+            "calculator_import": method.get("calculator_import"),
+            "libraries": sorted(str(l) for l in method.get("libraries") or []),
+            "requested_property": plan.get("requested_property"),
+            "slurm_request": plan.get("slurm_request"),
+        }
+        blob = json.dumps(material, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     # ---- intake / clarify collaborators ----------------------------------
 
@@ -1498,7 +1526,39 @@ class StateMachine:
 
         self.context.artifacts["execution_plan"] = self._write_artifact(
             "execution_plan", asdict(execution_plan))
+        self._revoke_approval_if_plan_changed()
         return State.BUILD
+
+    def _revoke_approval_if_plan_changed(self) -> None:
+        """Withdraw a standing approval when this plan is not the approved one.
+
+        A re-plan (VALIDATE -> REPLAN -> PLAN) can land on a different method
+        than the researcher approved, and building and executing that on the old
+        decision spends their compute on a plan they never saw. But a re-plan
+        usually lands on the SAME method, and asking them to approve an identical
+        plan a second time is noise -- it was doubling the approval card on every
+        rejected run. So the two plans are compared and the gate is re-opened
+        only when the part they actually agreed to has changed.
+        """
+        if not self.context.plan_approved:
+            return
+        current = self._plan_fingerprint()
+        if current is None:
+            return
+        if self.context.approved_plan is None:
+            # The approval was seeded rather than recorded (the runner seeds one
+            # for unattended runs, and checkpoints written before this field
+            # existed carry none), so there is nothing to compare against.
+            # Adopt this plan as the approved one: revoking a decision we cannot
+            # show has been invalidated would strand the run at the gate.
+            self.context.approved_plan = current
+            return
+        if current == self.context.approved_plan:
+            return
+        self.context.plan_approved = False
+        self.context.approved_plan = None
+        logger.info("[plan] the re-planned method or resources differ from what "
+                    "was approved; the new plan needs approval before it runs.")
 
     @staticmethod
     def _candidate_by_name(ranked, name):
@@ -2538,11 +2598,10 @@ class StateMachine:
             self.context.validation_result = self._stop_unproductive_loop()
         verdict = self.context.validation_result
         if verdict == "rejected":
-            # A replan re-runs method selection and can land on a different
-            # tool than the one the researcher approved. Building and executing
-            # that on the original approval would spend their compute on a plan
-            # they never saw, so the new plan must go back through the gate.
-            self.context.plan_approved = False
+            # Whether the re-planned run needs a fresh approval is decided by
+            # plan() once the new plan exists and can be compared with the
+            # approved one -- withdrawing it here re-asks even when the replan
+            # lands on exactly the same method, which is pure noise.
             return State.REPLAN
         if verdict == "needs_review":
             return State.CORRECT

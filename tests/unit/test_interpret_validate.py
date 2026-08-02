@@ -497,14 +497,77 @@ def test_interpret_clears_a_stale_result_when_the_rerun_did_not_run(machine, tmp
     assert machine.validate() == State.ACCEPT  # nothing to grade, not a re-grade
 
 
-def test_rejected_result_sends_the_new_plan_back_to_the_approval_gate(machine, tmp_path):
-    """A replan re-runs method selection and can pick a different tool; the
-    researcher must approve that before it is built and executed."""
+def test_a_rejected_result_replans_without_revoking_the_approval(machine, tmp_path):
+    """Regression: the approval card appeared twice on every rejected run.
+
+    validate() used to withdraw the approval on its way to REPLAN, so the run
+    re-planned, parked at BUILD and posted a second card -- even though the
+    replan almost always lands on the same method. Whether the new plan needs
+    approval is plan()'s call, once there is a new plan to compare.
+    """
     _seed_planning(machine, tmp_path)
     machine.context.plan_approved = True
     _seed_normalized(machine, tmp_path, -3.0)
 
     assert machine.validate() == State.REPLAN
+    assert machine.context.plan_approved is True
+
+
+def test_replanning_the_same_method_keeps_the_approval(machine, tmp_path):
+    """The researcher approved this method and these resources; re-deriving the
+    identical plan does not need a second decision."""
+    _seed_planning(machine, tmp_path)
+    machine.approve_plan(True)
+    assert machine.context.approved_plan is not None
+
+    _seed_planning(machine, tmp_path)          # PLAN re-derives the same plan
+    machine._revoke_approval_if_plan_changed()
+    assert machine.context.plan_approved is True
+
+
+def test_replanning_a_different_method_revokes_the_approval(machine, tmp_path):
+    """A replan that switches tool is a plan the researcher never saw, so it
+    must not be built and executed on the old approval."""
+    _seed_planning(machine, tmp_path)
+    machine.approve_plan(True)
+    approved = machine.context.approved_plan
+
+    switched = dict(PLAN, selected_method={"tool_name": "Pymatgen"})
+    _seed(machine, tmp_path, "execution_plan", switched)
+    machine._revoke_approval_if_plan_changed()
+    assert machine.context.plan_approved is False
+    assert machine.context.approved_plan is None
+    assert approved != machine._plan_fingerprint()
+
+
+def test_a_changed_resource_request_revokes_the_approval(machine, tmp_path):
+    """The card shows the resources the run will consume, so those are part of
+    what was agreed to."""
+    _seed(machine, tmp_path, "intent_spec", INTENT)
+    _seed(machine, tmp_path, "execution_plan",
+          dict(PLAN, slurm_request={"ram": 16, "max_time": 0.5}))
+    machine.approve_plan(True)
+
+    _seed(machine, tmp_path, "execution_plan",
+          dict(PLAN, slurm_request={"ram": 128, "max_time": 12}))
+    machine._revoke_approval_if_plan_changed()
+    assert machine.context.plan_approved is False
+
+
+def test_a_seeded_approval_is_not_revoked(machine, tmp_path):
+    """The runner seeds an approval for unattended runs, and older checkpoints
+    carry no fingerprint; revoking those would strand the run at the gate."""
+    _seed_planning(machine, tmp_path)
+    machine.context.plan_approved = True       # seeded, never recorded
+    machine.context.approved_plan = None
+
+    machine._revoke_approval_if_plan_changed()
+    assert machine.context.plan_approved is True
+    # ... and this plan is adopted, so a LATER switch is still caught
+    assert machine.context.approved_plan is not None
+    _seed(machine, tmp_path, "execution_plan",
+          dict(PLAN, selected_method={"tool_name": "Pymatgen"}))
+    machine._revoke_approval_if_plan_changed()
     assert machine.context.plan_approved is False
 
 
