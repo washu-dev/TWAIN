@@ -230,6 +230,18 @@ class _RealEngine:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(plan, f, indent=2)
 
+    def _read_artifact(self, orch, name: str) -> dict | None:
+        """A stage artifact's JSON, or None when it is absent or unreadable."""
+        path = orch.sm.context.artifacts.get(name)
+        if path and os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else None
+            except (OSError, ValueError):
+                return None
+        return None
+
     def decline_reason(self, orch) -> str | None:
         """The off-topic decline message when intake refused the request, or None.
 
@@ -238,16 +250,44 @@ class _RealEngine:
         this instead of the generic "run complete" summary and marks the
         conversation rejected.
         """
-        path = orch.sm.context.artifacts.get("declined")
-        if path and os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
-                return json.load(f).get("message")
-        return None
+        return (self._read_artifact(orch, "declined") or {}).get("message")
 
     def final_summary(self, orch) -> str:
+        """The completion message posted to the chat.
+
+        A run that interpreted and validated a result says what it found and
+        how the check went — the researcher shouldn't have to dig through the
+        report artifacts to learn whether validation happened. Runs with
+        nothing interpreted (planning-only, deferred) keep the plain line.
+        """
         state = getattr(getattr(orch, "sm", None), "current_state", None)
         name = state.name if state is not None else "unknown"
-        return f"Run complete (final state: {name}). Open the report to see the results."
+        lines = [f"Run complete (final state: {name})."]
+        normalized = self._read_artifact(orch, "normalized_result")
+        metric = (normalized or {}).get("primary_metric") or {}
+        if isinstance(metric.get("value"), (int, float)):
+            unit = f" {metric['unit']}" if metric.get("unit") else ""
+            unc = metric.get("uncertainty")
+            spread = f" ± {unc:.2g}" if isinstance(unc, (int, float)) and unc else ""
+            lines.append(f"Result: {metric.get('name')} = "
+                         f"{metric['value']:.6g}{spread}{unit}")
+        report = self._read_artifact(orch, "validation_report")
+        if report:
+            status = report.get("acceptance_status") or "unknown"
+            rationale = str(report.get("rationale") or "").strip()
+            loop = report.get("rerun") or {}
+            flagged = ""
+            if isinstance(loop, dict) and loop.get("decision") == "stop":
+                reason = loop.get("stop_reason") or loop.get("reason") or "budget exhausted"
+                flagged = (f" (correction loop stopped: {reason}; "
+                           "delivered for your review)")
+            lines.append(f"Validation: {status}{flagged}"
+                         + (f" — {rationale}" if rationale else ""))
+        elif normalized:
+            lines.append("Validation: not performed — no reference was "
+                         "available to check this result against.")
+        lines.append("Open the report to see the full results.")
+        return "\n".join(lines)
 
 
 def default_engine() -> _RealEngine:

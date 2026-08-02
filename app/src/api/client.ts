@@ -74,6 +74,10 @@ export interface Report {
   execution_result: Record<string, unknown> | string | null;
   result: Record<string, unknown> | null;
   results_dir: string | null;
+  /** Interpreted primary/secondary metrics (Epic 6), when the run produced any. */
+  normalized_result: Record<string, unknown> | string | null;
+  /** Cross-validation verdict + rationale (Epic 6), when validation ran. */
+  validation: Record<string, unknown> | string | null;
   budget: BudgetArtifact | string | null;
   artifacts: ArtifactMeta[];
 }

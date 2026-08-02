@@ -399,6 +399,10 @@ async def get_report(conversation_id: str, user: CurrentUser):
                 if isinstance(execution_result, dict)
                 else None
             ),
+            # Epic 6 artifacts: the interpreted metric and the validation
+            # verdict, so the report can say how the result was checked.
+            "normalized_result": _load_json_artifact(conversation_id, "normalized_result"),
+            "validation": _load_json_artifact(conversation_id, "validation_report"),
             "budget": _load_json_artifact(conversation_id, "budget"),
             "artifacts": convo.list_artifacts(conversation_id),
         }
