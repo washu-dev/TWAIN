@@ -919,3 +919,81 @@ def test_the_plan_metric_name_matches_the_baseline_property(machine, tmp_path):
     # graded against the literature baseline, not the acceptance-criteria fallback
     assert report["gap_basis"] == "relative_error"
     assert report["cross_validation"]["comparisons"][0]["literature"] == -1.72
+
+
+# -- the heavy-calculation confirmation is asked once per run ------------------
+
+class _FakeHeavyCalculator:
+    name = "GPAW"
+    heavy = True
+
+    def needs_docker(self, _platform):
+        return False
+
+
+def _heavy_machine(machine, answers):
+    """Wire the machine up as a heavy-calculator run with a scripted researcher."""
+    machine._selected_calculator = lambda: _FakeHeavyCalculator()
+    asked = []
+
+    def ask(question):
+        asked.append(question)
+        return answers.pop(0) if answers else "no"
+
+    machine.ask = ask
+    return asked
+
+
+def test_the_heavy_run_is_confirmed_once_per_run(machine, tmp_path):
+    """Regression: session f7a51a7e was asked to confirm the same GPAW run twice.
+
+    Epic 6 made VALIDATE -> REPLAN -> PLAN -> BUILD -> REPAIR -> EXECUTE
+    reachable, and every EXECUTE entry re-asked. The researcher had already
+    agreed to spend that compute and their answer had not changed.
+    """
+    asked = _heavy_machine(machine, ["yes"])
+
+    assert machine._confirm_heavy_execution() is True     # first EXECUTE asks
+    assert len(asked) == 1
+    assert machine.context.heavy_confirmed == "GPAW"
+
+    assert machine._confirm_heavy_execution() is True     # the replan's EXECUTE
+    assert len(asked) == 1, "asked the researcher a second time"
+
+
+def test_a_declined_heavy_run_is_asked_again(machine, tmp_path):
+    """A 'no' is not a standing decision: it defers this run, and a later pass
+    must be free to ask again rather than inheriting the refusal."""
+    asked = _heavy_machine(machine, ["no", "yes"])
+
+    assert machine._confirm_heavy_execution() is False
+    assert machine.context.heavy_confirmed is None
+    assert machine._confirm_heavy_execution() is True
+    assert len(asked) == 2
+
+
+def test_a_different_heavy_engine_is_confirmed_separately(machine, tmp_path):
+    """The confirmation covers the engine that was named, so a re-plan landing
+    on a different heavy calculator has to ask about that one."""
+    asked = _heavy_machine(machine, ["yes", "yes"])
+    machine._confirm_heavy_execution()
+
+    class _Other(_FakeHeavyCalculator):
+        name = "Quantum ESPRESSO"
+
+    machine._selected_calculator = lambda: _Other()
+    assert machine._confirm_heavy_execution() is True
+    assert len(asked) == 2
+    assert machine.context.heavy_confirmed == "Quantum ESPRESSO"
+
+
+def test_rewinding_to_execute_asks_again(machine, tmp_path):
+    """An explicit re-run from EXECUTE is a fresh decision to spend the compute,
+    so the standing confirmation must not carry into it."""
+    _heavy_machine(machine, ["yes"])
+    machine._confirm_heavy_execution()
+    assert machine.context.heavy_confirmed == "GPAW"
+
+    machine.context.artifacts["intent_spec"] = "/x/intent.json"
+    machine.rewind_to(State.EXECUTE)
+    assert machine.context.heavy_confirmed is None

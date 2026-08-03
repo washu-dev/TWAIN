@@ -389,7 +389,8 @@ _STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
     State.PLAN:      {"artifacts": ["execution_plan"], "flags": []},
     State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report"],
                       "flags": ["plan_approved", "approved_plan"]},
-    State.EXECUTE:   {"artifacts": ["execution_result"], "flags": ["execution_status"]},
+    State.EXECUTE:   {"artifacts": ["execution_result"],
+                      "flags": ["execution_status", "heavy_confirmed"]},
     State.INTERPRET: {"artifacts": ["normalized_result"], "flags": []},
     State.VALIDATE:  {"artifacts": ["validation_report", "correction_plan"],
                       "flags": ["validation_result"]},
@@ -2131,6 +2132,15 @@ class StateMachine:
         calculator = self._selected_calculator()
         if calculator is None or not calculator.heavy:
             return True
+        # Already agreed to for this engine in this run. A correction or re-plan
+        # loop comes back through EXECUTE, and re-asking there is noise: the
+        # researcher consented to spending compute on this calculation, and the
+        # answer they gave has not changed. Keyed on the engine, so a re-plan
+        # that lands on a DIFFERENT heavy calculator still asks.
+        if self.context.heavy_confirmed == calculator.name:
+            logger.info("[execute] the heavy %s run was already confirmed for "
+                        "this run; not asking again.", calculator.name)
+            return True
         # Unattended mode: the researcher opted into automatic runs, so proceed
         # without asking (approving the plan already authorized this execution).
         if self.auto_approve:
@@ -2156,7 +2166,10 @@ class StateMachine:
             f"can take several minutes {where}. The "
             f"generated script is ready either way.\nRun it now? [y/N]: "
         )
-        return str(answer).strip().lower() in {"y", "yes", "run", "now", "1", "true"}
+        confirmed = str(answer).strip().lower() in {"y", "yes", "run", "now", "1", "true"}
+        if confirmed:
+            self.context.heavy_confirmed = calculator.name
+        return confirmed
 
     def _can_prompt(self) -> bool:
         """Whether we can actually ask the researcher a question right now."""
