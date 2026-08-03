@@ -98,6 +98,10 @@ type PlanSummary = {
     ram?: number;
     max_time?: number;
   } | null;
+  // Why each suggested figure is what it is, keyed by slurm_request field.
+  slurm_rationale?: Record<string, string> | null;
+  // Whose ceilings slurm_limits are ("compute2 node" / "this machine").
+  limits_source?: string | null;
   acceptance_metrics?: { metric_name?: string; target_value?: number; tolerance?: number }[] | null;
   safety_notes?: string[] | null;
   note?: string;
@@ -189,6 +193,8 @@ export const ChatScreen: React.FC = () => {
     : undefined;
 
   const slurmLimits = approvalPlan?.slurm_limits ?? null;
+  const slurmRationale = approvalPlan?.slurm_rationale ?? null;
+  const limitsSource = approvalPlan?.limits_source ?? null;
 
   // Editable Slurm fields: the plan's request seeds the values (TWAIN's
   // suggestion — ~1 CPU per atom of the system); the researcher's edits (if
@@ -462,28 +468,39 @@ export const ChatScreen: React.FC = () => {
           ) : null}
           {slurmDraft && (
             <View style={styles.slurmEditor}>
-              <Text style={styles.slurmEditorTitle}>Slurm resources (editable)</Text>
-              <Text style={styles.slurmSuggestHint}>
-                Pre-filled with TWAIN’s suggestion (~1 CPU per atom of your system).
-                {slurmLimits
-                  ? ` Node limits: ${[
-                      slurmLimits.cpu_count != null ? `${slurmLimits.cpu_count} CPUs` : null,
-                      slurmLimits.gpu_count != null ? `${slurmLimits.gpu_count} GPUs` : null,
-                      slurmLimits.ram != null ? `${slurmLimits.ram} GB RAM` : null,
-                      slurmLimits.max_time != null ? `${slurmLimits.max_time} h wall` : null,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}.`
-                  : ''}
+              <Text style={styles.slurmEditorTitle}>
+                Resources — suggested by TWAIN, editable
               </Text>
+              <Text style={styles.slurmSuggestHint}>
+                These are TWAIN’s starting figures, not requirements. Change any of
+                them before approving.
+              </Text>
+              {slurmRationale?.cpu_count ? (
+                <Text style={styles.slurmRationale}>{slurmRationale.cpu_count}</Text>
+              ) : null}
+              {slurmRationale?.max_time ? (
+                <Text style={styles.slurmRationale}>{slurmRationale.max_time}</Text>
+              ) : null}
+              {slurmLimits ? (
+                <Text style={styles.slurmLimitsLine}>
+                  {`Most you can request${limitsSource ? ` (${limitsSource})` : ''}: ${[
+                    slurmLimits.cpu_count != null ? `${slurmLimits.cpu_count} CPUs` : null,
+                    slurmLimits.gpu_count != null ? `${slurmLimits.gpu_count} GPUs` : null,
+                    slurmLimits.ram != null ? `${slurmLimits.ram} GB RAM` : null,
+                    slurmLimits.max_time != null ? `${slurmLimits.max_time} h wall` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}`}
+                </Text>
+              ) : null}
               <View style={styles.slurmRow}>
                 <SlurmField
-                  label={`CPUs${slurmLimits?.cpu_count != null ? ` (max ${slurmLimits.cpu_count})` : ''}`}
+                  label={`CPUs — suggested${slurmLimits?.cpu_count != null ? `, max ${slurmLimits.cpu_count}` : ''}`}
                   value={slurmDraft.cpu_count}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, cpu_count: v })}
                 />
                 <SlurmField
-                  label={`GPUs${slurmLimits?.gpu_count != null ? ` (max ${slurmLimits.gpu_count})` : ''}`}
+                  label={`GPUs — suggested${slurmLimits?.gpu_count != null ? `, max ${slurmLimits.gpu_count}` : ''}`}
                   value={slurmDraft.gpu_count}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, gpu_count: v })}
                 />
@@ -492,14 +509,14 @@ export const ChatScreen: React.FC = () => {
                 <SlurmField
                   label={
                     slurmLimits?.ram != null
-                      ? `RAM (GB, ${MIN_RAM_GB}–${slurmLimits.ram})`
-                      : `RAM (GB, min ${MIN_RAM_GB})`
+                      ? `RAM GB — suggested, ${MIN_RAM_GB}–${slurmLimits.ram}`
+                      : `RAM GB — suggested, min ${MIN_RAM_GB}`
                   }
                   value={slurmDraft.ram}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, ram: v })}
                 />
                 <SlurmField
-                  label={`Wall time (hours${slurmLimits?.max_time != null ? `, max ${slurmLimits.max_time}` : ''})`}
+                  label={`Wall time h — suggested${slurmLimits?.max_time != null ? `, max ${slurmLimits.max_time}` : ''}`}
                   value={slurmDraft.max_time}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, max_time: v })}
                 />
@@ -1099,6 +1116,8 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   slurmEditorTitle: { fontSize: 13, fontWeight: '700', color: C.text },
+  slurmRationale: { fontSize: 12, color: C.text, lineHeight: 17 },
+  slurmLimitsLine: { fontSize: 12, fontWeight: '600', color: C.textSecondary },
   slurmSuggestHint: { fontSize: 12, color: C.textSecondary, lineHeight: 17 },
   slurmRow: { flexDirection: 'row', gap: Spacing.two },
   slurmField: { flex: 1, gap: 4 },

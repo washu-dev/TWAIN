@@ -257,15 +257,20 @@ class TestPlanningSelectsCalculator:
         plan = m._load_artifact("execution_plan")
         assert plan["slurm_request"]["cpu_count"] == 2
 
-    def test_cpu_request_counts_formula_atoms(self, tmp_path):
-        # Aspirin (C9H8O4) counts 21 atoms -> 21 suggested CPUs.
+    def test_cpu_request_scales_with_formula_atoms(self, tmp_path):
+        # Aspirin (C9H8O4) counts 21 atoms. The suggestion scales with that but
+        # snaps to a width that decomposes cleanly, so 20 rather than 21 -- one
+        # core per atom is a heuristic, not a rule (see _suggest_cpu_count).
         m = _machine(tmp_path)
         _seed_intent(m, tmp_path, ASPIRIN_INTENT)
         m.decompose()
         m.discover()
         m.plan()
         plan = m._load_artifact("execution_plan")
-        assert plan["slurm_request"]["cpu_count"] == 21
+        assert plan["slurm_request"]["cpu_count"] == 20
+        # ... and the card is told it was a suggestion, and on what basis.
+        assert "21-atom" in plan["slurm_rationale"]["cpu_count"]
+        assert "suggestion" in plan["slurm_rationale"]["cpu_count"].lower()
 
     def test_no_engine_note_when_everything_is_runnable(self, tmp_path):
         # Off-Slurm (or nothing vetoed): the note never appears.
