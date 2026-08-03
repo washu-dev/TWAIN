@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -281,6 +282,29 @@ def _runtime_traceback(result) -> Optional[str]:
 
 
 _INTENT_MAP_CACHE: Optional[dict] = None
+
+
+# What a question is FOR, so the driver can label it and each gate can find its
+# own. Mirrored by runner.bridges (which maps these to message kinds) and by the
+# app, which keys its buttons off them.
+ASK_CLARIFY = "clarification"
+ASK_HEAVY_CONFIRM = "heavy_confirm"
+ASK_VALIDATION_GATE = "validation_gate"
+
+
+def _ask_accepts_purpose(ask) -> bool:
+    """Whether ``ask`` takes a ``purpose`` keyword (or **kwargs).
+
+    Probed rather than tried-and-caught: calling and catching TypeError would
+    re-invoke an ask that had already asked the researcher.
+    """
+    try:
+        params = inspect.signature(ask).parameters
+    except (TypeError, ValueError):
+        return False
+    if "purpose" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _json_safe(value):
@@ -661,14 +685,23 @@ class StateMachine:
         "'predict the aqueous solubility of aspirin'): "
     )
 
-    def _ask_user(self, message: str) -> str:
+    def _ask_user(self, message: str, purpose: str = ASK_CLARIFY) -> str:
         """Get input from the researcher: ``self.ask`` if injected, else stdin.
 
         Injecting ``ask`` (a ``message -> answer`` callable) lets the orchestrator
         and tests drive intake/clarify non-interactively; the stdin fallback keeps
         the standalone CLI experience.
+
+        ``purpose`` names the gate asking (see the ``ASK_*`` constants). The web
+        driver records it as the message kind so each gate can recognise its own
+        question instead of assuming the most recent one must be its own -- an
+        assumption that silently swallowed answers once a question could be left
+        unanswered. Passed only to an ``ask`` that accepts it, so single-argument
+        callables (the CLI, older test doubles) keep working.
         """
         if callable(self.ask):
+            if _ask_accepts_purpose(self.ask):
+                return self.ask(message, purpose=purpose)
             return self.ask(message)
         return input(message)
 
@@ -866,7 +899,8 @@ class StateMachine:
             return State.DECOMPOSE
 
         answer = self._ask_user(
-            f"I need a little more detail before continuing:\n{questions}"
+            f"I need a little more detail before continuing:\n{questions}",
+            ASK_CLARIFY,
         )
         intent = self._agent_json(self.prompt_generator.modify_json_schema(text, answer))
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
@@ -2164,7 +2198,8 @@ class StateMachine:
         answer = self._ask_user(
             f"The plan builds a {calculator.name} calculation, a heavy DFT run that "
             f"can take several minutes {where}. The "
-            f"generated script is ready either way.\nRun it now? [y/N]: "
+            f"generated script is ready either way.\nRun it now? [y/N]: ",
+            ASK_HEAVY_CONFIRM,
         )
         confirmed = str(answer).strip().lower() in {"y", "yes", "run", "now", "1", "true"}
         if confirmed:
@@ -2672,7 +2707,8 @@ class StateMachine:
             logger.info("[validate] no interactive input available; accepting the "
                         "flagged result rather than rerunning unattended.")
             return False
-        answer = self._ask_user(self._accept_or_loop_prompt(normalized, artifact))
+        answer = self._ask_user(
+            self._accept_or_loop_prompt(normalized, artifact), ASK_VALIDATION_GATE)
         text = str(answer).strip().lower()
         # Only an explicit ask for another pass spends the compute. "yes" is NOT
         # one: at a question offering two named choices it most likely means "yes,

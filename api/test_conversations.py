@@ -1,8 +1,9 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+import conversations
 from auth import get_current_user
 from main import app
 
@@ -151,7 +152,8 @@ class TestRerun:
         response = client.post("/api/conversations/conv-1/rerun", json={"state": "CLARIFY"})
         assert response.status_code == 200
         assert response.json()["data"]["current_state"] == "CLARIFY"
-        mock_rerun.assert_called_once_with("conv-1", "user-1", "CLARIFY", feedback=None)
+        mock_rerun.assert_called_once_with(
+            "conv-1", "user-1", "CLARIFY", feedback=None, request=None)
 
     @patch("conversations.rerun_conversation",
            return_value={**CONVERSATION, "current_state": "PLAN"})
@@ -159,7 +161,8 @@ class TestRerun:
     def test_rerun_normalizes_state_case(self, _conv, mock_rerun):
         response = client.post("/api/conversations/conv-1/rerun", json={"state": "plan"})
         assert response.status_code == 200
-        mock_rerun.assert_called_once_with("conv-1", "user-1", "PLAN", feedback=None)
+        mock_rerun.assert_called_once_with(
+            "conv-1", "user-1", "PLAN", feedback=None, request=None)
 
     @patch("conversations.rerun_conversation",
            return_value={**CONVERSATION, "status": "running", "current_state": "DISCOVER"})
@@ -173,7 +176,8 @@ class TestRerun:
         )
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
-            "conv-1", "user-1", "DISCOVER", feedback="use xtb instead of DFT")
+            "conv-1", "user-1", "DISCOVER", feedback="use xtb instead of DFT",
+            request=None)
 
     @patch("conversations.get_conversation", return_value=CONVERSATION)
     def test_rerun_rejects_unknown_state(self, _conv):
@@ -268,3 +272,116 @@ class TestReportAndArtifacts:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestRerunFromIntakeWithAnEditedRequest:
+    """Re-running from Intake re-reads the opening prompt, so the researcher can
+    change what they asked for instead of restarting the same request."""
+
+    @patch("conversations.rerun_conversation",
+           return_value={**CONVERSATION, "status": "running", "current_state": "INTAKE"})
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_an_edited_request_is_forwarded(self, _conv, mock_rerun):
+        response = client.post(
+            "/api/conversations/conv-1/rerun",
+            json={"state": "INTAKE", "request": "  compute the bandgap of germanium  "},
+        )
+        assert response.status_code == 200
+        mock_rerun.assert_called_once_with(
+            "conv-1", "user-1", "INTAKE", feedback=None,
+            request="compute the bandgap of germanium")
+
+    @patch("conversations.rerun_conversation")
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_an_edited_request_is_refused_for_a_later_stage(self, _conv, mock_rerun):
+        """Every stage after intake works from the spec intake produced, so an
+        edit there would silently do nothing -- say so instead of accepting it."""
+        response = client.post(
+            "/api/conversations/conv-1/rerun",
+            json={"state": "PLAN", "request": "something else entirely"},
+        )
+        assert response.status_code == 422
+        assert "only applies when re-running from INTAKE" in response.json()["detail"]
+        mock_rerun.assert_not_called()
+
+    @patch("conversations.rerun_conversation",
+           return_value={**CONVERSATION, "current_state": "INTAKE"})
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_a_blank_edit_falls_back_to_the_original_request(self, _conv, mock_rerun):
+        response = client.post(
+            "/api/conversations/conv-1/rerun",
+            json={"state": "INTAKE", "request": "   "},
+        )
+        assert response.status_code == 200
+        mock_rerun.assert_called_once_with(
+            "conv-1", "user-1", "INTAKE", feedback=None, request=None)
+
+
+class TestRerunStatusGate:
+    """A suspended run can be redirected; one that is actually being driven cannot.
+
+    A suspended run is checkpointed with its process released, so no runner is
+    driving it and no job is in flight -- which is what the restriction was
+    protecting against. This is what lets the accept-or-rerun question offer
+    "re-run from a step" rather than only the automatic correction loop.
+    """
+
+    def _conn(self, status):
+        """A fake connection replaying the reads rerun_conversation performs."""
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            {"status": status},                                  # the status gate
+            {"content": "compute the bandgap of silicon"},       # opening request
+            {"params": {"max_cost": 2.0}},                       # original start job
+            {**CONVERSATION, "status": "running"},               # the UPDATE ... RETURNING
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        return conn, cursor
+
+    @pytest.mark.parametrize("status", ["awaiting_input", "awaiting_approval",
+                                        "completed", "error", "cancelled"])
+    def test_a_suspended_or_finished_run_can_be_redirected(self, status):
+        conn, cursor = self._conn(status)
+        with patch("conversations.get_connection", return_value=conn):
+            result = conversations.rerun_conversation("conv-1", "user-1", "PLAN")
+        assert result is not None
+        conn.commit.assert_called_once()
+        assert any("INSERT INTO jobs" in str(c) for c in cursor.execute.call_args_list)
+
+    def test_a_running_run_is_refused(self):
+        conn, _ = self._conn("running")
+        with patch("conversations.get_connection", return_value=conn):
+            with pytest.raises(ValueError, match="still active"):
+                conversations.rerun_conversation("conv-1", "user-1", "PLAN")
+        conn.commit.assert_not_called()
+
+    def test_the_edited_request_reaches_the_job_and_the_transcript(self):
+        conn, cursor = self._conn("awaiting_input")
+        with patch("conversations.get_connection", return_value=conn):
+            conversations.rerun_conversation(
+                "conv-1", "user-1", "INTAKE", request="compute the bandgap of germanium")
+        calls = [c.args for c in cursor.execute.call_args_list if len(c.args) > 1]
+        job = next(a for a in calls if "INSERT INTO jobs" in a[0])
+        assert "compute the bandgap of germanium" in job[1][1]
+        assert "silicon" not in job[1][1]          # the original did not win
+        # and it is visible on the transcript rather than only implied
+        assert any("edited request" in str(a[1]) for a in calls)
+
+    def test_the_abandoned_pass_questions_are_retired(self):
+        """Choosing to re-run IS the answer to whatever was outstanding. Left
+        looking unanswered, it makes the next gate believe it has already asked,
+        so the run suspends without posting and the researcher waits on a
+        question that never comes."""
+        conn, cursor = self._conn("awaiting_input")
+        with patch("conversations.get_connection", return_value=conn):
+            conversations.rerun_conversation("conv-1", "user-1", "CLARIFY")
+        retire = next(
+            c.args for c in cursor.execute.call_args_list
+            if len(c.args) > 1 and "UPDATE messages SET state = 'consumed'" in c.args[0]
+        )
+        assert "role = 'assistant'" in retire[0]
+        assert retire[1] == ("conv-1", list(conversations.QUESTION_KINDS))
+        # every gate's kind, not just the two that used to share 'clarification'
+        assert "validation_gate" in conversations.QUESTION_KINDS
+        assert "heavy_confirm" in conversations.QUESTION_KINDS

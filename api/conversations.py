@@ -14,6 +14,17 @@ from database import get_connection
 
 # Conversation lifecycle statuses the UI understands.
 TERMINAL_STATUSES = ("completed", "error", "rejected", "cancelled")
+# Suspended: checkpointed, process released, waiting on the researcher. No
+# runner is driving these and no job is in flight, so they can be redirected.
+SUSPENDED_STATUSES = ("awaiting_input", "awaiting_approval")
+
+# Assistant message kinds that are a question to the researcher, one per gate.
+# Mirrors runner.bridges (api and runner are separate deployables, so the list is
+# duplicated rather than imported) and the messages_kind_check migration.
+QUESTION_KINDS = (
+    "clarification", "heavy_confirm", "validation_gate",
+    "revision_request", "approval_request",
+)
 
 # Pipeline stages a finished run can be restarted from, in order (mirrors the
 # engine's REWINDABLE_STATES). Kept as plain strings so the light API image needs
@@ -297,18 +308,29 @@ def request_termination(conversation_id: str) -> dict:
 
 def rerun_conversation(
     conversation_id: str, user_id: str, target_state: str,
-    feedback: str | None = None,
+    feedback: str | None = None, request: str | None = None,
 ) -> dict | None:
-    """Re-run a finished conversation from an earlier pipeline stage.
+    """Re-run a conversation from an earlier pipeline stage.
 
-    Requires the run to be finished: re-running an in-flight run would race the
-    runner still driving it (and orphan the job blocked on the user). Reuses the
-    original request and per-run budget, flips the conversation back to
+    Allowed when the run is finished, or when it is *suspended* at a gate
+    (``awaiting_input`` / ``awaiting_approval``). A suspended run has been
+    checkpointed and its process released, so no runner is driving it and no job
+    is in flight for the session -- which is what the restriction here was
+    protecting against. Letting a suspended run be redirected is what lets the
+    researcher answer the accept-or-rerun question with "re-run from this stage"
+    instead of only the automatic correction loop. A ``running`` run is still
+    refused: that one really is being driven.
+
+    Reuses the original request and per-run budget, flips the conversation back to
     ``running`` at ``target_state`` for immediate UI feedback, records a marker
     message, and enqueues a ``rerun`` job the runner claims to rewind + re-drive
     the run. All writes share one transaction. Returns the refreshed conversation;
     None when it doesn't exist or isn't the caller's; raises ValueError when the
     run is still active.
+
+    ``request`` replaces the opening prompt (re-running from INTAKE with an edit).
+    It is recorded on the transcript as the researcher's new request, so what the
+    re-run actually read is visible rather than implied.
 
     ``feedback`` is the mid-session revision path: the researcher's "here's what
     to change" message (typed into the chat of a finished run) is recorded on
@@ -327,11 +349,11 @@ def rerun_conversation(
         if row is None:
             cursor.close()
             return None
-        if row["status"] not in TERMINAL_STATUSES:
+        if row["status"] not in TERMINAL_STATUSES + SUSPENDED_STATUSES:
             cursor.close()
             raise ValueError(
-                "This run is still active — wait for it to finish (or reject the "
-                "current plan) before re-running it from an earlier step."
+                "This run is still active — wait for it to finish, or for it to "
+                "ask you something, before re-running it from an earlier step."
             )
 
         # Reuse the opening request + any per-run budget from the original start job.
@@ -344,7 +366,11 @@ def rerun_conversation(
             (conversation_id,),
         )
         first = cursor.fetchone()
-        request = first["content"] if first else None
+        original_request = first["content"] if first else None
+        # An edited prompt replaces the original for this re-run. The first
+        # message stays as the historical record; the edit is appended below so
+        # the transcript shows what intake actually read.
+        job_request = request or original_request
         cursor.execute(
             "SELECT params FROM jobs WHERE session_id = %s AND kind = 'start' ORDER BY id LIMIT 1;",
             (conversation_id,),
@@ -352,12 +378,27 @@ def rerun_conversation(
         start_job = cursor.fetchone()
         max_cost = (start_job["params"] or {}).get("max_cost") if start_job else None
 
-        params = {"researcher_id": user_id, "request": request, "target_state": target_state}
+        params = {"researcher_id": user_id, "request": job_request,
+                  "target_state": target_state}
         if max_cost is not None:
             params["max_cost"] = max_cost
         if feedback:
             params["feedback"] = feedback
 
+        # Retire the questions of the pass being rewound past. Choosing to re-run
+        # IS the answer to whatever was outstanding, and a question left looking
+        # unanswered makes the next gate think it has already asked: it suspends
+        # without posting anything and the researcher waits on a question that
+        # never comes. The runner skips retired questions (db.last_question_id).
+        cursor.execute(
+            """
+            UPDATE messages SET state = 'consumed'
+            WHERE conversation_id = %s AND role = 'assistant'
+              AND kind = ANY(%s)
+              AND (state IS NULL OR state <> 'consumed');
+            """,
+            (conversation_id, list(QUESTION_KINDS)),
+        )
         cursor.execute(
             """
             UPDATE conversations SET status = 'running', current_state = %s, updated_at = now()
@@ -378,10 +419,21 @@ def rerun_conversation(
                 """,
                 (conversation_id, feedback),
             )
-        marker = (
-            f"↩︎ Revising the run with your feedback (re-planning from {target_state})."
-            if feedback else f"↩︎ Re-running from {target_state}."
-        )
+        if request:
+            cursor.execute(
+                """
+                INSERT INTO messages (conversation_id, role, content, kind, state)
+                VALUES (%s, 'user', %s, 'chat', 'consumed');
+                """,
+                (conversation_id, request),
+            )
+        if feedback:
+            marker = (f"↩︎ Revising the run with your feedback "
+                      f"(re-planning from {target_state}).")
+        elif request:
+            marker = f"↩︎ Re-running from {target_state} with your edited request."
+        else:
+            marker = f"↩︎ Re-running from {target_state}."
         cursor.execute(
             """
             INSERT INTO messages (conversation_id, role, content, kind, state)
