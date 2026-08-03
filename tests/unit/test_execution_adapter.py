@@ -438,3 +438,87 @@ class TestEndToEnd:
         assert (Path(res.artifacts_dir) / "results.csv").is_file()
         # fully serializable for observability
         json.dumps(res.to_dict())
+
+
+# ── running external engines: the environment activation would have set up ────
+
+class TestWhitespaceFreeWorkspace:
+    """Most scientific engines are Fortran and truncate paths at whitespace.
+
+    A run under ".../TWAIN 2026/TWAIN/logs/..." killed NWChem at startup with
+    "Both permanent and scratch directory not accessible" (exit 143) -- an error
+    that reads like a broken install. Where the checkout lives is not ours to
+    choose, so the execution workspace is relocated instead.
+    """
+
+    def test_a_workspace_with_a_space_is_relocated(self):
+        moved = _la_module._space_free_root(Path("/Users/x/TWAIN 2026/TWAIN/logs"))
+        assert " " not in str(moved)
+
+    def test_a_clean_workspace_is_left_alone(self):
+        keep = Path("/Users/x/twain/logs")
+        assert _la_module._space_free_root(keep) == keep
+
+    def test_nothing_moves_when_the_fallback_is_no_better(self, monkeypatch):
+        monkeypatch.setattr(_la_module.tempfile, "gettempdir",
+                            lambda: "/tmp/has a space")
+        original = Path("/Users/x/TWAIN 2026/logs")
+        assert _la_module._space_free_root(original) == original
+
+    def test_the_workdir_itself_ends_up_space_free(self, tmp_path):
+        spaced = tmp_path / "TWAIN 2026" / "artifacts"
+        spaced.mkdir(parents=True)
+        adapter = _la_module.LocalExecutionAdapter(workspace_root=str(spaced))
+        workdir = adapter._make_workdir("run-1")
+        try:
+            assert " " not in str(workdir)
+            assert workdir.is_dir()
+        finally:
+            import shutil
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+class TestActivationVars:
+    """Running <prefix>/bin/python directly does not activate the environment, so
+    its activate.d hooks never fire -- and NWChem reads its basis sets from
+    NWCHEM_BASIS_LIBRARY, set only by such a hook. Without it the engine reports
+    "failed opening basis file", which looks like a missing install.
+    """
+
+    def _fake_env(self, tmp_path, hook_body):
+        prefix = tmp_path / "envs" / "sim"
+        (prefix / "bin").mkdir(parents=True)
+        hooks = prefix / "etc" / "conda" / "activate.d"
+        hooks.mkdir(parents=True)
+        (hooks / "engine_env.sh").write_text(hook_body)
+        # the hook probe runs this interpreter to dump the environment
+        (prefix / "bin" / "python").symlink_to(sys.executable)
+        return prefix / "bin" / "python"
+
+    def test_hook_variables_are_picked_up(self, tmp_path):
+        py = self._fake_env(
+            tmp_path, 'export NWCHEM_BASIS_LIBRARY=$CONDA_PREFIX/share/libraries/\n')
+        found = _la_module._activation_vars(str(py))
+        assert found["NWCHEM_BASIS_LIBRARY"].endswith("/share/libraries/")
+        # built from CONDA_PREFIX, so it must be absolute or it breaks once the
+        # bundle runs with cwd set to its own workdir
+        assert found["NWCHEM_BASIS_LIBRARY"].startswith("/")
+
+    def test_only_what_activation_changes_is_returned(self, tmp_path):
+        py = self._fake_env(tmp_path, 'export TWAIN_PROBE_ONE=abc\n')
+        found = _la_module._activation_vars(str(py))
+        assert found.get("TWAIN_PROBE_ONE") == "abc"
+        assert "PATH" not in found        # unchanged vars are not echoed back
+
+    def test_an_env_without_hooks_yields_nothing(self, tmp_path):
+        prefix = tmp_path / "envs" / "plain"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "bin" / "python").symlink_to(sys.executable)
+        assert _la_module._activation_vars(str(prefix / "bin" / "python")) == {}
+
+    def test_a_broken_hook_does_not_fail_the_run(self, tmp_path):
+        """A hook that errors must not take the run down with it -- the engine may
+        well work without whatever it was setting."""
+        py = self._fake_env(tmp_path, 'this-command-does-not-exist\nexport OK=1\n')
+        found = _la_module._activation_vars(str(py))
+        assert isinstance(found, dict)     # no exception

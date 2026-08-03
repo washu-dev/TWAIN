@@ -19,6 +19,7 @@ directory directly and honours ``--keep-artifacts``.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -44,6 +45,74 @@ DEFAULT_EXEC_TIMEOUT = 7200.0   # 2 hr, matching the orchestrator's EXECUTE budg
 DEFAULT_SMOKE_TIMEOUT = 300.0   # smoke should be quick
 _DEP_ERROR_MARKERS = ("modulenotfounderror", "importerror", "no module named")
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _activation_vars(run_python: str) -> dict:
+    """Environment variables the interpreter's conda activation hooks would set.
+
+    Running ``<prefix>/bin/python`` directly does not activate the environment, so
+    its ``etc/conda/activate.d`` hooks never fire -- and several engines get
+    essential runtime configuration from exactly there. NWChem reads its basis
+    sets from ``NWCHEM_BASIS_LIBRARY`` and dies with "failed opening basis file"
+    without it, which reads like a broken install rather than an unset variable;
+    conda-forge OpenMPI locates its PMIx/PRRTE data the same way. Sourcing the
+    hooks reproduces what activation would have done.
+
+    Returns only the variables activation *changes*, so the caller keeps control
+    of precedence. Empty when there are no hooks, or when they cannot be run --
+    the run then proceeds exactly as before rather than failing here.
+    """
+    # Absolute, not resolved: the hooks build paths from CONDA_PREFIX and the
+    # bundle runs with cwd set to its own workdir, so a relative prefix would
+    # produce variables pointing at nothing. absolute() rather than resolve()
+    # keeps a venv interpreter pointing at its own prefix, not the base env's.
+    prefix = Path(run_python).absolute().parent.parent
+    hooks = sorted((prefix / "etc" / "conda" / "activate.d").glob("*.sh"))
+    if not hooks:
+        return {}
+    script = (
+        'export CONDA_PREFIX="$1"; py="$2"; shift 2; '
+        'for hook in "$@"; do . "$hook" >/dev/null 2>&1 || true; done; '
+        '"$py" -c "import json,os,sys; sys.stdout.write(json.dumps(dict(os.environ)))"'
+    )
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", script, "bash", str(prefix), str(run_python),
+             *[str(h) for h in hooks]],
+            capture_output=True, text=True, timeout=60, env={**os.environ},
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return {}
+        activated = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    return {k: v for k, v in activated.items() if os.environ.get(k) != v}
+
+
+def _space_free_root(configured: Path) -> Path:
+    """``configured``, or a whitespace-free root when it contains a space.
+
+    Most scientific engines are Fortran and truncate paths at whitespace. NWChem
+    exits 143 with "Both permanent and scratch directory not accessible" when its
+    scratch directory sits under a path like ``.../TWAIN 2026/...``, and CP2K,
+    Quantum ESPRESSO and ABINIT are the same family -- the run dies in the engine
+    with an error that looks nothing like its cause. Where the checkout lives is
+    not ours to choose, so a workspace with a space in it is relocated rather
+    than left to fail. The result records the directory actually used, so
+    artifact capture and the report follow it.
+
+    Returns ``configured`` unchanged when it is already safe, or when the
+    fallback would be no better (nothing to gain by moving).
+    """
+    if " " not in str(configured):
+        return configured
+    fallback = Path(tempfile.gettempdir()) / "twain-exec"
+    if " " in str(fallback):
+        return configured
+    print(f"[execute] the configured workspace {configured} contains a space, "
+          f"which Fortran engines (NWChem, CP2K, Quantum ESPRESSO, ABINIT) "
+          f"cannot use; running in {fallback} instead")
+    return fallback
 
 
 def _safe_name(run_id) -> str:
@@ -146,7 +215,8 @@ class LocalExecutionAdapter:
                     )
                 run_python = install.python_executable or run_python
 
-            run_env = {**os.environ, **(env or {})}
+            # os.environ < the env's activation hooks < the caller's overrides.
+            run_env = {**os.environ, **_activation_vars(run_python), **(env or {})}
             # A generated bundle may shell out to an env-local binary: an ASE
             # calculator like DFTB+/NWChem/Quantum ESPRESSO runs `dftb+`/`nwchem`/…
             # as a subprocess. Running a pixi-env interpreter by its bare path does
@@ -265,15 +335,18 @@ class LocalExecutionAdapter:
 
     def _make_workdir(self, run_id) -> Path:
         """A deterministic ``exec_<run_id>`` dir when an id is given, else random."""
+        configured = (Path(self.workspace_root) if self.workspace_root
+                      else Path(tempfile.gettempdir()))
+        root = _space_free_root(configured)
         if run_id:
-            root = Path(self.workspace_root) if self.workspace_root else Path(tempfile.gettempdir())
             root.mkdir(parents=True, exist_ok=True)
             workdir = root / f"exec_{_safe_name(run_id)}"
             if workdir.exists():
                 shutil.rmtree(workdir, ignore_errors=True)  # re-run replaces prior
             workdir.mkdir(parents=True)
             return workdir
-        return Path(tempfile.mkdtemp(prefix="twain_exec_", dir=self.workspace_root))
+        root.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="twain_exec_", dir=str(root)))
 
     def _run_subprocess(self, cmd: List[str], cwd: Path, env: dict, *, timeout: float, monitor: bool) -> dict:
         """Run ``cmd`` under an optional ResourceMonitor + timeout w/ graceful kill."""
