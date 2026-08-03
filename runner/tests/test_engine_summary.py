@@ -9,7 +9,15 @@ validation_report) and surfaces the result + verdict inline.
 import json
 import types
 
+from runner import runner as runner_mod
+from runner.artifacts import capture_artifacts
 from runner.engine import _RealEngine
+from runner.tests.test_runner import (
+    FakeDB,
+    FakeEngine,
+    FakeOrchestrator,
+    RecordingNotifier,
+)
 
 
 def _engine():
@@ -88,10 +96,6 @@ class TestCorrectionPassIsNotTheApprovalGate:
     """
 
     def test_gate_proceeds_immediately_when_the_plan_is_already_approved(self):
-        from runner import runner as runner_mod
-        from runner.tests.test_runner import (FakeDB, FakeEngine, FakeOrchestrator,
-                                             RecordingNotifier)
-
         db, engine = FakeDB(), FakeEngine()
         engine.approved = True                      # approved in an earlier slice
         orch = FakeOrchestrator(lambda q: "", None)
@@ -105,10 +109,6 @@ class TestCorrectionPassIsNotTheApprovalGate:
         assert notifier.calls == []                 # and no second notification
 
     def test_gate_still_posts_the_card_when_nothing_is_approved(self):
-        from runner import runner as runner_mod
-        from runner.tests.test_runner import (FakeDB, FakeEngine, FakeOrchestrator,
-                                             RecordingNotifier)
-
         db, engine = FakeDB(), FakeEngine()
         orch = FakeOrchestrator(lambda q: "", None)
 
@@ -126,11 +126,6 @@ class TestArtifactRetirement:
     """
 
     def test_a_result_no_longer_produced_is_removed_from_the_store(self):
-        import types
-
-        from runner.artifacts import capture_artifacts
-        from runner.tests.test_runner import FakeDB
-
         db = FakeDB()
         db.upsert_artifact("conv-1", "normalized_result", '{"old": 1}', "json")
         db.upsert_artifact("conv-1", "intent_spec", '{"keep": 1}', "json")
