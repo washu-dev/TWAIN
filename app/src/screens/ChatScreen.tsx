@@ -155,6 +155,14 @@ export const ChatScreen: React.FC = () => {
     status === 'awaiting_input' &&
     lastAssistant?.kind === 'clarification' &&
     /\[y\/n\]/i.test(lastAssistant.content);
+  // The accept-or-rerun gate: validation flagged the result and is asking whether
+  // another calculation is worth spending. Its prompt ends with "[accept/rerun]"
+  // (statemachine._accept_or_loop_prompt). Same treatment as the heavy-calc gate
+  // — tap instead of typing, through the same reply channel.
+  const acceptOrRerunPending =
+    status === 'awaiting_input' &&
+    lastAssistant?.kind === 'clarification' &&
+    /\[accept\/rerun\]/i.test(lastAssistant.content);
   const approvalContent =
     [...messages].reverse().find((m) => m.kind === 'approval_request')?.content ?? null;
   const approvalPlan = approvalContent ? parsePlanSummary(approvalContent) : null;
@@ -266,9 +274,10 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
-  // Answer the heavy-calc yes/no gate with a tap; "yes"/"no" is exactly what
-  // the state machine's confirmation parser expects from a typed reply.
-  const handleYesNo = async (answer: 'yes' | 'no') => {
+  // Answer a one-tap gate (heavy-calc yes/no, accept-or-rerun). The word sent is
+  // exactly what the state machine's parser expects from a typed reply, so the
+  // buttons and the composer are interchangeable.
+  const handleQuickReply = async (answer: 'yes' | 'no' | 'accept' | 'rerun') => {
     if (!conversation || busy) return;
     setBusy(true);
     setError(null);
@@ -568,7 +577,7 @@ export const ChatScreen: React.FC = () => {
           <View style={styles.approvalButtons}>
             <TouchableOpacity
               style={[styles.approveBtn, busy && styles.disabled]}
-              onPress={() => handleYesNo('yes')}
+              onPress={() => handleQuickReply('yes')}
               disabled={busy}
               accessibilityRole="button"
             >
@@ -576,11 +585,37 @@ export const ChatScreen: React.FC = () => {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.rejectBtn, busy && styles.disabled]}
-              onPress={() => handleYesNo('no')}
+              onPress={() => handleQuickReply('no')}
               disabled={busy}
               accessibilityRole="button"
             >
               <Text style={styles.rejectText}>No, don’t run it</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : acceptOrRerunPending ? (
+        <View style={styles.approvalBar}>
+          <Text style={styles.approvalLabel}>Accept this result, or re-run to improve it?</Text>
+          <Text style={styles.approvalNote}>
+            A method can be right and still miss a reference it was never meant to
+            reproduce. Re-running costs another full calculation.
+          </Text>
+          <View style={styles.approvalButtons}>
+            <TouchableOpacity
+              style={[styles.approveBtn, busy && styles.disabled]}
+              onPress={() => handleQuickReply('accept')}
+              disabled={busy}
+              accessibilityRole="button"
+            >
+              <Text style={styles.approveText}>Accept this result</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.neutralBtn, busy && styles.disabled]}
+              onPress={() => handleQuickReply('rerun')}
+              disabled={busy}
+              accessibilityRole="button"
+            >
+              <Text style={styles.neutralText}>Re-run to improve</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1048,6 +1083,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   rejectText: { color: C.washuRed, fontWeight: '700', fontSize: 15 },
+  // Re-running is an alternative, not a rejection, so it gets a neutral outline
+  // rather than the red one the reject button uses.
+  neutralBtn: {
+    flex: 1,
+    backgroundColor: C.washuWhite,
+    borderWidth: 1,
+    borderColor: C.textSecondary,
+    borderRadius: 10,
+    paddingVertical: Spacing.three,
+    alignItems: 'center',
+  },
+  neutralText: { color: C.text, fontWeight: '700', fontSize: 15 },
+  approvalNote: { fontSize: 13, color: C.textSecondary, lineHeight: 18 },
   terminalBar: {
     gap: Spacing.two,
     padding: Spacing.three,

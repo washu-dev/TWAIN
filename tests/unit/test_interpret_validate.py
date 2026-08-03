@@ -1113,3 +1113,19 @@ class TestAcceptOrLoopGate:
         with patch.object(SM.sys, "stdin", None):
             assert machine.validate() == State.ACCEPT
         assert machine._rerun.iteration == 0
+
+    @pytest.mark.parametrize("reply,expect_rerun", [
+        ("rerun", True), ("re-run", True), ("retry", True), ("  RERUN  ", True),
+        ("accept", False), ("a", False), ("", False),
+        # "yes" at a two-named-choice question most likely means "yes, accept";
+        # reading it as a rerun would spend a calculation nobody asked for.
+        ("yes", False), ("y", False), ("no", False), ("sure whatever", False),
+    ])
+    def test_only_an_explicit_rerun_spends_the_compute(self, machine, tmp_path,
+                                                       reply, expect_rerun):
+        _seed_planning(machine, tmp_path)
+        _seed_normalized(machine, tmp_path, -3.0)
+        self._answer(machine, reply)
+
+        routed = machine.validate()
+        assert (routed == State.REPLAN) is expect_rerun

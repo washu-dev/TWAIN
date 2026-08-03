@@ -2674,7 +2674,11 @@ class StateMachine:
             return False
         answer = self._ask_user(self._accept_or_loop_prompt(normalized, artifact))
         text = str(answer).strip().lower()
-        if text in {"rerun", "loop", "retry", "again", "r", "y", "yes"}:
+        # Only an explicit ask for another pass spends the compute. "yes" is NOT
+        # one: at a question offering two named choices it most likely means "yes,
+        # accept", so treating it as a rerun would do the opposite of what was
+        # meant. Anything unrecognized accepts, matching the headless default.
+        if text in {"rerun", "re-run", "loop", "retry", "again", "r", "improve"}:
             return True
         logger.info("[validate] the researcher accepted the flagged result.")
         return False
