@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { apiClient, ArtifactMeta, Report } from '@/api/client';
+import { canCopy, copyText } from '@/utils/clipboard';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -268,30 +269,77 @@ const ArtifactRow: React.FC<{ conversationId: string; meta: ArtifactMeta }> = ({
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    // The "Copied" flash outlives the row if the report reloads under it.
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+  }, []);
+
+  /** The file's text, fetching it once if this row has not loaded it yet. */
+  const ensureContent = async (): Promise<string | null> => {
+    if (content !== null) return content;
+    setLoading(true);
+    try {
+      const data = await apiClient.getArtifact(conversationId, meta.name);
+      setContent(data.content);
+      return data.content;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load file');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const toggle = async () => {
     const next = !expanded;
     setExpanded(next);
-    if (next && content === null && !loading) {
-      setLoading(true);
-      try {
-        const data = await apiClient.getArtifact(conversationId, meta.name);
-        setContent(data.content);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load file');
-      } finally {
-        setLoading(false);
-      }
+    if (next && content === null && !loading) await ensureContent();
+  };
+
+  // Copy without needing to expand first: a researcher pasting main.py into a
+  // cluster shell does not want to read it here.
+  const handleCopy = async () => {
+    if (loading) return;
+    const text = await ensureContent();
+    if (text === null) return;
+    if (!(await copyText(text))) {
+      setError('Could not copy to the clipboard — select the text instead.');
+      return;
     }
+    setCopied(true);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(false), 1500);
   };
 
   return (
     <View style={styles.artifact}>
-      <TouchableOpacity style={styles.artifactHeader} onPress={toggle} accessibilityRole="button">
-        <Text style={styles.artifactChevron}>{expanded ? '▾' : '▸'}</Text>
-        <Text style={styles.artifactName} numberOfLines={1}>{meta.name}</Text>
-        <Text style={styles.artifactKind}>{meta.kind}</Text>
-      </TouchableOpacity>
+      {/* The toggle and the copy button are siblings rather than nested, so a tap
+          on Copy cannot also expand the row. */}
+      <View style={styles.artifactHeader}>
+        <TouchableOpacity
+          style={styles.artifactHeaderMain}
+          onPress={toggle}
+          accessibilityRole="button"
+        >
+          <Text style={styles.artifactChevron}>{expanded ? '▾' : '▸'}</Text>
+          <Text style={styles.artifactName} numberOfLines={1}>{meta.name}</Text>
+          <Text style={styles.artifactKind}>{meta.kind}</Text>
+        </TouchableOpacity>
+        {canCopy && (
+          <TouchableOpacity
+            style={[styles.copyBtn, loading && styles.copyBtnDisabled]}
+            onPress={handleCopy}
+            disabled={loading}
+            accessibilityRole="button"
+            accessibilityLabel={`Copy ${meta.name}`}
+          >
+            <Text style={styles.copyText}>{copied ? '✓ Copied' : 'Copy'}</Text>
+          </TouchableOpacity>
+        )}
+      </View>
       {expanded && (
         <View style={styles.artifactBody}>
           {loading && <ActivityIndicator color={C.washuRed} />}
@@ -531,6 +579,23 @@ const styles = StyleSheet.create({
     padding: Spacing.three,
     backgroundColor: C.backgroundElement,
   },
+  artifactHeaderMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    minWidth: 0,          // lets the long file name ellipsize instead of pushing Copy out
+  },
+  copyBtn: {
+    paddingVertical: Spacing.one,
+    paddingHorizontal: Spacing.two,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: C.textSecondary,
+    backgroundColor: C.washuWhite,
+  },
+  copyBtnDisabled: { opacity: 0.5 },
+  copyText: { fontSize: 11, fontWeight: '700', color: C.text },
   artifactChevron: { fontSize: 14, color: C.washuRed, width: 16 },
   artifactName: { flex: 1, fontSize: 14, fontWeight: '600', color: C.text },
   artifactKind: { fontSize: 11, color: C.textSecondary, textTransform: 'uppercase' },
