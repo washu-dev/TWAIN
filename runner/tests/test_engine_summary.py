@@ -78,3 +78,68 @@ def test_stopped_correction_loop_is_flagged(tmp_path):
     assert ("Validation: needs_review (correction loop stopped: converged; "
             "delivered for your review)") in summary
     assert "predicted -2.05 vs -1.72" in summary
+
+
+class TestCorrectionPassIsNotTheApprovalGate:
+    """A correction pass (CORRECT -> BUILD) re-enters BUILD with the plan the
+    researcher already approved. The driver must not read that as the approval
+    gate: doing so posts a second card for a decision already made and stalls
+    the run behind an answer it does not need.
+    """
+
+    def test_gate_proceeds_immediately_when_the_plan_is_already_approved(self):
+        from runner import runner as runner_mod
+        from runner.tests.test_runner import (FakeDB, FakeEngine, FakeOrchestrator,
+                                             RecordingNotifier)
+
+        db, engine = FakeDB(), FakeEngine()
+        engine.approved = True                      # approved in an earlier slice
+        orch = FakeOrchestrator(lambda q: "", None)
+        notifier = RecordingNotifier()
+
+        outcome = runner_mod._cross_approval_gate(
+            db, "conv-1", orch, engine, notifier)
+
+        assert outcome == "proceed"
+        assert db.kinds() == []                     # no second approval card
+        assert notifier.calls == []                 # and no second notification
+
+    def test_gate_still_posts_the_card_when_nothing_is_approved(self):
+        from runner import runner as runner_mod
+        from runner.tests.test_runner import (FakeDB, FakeEngine, FakeOrchestrator,
+                                             RecordingNotifier)
+
+        db, engine = FakeDB(), FakeEngine()
+        orch = FakeOrchestrator(lambda q: "", None)
+
+        outcome = runner_mod._cross_approval_gate(
+            db, "conv-1", orch, engine, RecordingNotifier())
+
+        assert outcome == "released"
+        assert "approval_request" in db.kinds()
+
+
+class TestArtifactRetirement:
+    """capture_artifacts must be able to express "this pass produced no result":
+    the report endpoint reads the artifacts table, not the run context, so an
+    upsert-only store served the previous pass's metric as this run's own.
+    """
+
+    def test_a_result_no_longer_produced_is_removed_from_the_store(self):
+        import types
+
+        from runner.artifacts import capture_artifacts
+        from runner.tests.test_runner import FakeDB
+
+        db = FakeDB()
+        db.upsert_artifact("conv-1", "normalized_result", '{"old": 1}', "json")
+        db.upsert_artifact("conv-1", "intent_spec", '{"keep": 1}', "json")
+
+        # a pass whose context no longer references a normalized result
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(context=types.SimpleNamespace(artifacts={})))
+        capture_artifacts(db, "conv-1", orch)
+
+        names = [a["name"] for a in db.artifacts]
+        assert "normalized_result" not in names
+        assert "intent_spec" in names       # only retractable outputs are retired

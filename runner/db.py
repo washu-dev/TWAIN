@@ -315,6 +315,19 @@ class RunnerDB:
             (session_id, name, kind, content),
         )
 
+    def delete_artifact(self, session_id: str, name: str) -> None:
+        """Drop one stored artifact.
+
+        Needed because a stage can *un-produce* an artifact: a correction pass
+        whose rerun was skipped clears its normalized result, and an upsert-only
+        store would keep serving the previous pass's number to the report as
+        though this run had produced it.
+        """
+        self._execute(
+            "DELETE FROM artifacts WHERE session_id = %s AND name = %s;",
+            (session_id, name),
+        )
+
     def get_artifacts(self, session_id: str) -> list:
         """Every stored artifact (name + content) for a session.
 

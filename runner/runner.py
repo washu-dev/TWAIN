@@ -222,6 +222,15 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
     the BUILD→REPAIR / REPAIR→EXECUTE guards let the run proceed, and applies any
     Slurm resource overrides the user edited on the approval card.
     """
+    # BUILD is not only the approval gate. A correction pass (VALIDATE →
+    # needs_review → CORRECT → BUILD) comes back through it carrying the plan the
+    # researcher already approved, and if that pass lands in a new job slice the
+    # driver arrives here with nothing to consume -- posting a second card for a
+    # plan that was already decided, and stalling the run behind an answer it
+    # does not need. An approval on the books means this is not the gate.
+    if engine.plan_is_approved(orch):
+        return "proceed"
+
     if _env_flag("TWAIN_AUTO_RUN"):
         engine.approve_plan(orch)
         db.add_assistant_message(

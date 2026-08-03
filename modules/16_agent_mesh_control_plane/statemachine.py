@@ -2332,6 +2332,13 @@ class StateMachine:
         "aqueous_solubility": "logS",
         "aqueous solubility": "logS",
         "log_s": "logS",
+        # The plan names the metric after the property AND its unit, which is
+        # what the generated scripts print; the baseline DB keys on the property
+        # alone, so this run missed aspirin's own -1.72 literature value.
+        "aqueous_solubility_logs": "logS",
+        "aqueous_solubility_log_mol_per_l": "logS",
+        "solubility_logs": "logS",
+        "logs": "logS",
     }
 
     def interpret(self) -> State:
@@ -2591,6 +2598,10 @@ class StateMachine:
         previous behavior: route on whatever verdict the context carries,
         defaulting to ACCEPT so a planning-only run still terminates.
         """
+        # CORRECT's plan belongs to the pass that produced it (see _STAGE_OUTPUTS):
+        # left in place, a run that ends accepted still ships a diagnosis of what
+        # supposedly went wrong.
+        self.context.artifacts.pop("correction_plan", None)
         normalized = self._load_artifact("normalized_result")
         if normalized is not None:
             self.context.validation_result = self._cross_validate(normalized)
@@ -2622,7 +2633,15 @@ class StateMachine:
         reachable once a report exists, so a seeded or first-pass verdict (the
         runner seeds one to satisfy the stub guards) is never overridden.
         """
-        report = self._load_artifact("validation_report") or {}
+        report = self._load_artifact("validation_report")
+        if report is None:
+            # The path is in the context but the file is gone or unreadable.
+            # Writing a rerun-only stub here would REPLACE the real report with
+            # one carrying no comparison and no rationale, so leave it alone.
+            logger.info("[validate] the previous validation report is unreadable; "
+                        "delivering on the verdict already on record (%s).",
+                        self.context.validation_result)
+            return "accepted"
         verdict = report.get("acceptance_status") or self.context.validation_result
         report["rerun"] = {
             "decision": "stop",

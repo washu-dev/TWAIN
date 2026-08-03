@@ -171,6 +171,15 @@ class _RealEngine:
         """Record a real plan approval so the run may proceed past the BUILD gate."""
         orch.approve_plan()
 
+    def plan_is_approved(self, orch) -> bool:
+        """Whether this run's plan already carries the researcher's approval.
+
+        BUILD is re-entered for reasons that are not the approval gate -- a
+        correction pass comes back through it with the same approved plan -- so
+        the driver needs to tell "waiting on a human" from "already decided".
+        """
+        return bool(getattr(orch.sm.context, "plan_approved", False))
+
     def replan_with_feedback(self, orch, feedback: str) -> None:
         """Fold the researcher's rejection feedback into the run and rewind it.
 

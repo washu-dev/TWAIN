@@ -876,3 +876,47 @@ def test_correct_never_rewrites_the_selected_method(machine, tmp_path):
     assert plan["application"]["applied"] == []
     assert plan["application"]["requires_replanning"] == ["switch_model"]
     assert "PLAN's job" in plan["application"]["note"]
+
+
+def test_validate_retires_the_previous_correction_plan(machine, tmp_path):
+    """VALIDATE owns correction_plan (see _STAGE_OUTPUTS): a run that ends up
+    accepted must not still ship a diagnosis of what supposedly went wrong."""
+    _seed_planning(machine, tmp_path)
+    _seed(machine, tmp_path, "correction_plan", {"diagnosis": "from the last pass"})
+    _seed_normalized(machine, tmp_path, -1.70)   # this pass agrees with literature
+
+    assert machine.validate() == State.ACCEPT
+    assert "correction_plan" not in machine.context.artifacts
+
+
+def test_an_unreadable_previous_report_is_not_replaced_by_a_stub(machine, tmp_path):
+    """_stop_unproductive_loop amends the previous report. If that report cannot
+    be read, writing anyway would REPLACE it with a rerun-only stub carrying no
+    comparison and no rationale."""
+    _seed_planning(machine, tmp_path)
+    missing = tmp_path / "gone_validation_report.json"
+    machine.context.artifacts["validation_report"] = str(missing)
+    machine.context.validation_result = "needs_review"
+    _seed_execution(machine, tmp_path, succeeded=False)
+
+    machine.interpret()
+    assert machine.validate() == State.ACCEPT
+    assert not missing.exists()      # no stub written over the real thing
+
+
+def test_the_plan_metric_name_matches_the_baseline_property(machine, tmp_path):
+    """Regression: aspirin's own literature value was in configs/baselines.json
+    and the run missed it, because the plan names the metric after the property
+    AND its unit ('aqueous_solubility_logS') while the DB keys on 'logS'."""
+    plan = dict(PLAN, requested_property="aqueous_solubility_logS",
+                acceptance_metrics=[{"metric_name": "aqueous_solubility_logS",
+                                     "target_value": -1.72, "tolerance": 0.5}])
+    _seed(machine, tmp_path, "intent_spec", INTENT)
+    _seed(machine, tmp_path, "execution_plan", plan)
+    _seed_normalized(machine, tmp_path, -1.70, name="aqueous_solubility_logS")
+
+    assert machine.validate() == State.ACCEPT
+    report = machine._load_artifact("validation_report")
+    # graded against the literature baseline, not the acceptance-criteria fallback
+    assert report["gap_basis"] == "relative_error"
+    assert report["cross_validation"]["comparisons"][0]["literature"] == -1.72
