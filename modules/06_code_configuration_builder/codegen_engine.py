@@ -168,29 +168,70 @@ def has_runnable_entrypoint(source: str) -> bool:
     return False
 
 
-def extract_valid_source(raw, calculator_import: Optional[str] = None) -> Optional[str]:
-    """Fenced-or-raw agent reply -> a usable script, or ``None``.
+def validate_source(raw, calculator_import: Optional[str] = None):
+    """``(source, None)`` for a usable script, else ``(None, reason)``.
 
-    Returns ``None`` when the reply is non-string/empty, doesn't compile, has no
-    runnable entrypoint, or (when ``calculator_import`` is given) never references
-    that import. The entrypoint check catches a truncated reply: a script cut off
-    mid-body often still *compiles* (its last partial line is a valid statement)
-    and mentions the calculator, but defines functions it never calls -- so
-    running it does nothing. Rejecting it lets the caller repair or fall back
-    instead of shipping a script that silently no-ops.
+    The reason matters: a rejected reply used to vanish into a bare ``None``, so
+    a silent fall back to the do-nothing scaffold was indistinguishable from a
+    gateway outage -- and the run went to the cluster either way (observed on
+    Slurm job 2569967, which "succeeded" in 5 seconds having computed nothing).
+
+    The entrypoint check catches a truncated reply: a script cut off mid-body
+    often still *compiles* (its last partial line is a valid statement) and
+    mentions the calculator, but defines functions it never calls -- so running
+    it does nothing. ``no_entrypoint`` is therefore the fingerprint of hitting
+    the token cap, which is why it is reported separately.
     """
     if not isinstance(raw, str) or not raw.strip():
-        return None
+        return None, "empty_reply"
     source = strip_code_fences(raw)
     try:
         compile(source, "main.py", "exec")
-    except SyntaxError:
-        return None
+    except SyntaxError as exc:
+        return None, f"syntax_error: {exc.msg} (line {exc.lineno})"
     if calculator_import and calculator_import.lower() not in source.lower():
-        return None
+        return None, f"never_references_{calculator_import}"
     if not has_runnable_entrypoint(source):
-        return None
-    return source
+        # Compiles but calls nothing -- almost always a reply cut off at the cap.
+        return None, "no_entrypoint (reply likely truncated at the token cap)"
+    return source, None
+
+
+def extract_valid_source(raw, calculator_import: Optional[str] = None) -> Optional[str]:
+    """Fenced-or-raw agent reply -> a usable script, or ``None``.
+
+    Thin wrapper over :func:`validate_source` for callers that only need the
+    script (the REPAIR stage); BUILD wants the reason too.
+    """
+    return validate_source(raw, calculator_import)[0]
+
+
+class SynthesisFailed(RuntimeError):
+    """Code synthesis produced nothing usable and the caller needs a real script.
+
+    Raised only when ``generate(require_synthesis=True)``: the run is about to
+    execute, and the generic scaffold would burn the allocation computing nothing
+    while reporting success. Carries the per-attempt reasons so the failure names
+    a cause -- a gateway error, a reply that never mentioned the calculator, or a
+    reply truncated at the token cap -- instead of leaving it to be guessed at.
+    """
+
+    def __init__(self, tool_name, calculator, agent_missing, synthesis):
+        self.synthesis = synthesis or {}
+        self.attempts = self.synthesis.get("attempts") or []
+        target = calculator or tool_name
+        if agent_missing:
+            detail = "no LLM agent was available to write it"
+        elif self.attempts:
+            detail = "; ".join(
+                f"attempt {a.get('attempt')}: {a.get('reason')}" for a in self.attempts)
+        else:
+            detail = "no attempt was recorded"
+        super().__init__(
+            f"could not generate a runnable {target} script, and this run is set "
+            f"to execute -- refusing to submit the placeholder scaffold, which "
+            f"would exit 0 having computed nothing. Reason(s): {detail}"
+        )
 
 
 @dataclass(frozen=True)
@@ -686,11 +727,20 @@ class CodegenEngine:
     generated code and stays offline/deterministic for unit tests.
     """
 
+    # Samples to draw before giving up on synthesis. One draw is flaky -- the same
+    # prompt that fails extraction often succeeds on a retry -- and the REPAIR
+    # stage already takes two for exactly this reason.
+    SYNTHESIS_ATTEMPTS = 2
+
     def __init__(self, templates_dir: Optional[Union[str, Path]] = None):
         self.templates_dir = (
             Path(templates_dir) if templates_dir
             else Path(__file__).resolve().parent / "templates"
         )
+        # What the last synthesis attempt did, for the caller to record. Without
+        # it a rejected reply and an unreachable gateway were indistinguishable:
+        # both fell back to the do-nothing scaffold, silently.
+        self.last_synthesis: Optional[dict] = None
 
     # -- template selection --------------------------------------------------
     def select_template(self, tool_name: str, *, hint: str = "") -> TemplateSpec:
@@ -760,7 +810,8 @@ class CodegenEngine:
 
     # -- main entry ----------------------------------------------------------
     def generate(self, plan, *, intent: Optional[dict] = None, agent=None,
-                 smoke_compute: bool = False) -> RunBundle:
+                 smoke_compute: bool = False,
+                 require_synthesis: bool = False) -> RunBundle:
         """Build a :class:`RunBundle` from an ExecutionPlan.
 
         ``plan`` may be an ``ExecutionPlan`` dataclass, a plain dict, or a path
@@ -772,6 +823,13 @@ class CodegenEngine:
         gap). Any synthesis failure falls back to a deterministic template so
         codegen never depends on the network to succeed; offline (``agent=None``)
         always renders a template.
+
+        ``require_synthesis`` refuses that fallback. The generic scaffold loads
+        the tool and writes a stub -- a fine deliverable to read, but running it
+        computes nothing while exiting 0, so the payload, Slurm and TWAIN all
+        report success (observed on job 2569967: "completed successfully" in five
+        seconds, no chemistry done). A caller about to EXECUTE passes True and
+        gets a loud failure carrying the synthesis reasons instead.
         """
         plan = self._plan_to_dict(plan)
         method = plan.get("selected_method", {}) or {}
@@ -785,6 +843,7 @@ class CodegenEngine:
             return self._generate_with_calculator(
                 plan, libraries, calculator, calculator_import, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
+                require_synthesis=require_synthesis,
             )
         # Library-only run. Prefer a dedicated, tested template when one fits the
         # tool (Pymatgen/ASE/RDKit). Otherwise, if the plan asks for a real property
@@ -805,6 +864,7 @@ class CodegenEngine:
             return self._generate_with_calculator(
                 plan, libraries, None, None, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
+                require_synthesis=require_synthesis,
             )
         return self._generate_standard(plan, tool_name, intent=intent)
 
@@ -860,7 +920,8 @@ class CodegenEngine:
     # -- calculator-driven path (LLM synthesis + tool-agnostic fallback) ------
     def _generate_with_calculator(self, plan, libraries, calculator,
                                   calculator_import, calculator_library,
-                                  *, intent, agent, smoke_compute: bool = False) -> RunBundle:
+                                  *, intent, agent, smoke_compute: bool = False,
+                                  require_synthesis: bool = False) -> RunBundle:
         generated_at = (plan.get("metadata") or {}).get("timestamp", "") or ""
         acceptance = plan.get("acceptance_metrics", []) or []
         requested_property = plan.get("requested_property") or "the requested property"
@@ -902,9 +963,14 @@ class CodegenEngine:
         # + property -- there is NO per-property template. If the gateway is
         # unavailable or returns invalid Python, fall back to a tool-agnostic
         # scaffold (loads the toolset, writes a stub) -- never a preset.
+        self.last_synthesis = None
         main_py = self._synthesize_with_llm(brief, agent) if agent is not None else None
         template_name = "llm_synthesized"
         if main_py is None:
+            if require_synthesis:
+                raise SynthesisFailed(
+                    calculator_library or (libraries[0] if libraries else "the tool"),
+                    calculator, agent is None, self.last_synthesis)
             main_py = self._render_generic_fallback(brief, generated_at, acceptance)
             template_name = _GENERIC.filename
 
@@ -983,15 +1049,32 @@ class CodegenEngine:
         (:class:`code_gen.script_doctor.ScriptDoctor`), which runs after BUILD --
         so codegen itself never executes generated code.
         """
-        try:
-            raw = agent(self._codegen_prompt(brief))
-        except Exception:  # noqa: BLE001 - any agent failure -> caller falls back to a template
-            return None
         # Require the script to reference the calculator (calculator run) or, for a
         # library-only run, the library itself -- so a stub that never touches the
         # tool is rejected and the caller falls back to the deterministic template.
         must_reference = brief.get("calculator_import") or brief.get("library_import")
-        return extract_valid_source(raw, must_reference)
+        prompt = self._codegen_prompt(brief)
+        attempts = []
+        # Two samples, for the reason the REPAIR stage already takes two: one
+        # draw is flaky, and the same prompt that fails extraction often
+        # succeeds on a retry. Cheap next to a wasted cluster allocation.
+        for attempt in range(1, self.SYNTHESIS_ATTEMPTS + 1):
+            try:
+                raw = agent(prompt)
+            except Exception as exc:  # noqa: BLE001 - recorded, then retried/fallen back
+                attempts.append({"attempt": attempt,
+                                 "reason": f"agent_error: {type(exc).__name__}: {exc}"})
+                continue
+            source, reason = validate_source(raw, must_reference)
+            if source is not None:
+                self.last_synthesis = {"ok": True, "attempts": attempts,
+                                       "attempt": attempt,
+                                       "reply_chars": len(raw or "")}
+                return source
+            attempts.append({"attempt": attempt, "reason": reason,
+                             "reply_chars": len(raw or "")})
+        self.last_synthesis = {"ok": False, "attempts": attempts}
+        return None
 
     def _codegen_prompt(self, brief) -> str:
         """Render the initial code-synthesis prompt from the run brief."""
