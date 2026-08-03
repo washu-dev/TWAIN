@@ -119,7 +119,11 @@ function parsePlanSummary(content: string): PlanSummary | null {
 export const ChatScreen: React.FC = () => {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string }>();
-  const { user } = useAuth();
+  // isLoading/isAuthenticated gate the initial fetch: the request interceptor
+  // sends a call with no Authorization header when MSAL has no token yet, and the
+  // API answers 401 -- so a cold load raced auth and surfaced an error to a user
+  // who was perfectly entitled to the run.
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [input, setInput] = useState('');
   const [issueOpen, setIssueOpen] = useState(false); // "provision this engine" GitHub issue
@@ -223,6 +227,7 @@ export const ChatScreen: React.FC = () => {
   // Load an existing conversation when navigated to with an id (Browse/resume).
   useEffect(() => {
     if (!params.id || conversation) return;
+    if (authLoading || !isAuthenticated) return;   // no token yet -> would 401
     let cancelled = false;
     (async () => {
       try {
@@ -235,7 +240,7 @@ export const ChatScreen: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [params.id, conversation]);
+  }, [params.id, conversation, authLoading, isAuthenticated]);
 
   // Poll while the run is active; stop once it reaches a terminal state.
   useEffect(() => {

@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { apiClient, ArtifactMeta, Report } from '@/api/client';
+import { useAuth } from '@/hooks/useAuth';
 import { canCopy, copyText } from '@/utils/clipboard';
 import { Colors, Spacing } from '@/constants/theme';
 
@@ -19,12 +20,15 @@ const C = Colors.light;
 export const ReportScreen: React.FC = () => {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!id) return;
+    // Same auth race as ChatScreen: fetching before MSAL has a token 401s.
+    if (authLoading || !isAuthenticated) return;
     let cancelled = false;
     (async () => {
       try {
@@ -39,7 +43,7 @@ export const ReportScreen: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, authLoading, isAuthenticated]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
