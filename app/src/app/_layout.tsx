@@ -49,6 +49,12 @@ function RootNavigator() {
         <Stack.Screen name="browse" options={{ title: 'Simulations' }} />
         <Stack.Screen name="report" options={{ title: 'Report' }} />
         <Stack.Screen name="settings" options={{ title: 'Settings' }} />
+        {/* The notification emails' deep link (/conversations/<id>). Expo Router
+            registers every file route whether or not it is named here, so leaving
+            it out did not make it public-by-omission -- it made it reachable
+            while signed out, where ChatScreen fetched immediately and the API
+            answered 401 instead of the visitor being asked to sign in. */}
+        <Stack.Screen name="conversations/[id]" options={{ title: 'TWAIN Chat' }} />
       </Stack.Protected>
 
       {/* Login is only reachable while signed out. */}
