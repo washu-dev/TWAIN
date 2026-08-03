@@ -393,10 +393,20 @@ class TestApprovalGate:
         assert limits["ram"] == 900
         assert limits["max_time"] == 360.0  # longest partition wall, in hours
 
-    def test_local_card_has_no_slurm_limits(self):
-        from runner.bridges import _plan_summary
+    def test_a_local_card_shows_this_machine_not_the_cluster(self):
+        """The card offers editable resource fields either way, so it needs the
+        ceilings either way -- but they must belong to whatever will actually run
+        it. Handing a laptop the cluster's 900 GB is worse than showing nothing.
+        """
+        from runner.bridges import _local_limits, _plan_summary
         summary = _plan_summary({"metadata": {}}, compute_target="local")
-        assert "slurm_limits" not in summary
+
+        assert summary["limits_source"] == "this machine"
+        assert summary["slurm_limits"] == _local_limits()
+        assert "slurm_cluster" not in summary
+        # never the cluster profile's figures
+        assert summary["slurm_limits"].get("ram") != 900
+        assert summary["slurm_limits"].get("cpu_count") != 64
 
 
 # ── process_job / the drive loop ──────────────────────────────────────────────

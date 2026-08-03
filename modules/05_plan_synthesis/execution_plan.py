@@ -115,9 +115,16 @@ class ExecutionPlan:
     # at plan time so the approval gate shows *what will happen*, not just which
     # tools are used. Optional so existing plans/tests are unaffected.
     summary: Optional[str] = None
+    # Why each suggested Slurm figure is what it is, keyed by field name. The
+    # approval card shows these so the researcher can see the numbers are TWAIN's
+    # suggestion and on what basis, rather than guessing whether they are a hard
+    # requirement. Optional so existing plans/tests are unaffected.
+    slurm_rationale: Optional[dict] = None
     def __post_init__(self):
         if self.summary is not None and type(self.summary) is not str:
             raise ValueError("summary must be a str when provided")
+        if self.slurm_rationale is not None and type(self.slurm_rationale) is not dict:
+            raise ValueError("slurm_rationale must be a dict when provided")
         if type(self.selected_method) is dict:
             self.selected_method = SelectedMethod(**self.selected_method)
         elif type(self.selected_method) is not SelectedMethod:

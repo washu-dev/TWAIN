@@ -188,6 +188,41 @@ def _atom_count(system_descriptors) -> Optional[int]:
     return None
 
 
+# Core counts that divide a domain decomposition or k-point grid without an
+# awkward remainder. The suggestion snaps down to one of these.
+_PARALLEL_WIDTHS = (2, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48, 56, 64)
+
+
+def _cores_per_atom() -> float:
+    """Cores to suggest per atom. ``TWAIN_CORES_PER_ATOM``, default 1.0.
+
+    Deliberately tunable: one core per atom is a serviceable default for
+    plane-wave DFT, not a law, and the right ratio depends on the method and the
+    machine. A non-positive or unparseable value falls back to the default.
+    """
+    try:
+        ratio = float(os.environ.get("TWAIN_CORES_PER_ATOM", "1.0"))
+    except (TypeError, ValueError):
+        return 1.0
+    return ratio if ratio > 0 else 1.0
+
+
+def _suggest_cpu_count(atoms: int, max_cpus: int) -> int:
+    """A parallel-friendly core count for an ``atoms``-atom system.
+
+    Scales with system size, snaps DOWN to a width that decomposes cleanly (so
+    21 atoms asks for 20 rather than 21), and clamps to [2, ``max_cpus``].
+    Snapping down rather than up keeps a queue request from exceeding what the
+    calculation can actually use.
+    """
+    ceiling = max(2, int(max_cpus))
+    raw = max(2, int(round(atoms * _cores_per_atom())))
+    if raw >= ceiling:
+        return ceiling
+    friendly = [w for w in _PARALLEL_WIDTHS if w <= raw and w <= ceiling]
+    return friendly[-1] if friendly else 2
+
+
 def _cluster_node_limits() -> dict:
     """Per-node resource ceilings of the configured Slurm cluster.
 
@@ -1480,6 +1515,14 @@ class StateMachine:
                 heavy_hours = HEAVY_WALL_MINUTES / 60.0
                 if execution_plan.slurm_request.max_time < heavy_hours:
                     execution_plan.slurm_request.max_time = heavy_hours
+                    rationale = dict(execution_plan.slurm_rationale or {})
+                    rationale["max_time"] = (
+                        f"TWAIN's suggestion: {heavy_hours:g} h, raised from the "
+                        f"generic default because {calc_entry.name} is a heavy "
+                        f"calculation that the short-queue limit would kill. "
+                        f"Lower it if you know this run is quick."
+                    )
+                    execution_plan.slurm_rationale = rationale
             if calc_entry.needs_external_data:
                 note += " (needs external parameter data to run)"
             execution_plan.safety_notes.append(note)
@@ -1528,15 +1571,26 @@ class StateMachine:
                     f"(runner/README.md), and TWAIN will run it in the linux-64 container.")
         execution_plan.target_system = intent.get("system_descriptors") or None
         execution_plan.requested_property = requested_property
-        # Suggested CPU request: ~1 CPU per atom beats the flat default -- a
-        # 2-atom Si cell stops over-requesting and a big supercell gets real
-        # parallelism. Floored at 2 (k-point/domain parallel needs a partner)
-        # and capped at the cluster's per-node CPU count; still editable on
-        # the approval card, which shows the node ceilings alongside.
+        # Suggest a CPU count from the system size, and say so on the card. This
+        # is a starting point, not a rule: cores-per-atom is a rough proxy for
+        # how much parallelism a calculation can use, so the ratio is tunable
+        # (TWAIN_CORES_PER_ATOM) and the result is rounded to a width that
+        # divides a domain decomposition sensibly rather than landing on an
+        # awkward count like 21. Floored at 2 (k-point/domain parallelism needs a
+        # partner), capped at the node's cores, and editable on the approval card.
         atoms = _atom_count(intent.get("system_descriptors"))
         if atoms:
             max_cpus = _cluster_node_limits().get("cpu_count") or 64
-            execution_plan.slurm_request.cpu_count = max(2, min(atoms, max_cpus))
+            cores = _suggest_cpu_count(atoms, max_cpus)
+            execution_plan.slurm_request.cpu_count = cores
+            execution_plan.slurm_rationale = {
+                "cpu_count": (
+                    f"TWAIN's suggestion: {cores} cores for a {atoms}-atom system "
+                    f"(about {_cores_per_atom():g} per atom, rounded to a "
+                    f"parallel-friendly width, capped at the node's {max_cpus}). "
+                    f"A rough proxy for available parallelism -- change it freely."
+                ),
+            }
         # A Materials Project retrieval is credential-gated: without MP_API_KEY
         # in the runner's environment the generated lookup script cannot run.
         # Say so ON THE APPROVAL CARD, before any build or queue time is spent.

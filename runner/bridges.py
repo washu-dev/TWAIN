@@ -38,6 +38,7 @@ answer that arrives after the pipeline has moved on is not applied late. See
 :func:`_fresh_reply`.
 """
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -312,21 +313,54 @@ def _plan_summary(
         "cost_estimate": plan.get("cost_estimate"),
         "compute_estimate": plan.get("compute_estimate"),
         "slurm_request": plan.get("slurm_request"),
+        "slurm_rationale": plan.get("slurm_rationale"),
         "acceptance_metrics": plan.get("acceptance_metrics"),
         "safety_notes": plan.get("safety_notes"),
     }
+    # The card offers editable resource fields whichever way the run is routed,
+    # so it needs the ceilings either way -- and they must be the ceilings of the
+    # machine that will actually run it. Sending the cluster's node limits for a
+    # run executing locally would tell the researcher they can ask for 900 GB on
+    # a laptop.
+    summary["slurm_units"] = {
+        "ram": "GB",
+        "max_time": "hours",
+        "cpu_count": "cores",
+        "gpu_count": "GPUs",
+    }
     if target == "slurm":
         summary["slurm_cluster"] = slurm_cluster or "compute2"
-        summary["slurm_units"] = {
-            "ram": "GB",
-            "max_time": "hours",
-            "cpu_count": "cores",
-            "gpu_count": "GPUs",
-        }
         limits = _cluster_limits(summary["slurm_cluster"])
-        if limits:
-            summary["slurm_limits"] = limits
+    else:
+        limits = _local_limits()
+    if limits:
+        summary["slurm_limits"] = limits
+        summary["limits_source"] = (
+            f"{summary['slurm_cluster']} node" if target == "slurm" else "this machine"
+        )
     return summary
+
+
+@lru_cache(maxsize=1)
+def _local_limits() -> dict | None:
+    """Resource ceilings of the box the runner is on, or None.
+
+    A locally-routed run is bounded by this machine, not by the cluster profile.
+    No wall-clock ceiling is reported because a local run has none, and GPUs are
+    omitted rather than guessed at.
+    """
+    limits: dict = {}
+    cores = os.cpu_count()
+    if cores:
+        limits["cpu_count"] = cores
+    try:
+        import psutil
+        limits["ram"] = int(psutil.virtual_memory().total / (1024 ** 3))
+    except Exception as exc:  # noqa: BLE001 -- psutil absent or unreadable
+        # Omit RAM rather than guess: the card shows no ceiling for a field it
+        # cannot bound, which is honest, so this is not worth failing over.
+        print(f"[runner] local RAM ceiling unavailable ({exc}); omitting it")
+    return limits or None
 
 
 @lru_cache(maxsize=4)
