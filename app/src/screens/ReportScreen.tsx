@@ -83,6 +83,8 @@ export const ReportScreen: React.FC = () => {
             fallbackOutput={report.result ? null : stdoutTail(report)}
           />
 
+          <ValidationCard report={report} />
+
           <SummaryCard report={report} />
 
           <BudgetCard report={report} />
@@ -91,6 +93,66 @@ export const ReportScreen: React.FC = () => {
         </ScrollView>
       )}
     </SafeAreaView>
+  );
+};
+
+// How the result was checked (Epic 6): the interpreted metric and the
+// cross-validation verdict. Renders only when the run interpreted something —
+// planning-only or failed runs have nothing to validate.
+const ValidationCard: React.FC<{ report: Report }> = ({ report }) => {
+  const validation =
+    typeof report.validation === 'object' && report.validation ? report.validation : null;
+  const normalized =
+    typeof report.normalized_result === 'object' && report.normalized_result
+      ? report.normalized_result
+      : null;
+  if (!validation && !normalized) return null;
+
+  const metric = (normalized?.['primary_metric'] ?? null) as
+    | { name?: string; value?: number; uncertainty?: number; unit?: string }
+    | null;
+  const metricText =
+    metric && typeof metric.value === 'number'
+      ? `${metric.name} = ${formatValue(metric.value)}` +
+        (metric.uncertainty ? ` ± ${formatValue(metric.uncertainty)}` : '') +
+        (metric.unit ? ` ${metric.unit}` : '')
+      : null;
+
+  const status = String(validation?.['acceptance_status'] ?? 'not performed');
+  const rationale =
+    typeof validation?.['rationale'] === 'string' ? (validation['rationale'] as string) : null;
+  const rerun = (validation?.['rerun'] ?? null) as
+    | { decision?: string; stop_reason?: string; reason?: string; final_verdict?: string }
+    | null;
+  const stopped = rerun?.decision === 'stop';
+
+  const statusColor =
+    status === 'accepted' ? C.washuGreen : status === 'rejected' ? C.washuRed : '#B56A00';
+
+  return (
+    <View style={styles.card}>
+      <View style={styles.validationHeader}>
+        <Text style={styles.cardTitle}>Validation</Text>
+        <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
+          <Text style={styles.statusBadgeText}>{status.replace('_', ' ')}</Text>
+        </View>
+      </View>
+      {metricText && <Row label="Interpreted result" value={metricText} />}
+      {rationale && <Text style={styles.validationRationale}>{rationale}</Text>}
+      {!validation && (
+        <Text style={styles.note}>
+          A result was extracted, but no reference (literature baseline or acceptance
+          criterion) was available to check it against.
+        </Text>
+      )}
+      {stopped && (
+        <Text style={styles.note}>
+          The automatic correction loop stopped (
+          {rerun?.stop_reason ?? rerun?.reason ?? 'budget exhausted'}). The result is delivered
+          for your review — verdict on record: {rerun?.final_verdict ?? status}.
+        </Text>
+      )}
+    </View>
   );
 };
 
@@ -419,6 +481,13 @@ const styles = StyleSheet.create({
   meterFill: { height: 8, borderRadius: 4, backgroundColor: C.washuGreen },
   meterFillOver: { backgroundColor: C.washuRed },
   summaryText: { fontSize: 14, color: C.text, lineHeight: 20, marginBottom: Spacing.two },
+  validationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.one,
+  },
+  validationRationale: { fontSize: 13, color: C.text, lineHeight: 19, marginTop: Spacing.one },
   resultCard: {
     borderRadius: 12,
     borderWidth: 1,

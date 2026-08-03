@@ -140,7 +140,34 @@ def capture_artifacts(db, session_id: str, orch) -> int:
             ):
                 saved += 1
     saved += _capture_outputs(db, session_id, exec_result_path, bundle_names)
+    _retire_unproduced(db, session_id, artifacts)
     return saved
+
+
+# Stage outputs a later pass can legitimately un-produce. Anything else that
+# vanishes from the context is left alone: a run only ever adds intent_spec,
+# plans and bundles, so a missing one there means a partial capture, not a
+# retraction, and deleting it would lose the researcher's history.
+_RETRACTABLE = ("normalized_result", "validation_report", "correction_plan")
+
+
+def _retire_unproduced(db, session_id: str, artifacts: dict) -> None:
+    """Delete stored artifacts this pass no longer produces.
+
+    ``upsert_artifact`` alone cannot express "this run produced no result": the
+    row from the previous pass survives, and the report endpoint reads the table,
+    not the run context -- so a correction pass whose rerun was skipped had its
+    predecessor's metric served as its own interpreted result. Best-effort, for
+    the same reason the upserts are.
+    """
+    for name in _RETRACTABLE:
+        if name in artifacts:
+            continue
+        try:
+            db.delete_artifact(session_id, name)
+        except Exception as exc:  # noqa: BLE001 -- best-effort, mirrors _try_upsert
+            print(f"[runner] could not retire artifact {name!r} "
+                  f"for {session_id}: {exc}")
 
 
 def _capture_outputs(db, session_id: str, exec_result_path: str | None, skip: set) -> int:

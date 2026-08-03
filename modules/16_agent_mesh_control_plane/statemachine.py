@@ -1,5 +1,8 @@
+import hashlib
+import io
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -17,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 from intake.intent_spec import IntentSpec
 from result_interpreter.result_package import ResultPackage
+from result_interpreter.extractors.base import (ParsedField, ParsedOutput,
+                                                ParserError, get_parser)
+from result_interpreter.metric_normalizer import NormalizedResult, normalize
+from cross_validation.acceptance_judge import AcceptanceThresholds, cross_validate
+from cross_validation.baseline_validator import Prediction
+from self_correction.failure_classifier import RunEvidence
+from self_correction.reflection import reflect
+from self_correction.rerun_controller import RerunController
+from self_correction.strategies import CorrectionContext, build_plan
 from states import State, Context, GuardsBroken, InvalidTransition
 from crash_recovery import DataStorage
 from AgentInterface import AgentInterface
@@ -271,6 +283,72 @@ def _runtime_traceback(result) -> Optional[str]:
 _INTENT_MAP_CACHE: Optional[dict] = None
 
 
+def _json_safe(value):
+    """Replace non-finite floats with None so an artifact is valid JSON.
+
+    ``json.dump`` writes bare ``NaN``/``Infinity`` by default, which strict
+    readers reject: Starlette serializes API responses with ``allow_nan=False``,
+    so a single NaN anywhere in an artifact turns the whole report endpoint into
+    a 500 rather than degrading one field. Null is the honest JSON spelling of
+    "this number does not exist".
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+# Verdict ranking: a run is only as good as its worst check.
+_SEVERITY = {"accepted": 0, "needs_review": 1, "rejected": 2}
+
+
+def _as_float(cell):
+    """``cell`` as a finite float, or None when it is not a number."""
+    try:
+        value = float(str(cell).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _stamp_sample_count(normalized, parsed, primary_name: str):
+    """Record how many samples the primary metric was aggregated from.
+
+    One number that is the mean of many rows is a different claim from one
+    measured once, and validation has to tell them apart before comparing
+    against a single reference (see _ungradable_aggregate).
+    """
+    field = parsed.get(primary_name)
+    if field is not None:
+        normalized.metadata["primary_samples"] = len(field.values)
+    return normalized
+
+
+def _finite_fields(parsed):
+    """``parsed`` with non-finite samples dropped, or None if nothing survives.
+
+    A NaN is the absence of a measurement, not a measurement -- but it arrives
+    mixed in with real ones (one diverged row in a 200-row prediction CSV, a
+    diagnostic column that is NaN beside a perfectly good primary metric).
+    Discarding the whole field, or the whole output, would throw away every
+    valid sample alongside it, so only the non-finite points are dropped and a
+    field is removed only when it has no finite sample left at all.
+    """
+    kept = []
+    for fld in parsed.fields:
+        values = [v for v in fld.values if math.isfinite(v)]
+        if not values:
+            continue
+        kept.append(ParsedField(name=fld.name, values=values,
+                                unit=fld.unit, source=fld.source))
+    if not kept:
+        return None
+    return ParsedOutput(fields=kept, metadata=dict(parsed.metadata))
+
+
 def _intent_map() -> dict:
     """Load (once) the data-driven discovery intent map from ``configs/``.
 
@@ -301,16 +379,21 @@ REWINDABLE_STATES: list[State] = [
 # are the guard fields on ``Context`` the stage sets. REPAIR's ``repair_report``
 # is folded into BUILD (it is regenerated whenever the bundle is), and EXECUTE
 # owns ``execution_result`` + the ``execution_status`` guard it sets from the run.
+# CORRECT's ``correction_plan`` folds into VALIDATE the same way REPAIR's does
+# into BUILD: it is re-derived from whatever the next validation concludes.
 _STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
     State.INTAKE:    {"artifacts": ["intent_spec"], "flags": []},
     State.CLARIFY:   {"artifacts": [], "flags": ["clarified"]},
     State.DECOMPOSE: {"artifacts": ["goal_graph", "goal_graph_error"], "flags": []},
     State.DISCOVER:  {"artifacts": ["discovery"], "flags": []},
     State.PLAN:      {"artifacts": ["execution_plan"], "flags": []},
-    State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report"], "flags": ["plan_approved"]},
-    State.EXECUTE:   {"artifacts": ["execution_result"], "flags": ["execution_status"]},
-    State.INTERPRET: {"artifacts": [], "flags": []},
-    State.VALIDATE:  {"artifacts": [], "flags": ["validation_result"]},
+    State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report"],
+                      "flags": ["plan_approved", "approved_plan"]},
+    State.EXECUTE:   {"artifacts": ["execution_result"],
+                      "flags": ["execution_status", "heavy_confirmed"]},
+    State.INTERPRET: {"artifacts": ["normalized_result"], "flags": []},
+    State.VALIDATE:  {"artifacts": ["validation_report", "correction_plan"],
+                      "flags": ["validation_result"]},
     State.ACCEPT:    {"artifacts": [], "flags": []},
 }
 
@@ -430,6 +513,9 @@ class StateMachine:
         self.auto_approve = auto_approve
         # Rounds of clarification Q&A run so far; bounds the CLARIFY self-loop.
         self._clarify_rounds = 0
+        # Bounds the VALIDATE -> CORRECT/REPLAN self-correction loop (Story 6.3):
+        # iteration cap + convergence check, with every stop carrying a reason.
+        self._rerun = RerunController()
         self.context = Context()
         self.current_state = State.INTAKE
         self.storage = DataStorage(data_path)
@@ -513,6 +599,9 @@ class StateMachine:
                 setattr(self.context, flag, getattr(defaults, flag))
         # A rewind restarts the CLARIFY loop from scratch.
         self._clarify_rounds = 0
+        # Likewise the correction loop: a rerun that inherited the finished run's
+        # iteration count would hit the cap immediately and refuse to correct.
+        self._rerun = RerunController(self._rerun.policy)
         self.current_state = target
         self.storage.commit(self.current_state, self.context)
 
@@ -526,7 +615,32 @@ class StateMachine:
         engine-level enforcement point for "no execution without an approved plan".
         """
         self.context.plan_approved = approved
+        # Remember WHAT was approved, so a later re-plan can tell whether this
+        # decision still covers it (see _plan_fingerprint).
+        self.context.approved_plan = self._plan_fingerprint() if approved else None
         self.storage.commit(self.current_state, self.context)
+
+    def _plan_fingerprint(self) -> Optional[str]:
+        """A digest of the parts of the plan an approval is actually about.
+
+        The card shows the method and the resources, so those are what the
+        decision covers; rationales, cost estimates and timestamps can change
+        without invalidating it.
+        """
+        plan = self._load_artifact("execution_plan")
+        if not plan:
+            return None
+        method = plan.get("selected_method") or {}
+        material = {
+            "tool_name": method.get("tool_name"),
+            "calculator": method.get("calculator"),
+            "calculator_import": method.get("calculator_import"),
+            "libraries": sorted(str(l) for l in method.get("libraries") or []),
+            "requested_property": plan.get("requested_property"),
+            "slurm_request": plan.get("slurm_request"),
+        }
+        blob = json.dumps(material, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     # ---- intake / clarify collaborators ----------------------------------
 
@@ -538,7 +652,7 @@ class StateMachine:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         path = self.artifacts_dir / f"{name}_{self.run_id}.json"
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
+            json.dump(_json_safe(data), f, indent=2, default=str)
         return str(path)
 
     _WELCOME = (
@@ -1404,7 +1518,36 @@ class StateMachine:
 
         self.context.artifacts["execution_plan"] = self._write_artifact(
             "execution_plan", asdict(execution_plan))
+        self._revoke_approval_if_plan_changed()
         return State.BUILD
+
+    def _revoke_approval_if_plan_changed(self) -> None:
+        """Withdraw a standing approval when this plan is not the approved one.
+
+        A re-plan can land on a different method, and running that on the old
+        decision spends the researcher's compute on a plan they never saw. But it
+        usually lands on the SAME method, and re-asking then was doubling the
+        approval card on every rejected run -- so only a real change re-opens it.
+        """
+        if not self.context.plan_approved:
+            return
+        current = self._plan_fingerprint()
+        if current is None:
+            return
+        if self.context.approved_plan is None:
+            # The approval was seeded rather than recorded (the runner seeds one
+            # for unattended runs, and checkpoints written before this field
+            # existed carry none), so there is nothing to compare against.
+            # Adopt this plan as the approved one: revoking a decision we cannot
+            # show has been invalidated would strand the run at the gate.
+            self.context.approved_plan = current
+            return
+        if current == self.context.approved_plan:
+            return
+        self.context.plan_approved = False
+        self.context.approved_plan = None
+        logger.info("[plan] the re-planned method or resources differ from what "
+                    "was approved; the new plan needs approval before it runs.")
 
     @staticmethod
     def _candidate_by_name(ranked, name):
@@ -1989,6 +2132,15 @@ class StateMachine:
         calculator = self._selected_calculator()
         if calculator is None or not calculator.heavy:
             return True
+        # Already agreed to for this engine in this run. A correction or re-plan
+        # loop comes back through EXECUTE, and re-asking there is noise: the
+        # researcher consented to spending compute on this calculation, and the
+        # answer they gave has not changed. Keyed on the engine, so a re-plan
+        # that lands on a DIFFERENT heavy calculator still asks.
+        if self.context.heavy_confirmed == calculator.name:
+            logger.info("[execute] the heavy %s run was already confirmed for "
+                        "this run; not asking again.", calculator.name)
+            return True
         # Unattended mode: the researcher opted into automatic runs, so proceed
         # without asking (approving the plan already authorized this execution).
         if self.auto_approve:
@@ -2014,7 +2166,10 @@ class StateMachine:
             f"can take several minutes {where}. The "
             f"generated script is ready either way.\nRun it now? [y/N]: "
         )
-        return str(answer).strip().lower() in {"y", "yes", "run", "now", "1", "true"}
+        confirmed = str(answer).strip().lower() in {"y", "yes", "run", "now", "1", "true"}
+        if confirmed:
+            self.context.heavy_confirmed = calculator.name
+        return confirmed
 
     def _can_prompt(self) -> bool:
         """Whether we can actually ask the researcher a question right now."""
@@ -2146,27 +2301,820 @@ class StateMachine:
         except Exception:  # noqa: BLE001 - standalone use: plain error with the text
             return RuntimeError(f"{message} -- {hint}")
 
-    def interpret(self) -> State:
-        return State.VALIDATE
-    def validate(self) -> State:
-        """Route on the cross-validation verdict recorded in the context.
+    def _no_result_error(self, result: dict, hints: list) -> Exception:
+        """Build the error for a run that exited cleanly but delivered nothing.
 
-        ``accepted`` -> ACCEPT, ``rejected`` -> REPLAN, ``needs_review`` -> CORRECT
-        -- the three targets the guard table already allows out of VALIDATE. The
-        verdict itself is produced upstream (interpret()/cross-validation); this
-        handler only routes on it. Defaults to ACCEPT when the verdict is unset so
-        a seeded happy-path run still terminates (the VALIDATE->ACCEPT guard then
-        confirms the verdict is truly ``accepted`` before committing).
+        Exit code 0 is not the contract -- the printed result is. A script
+        whose output holds no finite value for the requested metric (every
+        field NaN, the metric missing, or nothing parseable at all) computed
+        nothing the researcher asked for, so failing with the output in hand
+        beats reporting a hollow success.
         """
+        metric = hints[0]
+        tail = "\n".join((result.get("stdout") or "").strip().splitlines()[-12:])
+        message = (f"the run finished, but its output contains no finite value "
+                   f"for '{metric}' -- every parseable result was missing, NaN, "
+                   f"or non-numeric, so there is nothing to validate or deliver")
+        hint = ("This usually means the simulation diverged or its analysis "
+                "failed silently. Last output lines:\n" + tail)
+        try:
+            from error_handler import ConfigError
+            return ConfigError(message, hint=hint)
+        except Exception:  # noqa: BLE001 - standalone use: plain error with the text
+            return RuntimeError(f"{message} -- {hint}")
+
+    # ---- interpret / validate / correct (Epic 6) ---------------------------
+
+    # Metric names that map onto a differently-named baseline property. Baseline
+    # lookup is already case-insensitive, so a metric literally named "logS"
+    # matches without help; only different spellings need an entry here.
+    _BASELINE_PROPERTY_ALIASES = {
+        "solubility": "logS",
+        "aqueous_solubility": "logS",
+        "aqueous solubility": "logS",
+        "log_s": "logS",
+        # The plan names the metric after the property AND its unit, which is
+        # what the generated scripts print; the baseline DB keys on the property
+        # alone, so this run missed aspirin's own -1.72 literature value.
+        "aqueous_solubility_logs": "logS",
+        "aqueous_solubility_log_mol_per_l": "logS",
+        "solubility_logs": "logS",
+        "logs": "logS",
+    }
+
+    def interpret(self) -> State:
+        """Extract normalized metrics from the executed run's output (Story 6.1).
+
+        Reads the ``execution_result`` artifact and pulls numeric metrics out of
+        the run's stdout / output files with the pluggable parsers (json, csv,
+        log), then normalizes them into one primary + secondary metric view with
+        per-metric uncertainty. The result is persisted as the
+        ``normalized_result`` artifact for cross-validation. Runs where nothing
+        was actually executed (seeded pipelines, deferred/skipped heavy runs)
+        no-op through to VALIDATE, which then routes on whatever verdict the
+        context was seeded with.
+        """
+        # INTERPRET owns ``normalized_result``, so it must clear the previous
+        # pass's before deciding: on a correction loop whose rerun was skipped
+        # or deferred, leaving it in place lets VALIDATE re-grade the earlier
+        # run's numbers and report them as this run's result.
+        self.context.artifacts.pop("normalized_result", None)
+        result = self._load_artifact("execution_result")
+        if not result or not result.get("succeeded"):
+            return State.VALIDATE
+        normalized = self._normalize_run_output(result)
+        if normalized is None:
+            hints = self._metric_hints()
+            if hints:
+                # The researcher asked for a specific quantity and the run --
+                # exit code notwithstanding -- never produced a finite value
+                # for it. Delivering that as a clean success hands them NaN;
+                # failing with the output in hand is the honest outcome.
+                raise self._no_result_error(result, hints)
+            logger.info("[interpret] no numeric metrics could be extracted from "
+                        "the run output; delivering without validation.")
+            return State.VALIDATE
+        payload = normalized.to_dict()
+        # A benchmark table's per-row identities, so VALIDATE can compare each
+        # system against its OWN literature value instead of grading the mean.
+        entities = self._per_entity_rows(result)
+        if entities:
+            payload["entities"] = entities
+            logger.info("[interpret] %d systems in the result table",
+                        len(entities))
+        self.context.artifacts["normalized_result"] = self._write_artifact(
+            "normalized_result", payload)
+        metric = normalized.primary_metric
+        unit = f" {metric.unit}" if metric.unit else ""
+        logger.info("[interpret] %s = %.6g%s +/- %.2g (%s)", metric.name,
+                    metric.value, unit, metric.uncertainty,
+                    metric.uncertainty_method)
+        return State.VALIDATE
+
+    def _metric_hints(self) -> list:
+        """Names the researcher's ask suggests for the primary metric, in order
+        of specificity: the plan's canonical property, then the acceptance-metric
+        names from the plan and the intent."""
+        hints = []
+        plan = self._load_artifact("execution_plan") or {}
+        if plan.get("requested_property"):
+            hints.append(str(plan["requested_property"]))
+        intent = self._load_artifact("intent_spec") or {}
+        for source in (plan, intent):
+            for metric in source.get("acceptance_metrics") or []:
+                if isinstance(metric, dict) and metric.get("metric_name"):
+                    hints.append(str(metric["metric_name"]))
+        return hints
+
+    @staticmethod
+    def _pick_metric(names, hints):
+        """Match a parsed/normalized field to a requested name, tolerantly:
+        exact (case-insensitive) first, then substring either way (so the hint
+        "logS_MAE" still finds a field named "logS")."""
+        lower = {str(n).lower(): n for n in names}
+        for hint in hints:
+            match = lower.get(str(hint).lower())
+            if match is not None:
+                return match
+        for hint in hints:
+            h = str(hint).lower()
+            for name in names:
+                n = str(name).lower()
+                if h in n or n in h:
+                    return name
+        return None
+
+    @staticmethod
+    def _stdout_json(stdout: str) -> Optional[str]:
+        """The last JSON object printed to stdout, or None.
+
+        Generated scripts are told to print their metric summary as a single
+        JSON line at the end, so single lines are scanned first; a script that
+        pretty-prints (``json.dumps(..., indent=2)``) spans lines, so the tail
+        starting at the last line-initial ``{`` is tried as a block too."""
+        text = stdout or ""
+        # A top-level array is not a metric summary, and its elements sit at
+        # line-initial '{' when it is pretty-printed -- without this, one of
+        # them would be picked up as though it were the summary.
+        if text.lstrip().startswith("["):
+            return None
+        # Every offset a JSON object could start at: index 0 (a summary that IS
+        # the whole of stdout, which the generic template prints) plus every
+        # line-initial '{'.
+        offsets = set()
+        if text.lstrip().startswith("{"):
+            offsets.add(text.index("{"))
+        found = text.find("\n{")
+        while found != -1:
+            offsets.add(found + 1)
+            found = text.find("\n{", found + 1)
+        # Latest first: the summary is printed last, and raw_decode stops at the
+        # end of the object, so trailing text on the same line is harmless.
+        # Trying earlier candidates in turn means a later line that only looks
+        # like JSON -- a Python dict repr, a truncated object -- cannot bury a
+        # valid summary printed above it.
+        for offset in sorted(offsets, reverse=True):
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(text[offset:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return json.dumps(obj)
+        return None
+
+    def _output_candidates(self, result: dict):
+        """(parser_name, content) candidates from the run, most structured first:
+        the JSON summary on stdout, then CSV output files from the run's workdir,
+        then raw stdout via the key=value log parser."""
+        candidates = []
+        stdout = result.get("stdout") or ""
+        blob = self._stdout_json(stdout)
+        if blob:
+            candidates.append(("json", blob))
+        out_dir = result.get("artifacts_dir")
+        if out_dir and Path(out_dir).is_dir():
+            # Prefer files the templates name for results (results.csv,
+            # predictions.csv) over incidental CSVs.
+            csvs = sorted(
+                Path(out_dir).glob("*.csv"),
+                key=lambda p: (("result" not in p.name and "predict" not in p.name), p.name),
+            )
+            for path in csvs[:3]:
+                try:
+                    candidates.append(("csv", path.read_text(encoding="utf-8")))
+                except OSError:
+                    continue
+        if stdout:
+            candidates.append(("log", stdout))
+        return candidates
+
+    def _normalize_run_output(self, result: dict) -> Optional[NormalizedResult]:
+        """Parse + normalize the run's output, preferring a candidate that
+        actually contains the requested metric. None when nothing matching
+        could be extracted.
+
+        The whatever-parsed-first fallback only applies when the researcher
+        named NO metric: with hints in hand and no output matching them, the
+        run plainly never produced the requested quantity, and normalizing a
+        bookkeeping column instead (``n_criteria`` from the generic scaffold
+        was the concrete case) hands validate() a fake primary metric to grade.
+        Delivering without validation -- and saying so -- is the honest result.
+
+        Non-finite fields never count as a match: a run that prints
+        ``"aqueous_solubility_logS": NaN`` has NOT produced the requested
+        quantity, whatever the field is called.
+        """
+        hints = self._metric_hints()
+        first_fallback = None  # parsed output when the researcher named no metric
+        for parser_name, content in self._output_candidates(result):
+            try:
+                parsed = get_parser(parser_name).parse(content)
+            except (ParserError, ValueError):
+                continue
+            finite = _finite_fields(parsed)
+            if finite is None:
+                continue
+            primary = self._pick_metric(finite.field_names(), hints)
+            if primary is not None:
+                return _stamp_sample_count(normalize(finite, primary=primary),
+                                           finite, primary)
+            if first_fallback is None:
+                first_fallback = finite
+        if hints or first_fallback is None:
+            return None
+        return _stamp_sample_count(normalize(first_fallback), first_fallback,
+                                   first_fallback.fields[0].name)
+
+    # Header names that identify WHICH system a row is about, most specific
+    # first. A benchmark table pairs one of these with the metric column.
+    _ENTITY_COLUMNS = ("molecule", "compound", "name", "system", "material",
+                       "formula", "smiles", "id")
+
+    def _per_entity_rows(self, result: dict) -> list:
+        """One (entity, metric, value) row per system in a benchmark table.
+
+        Averaging the metric column and comparing that mean against ONE
+        molecule's reference can land inside the tolerance and falsely ACCEPT
+        (see _ungradable_aggregate). Identifiers live in a text column that the
+        numeric parser drops, so the table is re-read here. Empty for a
+        single-system run.
+        """
+        import csv as _csv
+        rows = []
+        for parser_name, content in self._output_candidates(result):
+            if parser_name != "csv":
+                continue
+            try:
+                reader = _csv.DictReader(io.StringIO(content))
+                records = list(reader)
+            except (_csv.Error, ValueError):
+                continue
+            if len(records) < 2 or not reader.fieldnames:
+                continue
+            headers = {str(h).strip().lower(): h for h in reader.fieldnames if h}
+            entity_col = next((headers[c] for c in self._ENTITY_COLUMNS
+                               if c in headers), None)
+            if entity_col is None:
+                continue
+            numeric = [h for h in reader.fieldnames
+                       if h and h != entity_col
+                       and all(_as_float(r.get(h)) is not None for r in records)]
+            if not numeric:
+                continue
+            metric_col = self._pick_metric(numeric, self._metric_hints()) or numeric[0]
+            for record in records:
+                entity = str(record.get(entity_col) or "").strip()
+                value = _as_float(record.get(metric_col))
+                if entity and value is not None and math.isfinite(value):
+                    rows.append({"entity": entity, "metric": metric_col,
+                                 "value": value})
+            if rows:
+                return rows
+        return rows
+
+    def validate(self) -> State:
+        """Cross-validate the interpreted result and route on the verdict (6.2).
+
+        With a ``normalized_result`` artifact present, every extracted metric
+        becomes a prediction for the run's molecule and is compared against the
+        literature baseline DB (configs/baselines.json); the acceptance judge
+        grades the agreement into accepted / needs_review / rejected and the
+        ``validation_report`` artifact records the full comparison. When no
+        baseline covers this molecule, the plan's own acceptance criteria
+        (target +/- tolerance) are the reference instead; with no reference at
+        all the result is delivered as-is, with the report saying so.
+
+        Verdicts that ask for another pass (needs_review -> CORRECT, rejected ->
+        REPLAN) are gated by the bounded rerun controller (Story 6.3): once the
+        iteration cap is hit or the loop stops improving, the result is
+        delivered anyway -- flagged for the researcher in the report -- rather
+        than looping forever.
+
+        Runs with nothing interpreted (seeded / skipped / deferred) keep the
+        previous behavior: route on whatever verdict the context carries,
+        defaulting to ACCEPT so a planning-only run still terminates.
+        """
+        # CORRECT's plan belongs to the pass that produced it (see _STAGE_OUTPUTS):
+        # left in place, a run that ends accepted still ships a diagnosis of what
+        # supposedly went wrong.
+        self.context.artifacts.pop("correction_plan", None)
+        normalized = self._load_artifact("normalized_result")
+        if normalized is not None:
+            self.context.validation_result = self._cross_validate(normalized)
+        elif self.context.artifacts.get("validation_report"):
+            self.context.validation_result = self._stop_unproductive_loop()
         verdict = self.context.validation_result
         if verdict == "rejected":
+            # Whether the re-planned run needs a fresh approval is decided by
+            # plan() once the new plan exists and can be compared with the
+            # approved one -- withdrawing it here re-asks even when the replan
+            # lands on exactly the same method, which is pure noise.
             return State.REPLAN
         if verdict == "needs_review":
             return State.CORRECT
         return State.ACCEPT
+
+    def _stop_unproductive_loop(self) -> str:
+        """End a correction loop whose rerun produced nothing to grade.
+
+        The bounded gate only runs when there IS a result, so a pass that comes
+        back empty would route on the previous verdict -- back into
+        CORRECT/REPLAN, forever, without advancing the counter meant to stop it.
+        Nothing new was measured, so deliver the last graded result flagged.
+        Only reachable once a report exists, so a seeded verdict is never
+        overridden.
+        """
+        report = self._load_artifact("validation_report")
+        if report is None:
+            # The path is in the context but the file is gone or unreadable.
+            # Writing a rerun-only stub here would REPLACE the real report with
+            # one carrying no comparison and no rationale, so leave it alone.
+            logger.info("[validate] the previous validation report is unreadable; "
+                        "delivering on the verdict already on record (%s).",
+                        self.context.validation_result)
+            return "accepted"
+        verdict = report.get("acceptance_status") or self.context.validation_result
+        report["rerun"] = {
+            "decision": "stop",
+            "stop_reason": "no_new_result",
+            "reason": ("The corrected run produced no result to grade, so "
+                       "another identical round cannot improve on it."),
+            "final_verdict": verdict,
+            "disposition": "delivered_for_researcher_review",
+        }
+        self.context.artifacts["validation_report"] = self._write_artifact(
+            "validation_report", report)
+        logger.info("[validate] the corrected run produced nothing to grade; "
+                    "delivering the previous result flagged for review "
+                    "(verdict on record: %s).", verdict)
+        return "accepted"
+
+    def _accept_or_loop(self, normalized: dict, artifact: dict) -> bool:
+        """Ask whether to rerun (True) or accept this result as it stands (False).
+
+        A failing verdict has three very different causes and the grader cannot
+        tell them apart: the generated code is wrong (the aspirin solubility run
+        computed a partition constant and called it a solubility), or the method
+        is systematically offset from the reference and the run is as good as
+        that method gets (PBE puts silicon's gap near 0.6 eV against an
+        experimental 1.17 -- a textbook DFT underestimate, not a failure), or the
+        reference is not comparable at all. Only the first is worth another
+        calculation. A researcher can see which it is in seconds, so they are
+        asked before the compute is spent, and the answer is recorded.
+
+        Unattended runs keep looping automatically. When there is no way to ask,
+        the result is accepted rather than rerun: spending an unattended DFT
+        calculation on an unreviewed guess is the worse default.
+        """
+        if self.auto_approve:
+            return True
+        if not self._can_prompt():
+            logger.info("[validate] no interactive input available; accepting the "
+                        "flagged result rather than rerunning unattended.")
+            return False
+        answer = self._ask_user(self._accept_or_loop_prompt(normalized, artifact))
+        text = str(answer).strip().lower()
+        # Only an explicit ask for another pass spends the compute. "yes" is NOT
+        # one: at a question offering two named choices it most likely means "yes,
+        # accept", so treating it as a rerun would do the opposite of what was
+        # meant. Anything unrecognized accepts, matching the headless default.
+        if text in {"rerun", "re-run", "loop", "retry", "again", "r", "improve"}:
+            return True
+        logger.info("[validate] the researcher accepted the flagged result.")
+        return False
+
+    def _accept_or_loop_prompt(self, normalized: dict, artifact: dict) -> str:
+        """The question posed at the accept-or-rerun gate.
+
+        States what was computed, what it was compared against and where that
+        reference came from -- the researcher cannot judge a verdict without
+        knowing whether the target is an experimental number, a value the plan
+        proposed, or nothing comparable at all.
+        """
+        metric = normalized.get("primary_metric") or {}
+        unit = f" {metric['unit']}" if metric.get("unit") else ""
+        value = metric.get("value")
+        shown = f"{value:.6g}{unit}" if isinstance(value, (int, float)) else "n/a"
+        method = ((self._load_artifact("execution_plan") or {})
+                  .get("selected_method") or {})
+        engine = method.get("calculator") or method.get("tool_name") or "the plan's method"
+        comparisons = (artifact.get("cross_validation") or {}).get("comparisons") or []
+        if comparisons:
+            reference = (f"literature values from the baseline database "
+                         f"({len(comparisons)} compared)")
+        elif artifact.get("gap_basis") == "tolerance_multiples":
+            reference = ("the target this run's own plan proposed, which was not "
+                         "taken from a measurement")
+        else:
+            reference = "no comparable reference"
+        return (
+            f"Validation says {artifact.get('acceptance_status')}: "
+            f"{artifact.get('rationale')}\n"
+            f"  computed: {metric.get('name', 'result')} = {shown} (via {engine})\n"
+            f"  compared against: {reference}\n"
+            f"Bear in mind a method can be right and still miss a reference it was "
+            f"never meant to reproduce (a DFT functional against an experimental "
+            f"value, say). Rerunning costs another full calculation.\n"
+            f"Accept this result, or rerun to try improving it? [accept/rerun]: "
+        )
+
+    def _run_molecule(self) -> Optional[str]:
+        """The molecule/material this run is about (baseline DB lookup key)."""
+        plan = self._load_artifact("execution_plan") or {}
+        intent = self._load_artifact("intent_spec") or {}
+        material = CodegenEngine._material_brief(plan, intent)
+        return material.get("name") or material.get("formula")
+
+    def _normalized_metrics(self, normalized: dict) -> list:
+        """All metric dicts (primary first) from a normalized_result artifact."""
+        metrics = []
+        if isinstance(normalized.get("primary_metric"), dict):
+            metrics.append(normalized["primary_metric"])
+        metrics.extend(m for m in normalized.get("secondary_metrics") or []
+                       if isinstance(m, dict))
+        # Non-finite secondaries (a NaN diagnostic next to a finite primary)
+        # would poison the baseline comparison, so they never become predictions.
+        return [m for m in metrics
+                if m.get("name") and isinstance(m.get("value"), (int, float))
+                and not isinstance(m.get("value"), bool)
+                and math.isfinite(m["value"])]
+
+    def _baseline_property(self, name) -> str:
+        """A metric name as the baseline DB spells the property."""
+        text = str(name)
+        return self._BASELINE_PROPERTY_ALIASES.get(text.strip().lower(), text)
+
+    def _predictions(self, normalized: dict, molecule: str) -> list:
+        """Adapt the interpreted result into baseline-DB predictions.
+
+        A benchmark table becomes one prediction per system, each matched to its
+        own literature value -- which is also what lets the validator compute
+        RMSE and a correlation, both undefined for a single point.
+        """
+        entities = normalized.get("entities")
+        if isinstance(entities, list) and entities:
+            return [
+                Prediction(molecule=str(row["entity"]),
+                           property=self._baseline_property(row.get("metric")),
+                           value=float(row["value"]))
+                for row in entities
+                if isinstance(row, dict) and row.get("entity")
+                and isinstance(row.get("value"), (int, float))
+            ]
+        predictions = []
+        for m in self._normalized_metrics(normalized):
+            predictions.append(Prediction(
+                molecule=molecule, property=self._baseline_property(m["name"]),
+                value=float(m["value"]), unit=m.get("unit"),
+                uncertainty=m.get("uncertainty")))
+        return predictions
+
+    def _cross_validate(self, normalized: dict) -> str:
+        """Grade the normalized result and return the verdict to route on.
+
+        Writes the ``validation_report`` artifact (schema shape + the full
+        comparison detail and, when the rerun gate fires, the loop decision).
+        The returned verdict may differ from the report's ``acceptance_status``
+        in exactly one case: the rerun controller stopped the correction loop,
+        so the flagged result is delivered (routed as accepted) with the true
+        verdict and stop reason preserved in the report.
+        """
+        molecule = self._run_molecule()
+        predictions = self._predictions(normalized, molecule) if molecule else []
+        thresholds = self._acceptance_thresholds()
+        result, verdict, report = cross_validate(
+            predictions,
+            thresholds=thresholds,
+            report_id=f"val-{self.run_id}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        artifact = asdict(report)
+        artifact["rationale"] = verdict.rationale
+        artifact["cross_validation"] = result.to_dict()
+        artifact["thresholds"] = asdict(thresholds)
+        status = verdict.status
+        gap = result.mean_relative_error
+        # How ``gap`` should be read downstream: a fraction of the literature
+        # value, or a multiple of the tolerance the researcher set. correct()
+        # needs the distinction to turn it into a calibrated-range signal.
+        basis = "relative_error"
+        ungraded = self._ungradable_aggregate(normalized, result)
+        if ungraded is not None:
+            status, artifact["rationale"], gap = ungraded, self._AGGREGATE_NOTE, None
+            artifact["acceptance_status"] = status
+        elif not result.comparisons:
+            # No literature baseline covers this molecule/property: judge
+            # against the plan's own acceptance criteria instead of parking
+            # every novel system in needs_review.
+            status, rationale, gap = self._acceptance_fallback(normalized)
+            artifact["acceptance_status"] = status
+            artifact["rationale"] = rationale
+            basis = "tolerance_multiples"
+        else:
+            # A matching baseline must not silently retire the researcher's own
+            # acceptance criteria: both are checked and the stricter wins, so a
+            # result that agrees with the literature but misses the tolerance
+            # they asked for is not reported as a clean pass.
+            own_status, own_rationale, _ = self._acceptance_fallback(normalized)
+            if _SEVERITY.get(own_status, 0) > _SEVERITY.get(status, 0):
+                status = own_status
+                artifact["acceptance_status"] = status
+                artifact["rationale"] = (
+                    f"{artifact['rationale']} Held to the run's own acceptance "
+                    f"criteria, which are stricter: {own_rationale}")
+        artifact["gap"] = gap
+        artifact["gap_basis"] = basis
+        logger.info("[validate] %s -- %s", status, artifact["rationale"])
+        # Ask the researcher before spending another calculation. Deliberately
+        # BEFORE _gate_rerun: everything above only reads, so if this suspends
+        # for the answer the re-entry re-grades identically and no metric has
+        # been recorded twice (which would read as 0% improvement -> converged).
+        if status != "accepted" and not self._accept_or_loop(normalized, artifact):
+            artifact["rerun"] = {
+                "decision": "stop",
+                "stop_reason": "researcher_accepted",
+                "reason": "The researcher accepted this result as it stands.",
+                "iteration": self._rerun.iteration,
+                "final_verdict": status,
+                "disposition": "accepted_by_researcher",
+            }
+            self.context.artifacts["validation_report"] = self._write_artifact(
+                "validation_report", artifact)
+            return "accepted"
+        self._restore_rerun_budget()
+        final = self._gate_rerun(status, gap, artifact)
+        self.context.artifacts["validation_report"] = self._write_artifact(
+            "validation_report", artifact)
+        return final
+
+    _AGGREGATE_NOTE = (
+        "This run produced results for several systems, but the output does not "
+        "say which row belongs to which system, so the values were averaged into "
+        "one number. A mean cannot be checked against a single system's "
+        "literature value -- agreement here would not mean the run is right. "
+        "Add an identifying column (molecule, formula or SMILES) to the results "
+        "table and re-run to have each system validated against its own "
+        "reference."
+    )
+
+    def _ungradable_aggregate(self, normalized: dict, result) -> Optional[str]:
+        """``"needs_review"`` when the result is a mean nothing can check, else None.
+
+        Errors in opposite directions cancel, so an averaged benchmark can score
+        ~0% against one molecule's reference while every prediction is badly
+        wrong. Identified rows are graded individually instead; unidentified ones
+        cannot honestly be graded at all.
+        """
+        if normalized.get("entities"):
+            return None
+        samples = (normalized.get("metadata") or {}).get("primary_samples")
+        if not isinstance(samples, int) or samples < 2:
+            return None
+        if not result.comparisons:
+            return None
+        return "needs_review"
+
+    def _acceptance_thresholds(self) -> AcceptanceThresholds:
+        """The agreement thresholds to grade against.
+
+        Story 6.2's 15%/30% by default, overridable per deployment via
+        ``TWAIN_ACCEPT_BELOW`` / ``TWAIN_REVIEW_BELOW`` (fractions) and per run
+        via ``acceptance_thresholds`` on the plan. Malformed values fall back to
+        the defaults rather than failing the run.
+        """
+        plan = (self._load_artifact("execution_plan") or {})
+        configured = plan.get("acceptance_thresholds")
+        configured = configured if isinstance(configured, dict) else {}
+        defaults = AcceptanceThresholds()
+        values = {}
+        for field_name, env in (("accept_below", "TWAIN_ACCEPT_BELOW"),
+                                ("review_below", "TWAIN_REVIEW_BELOW")):
+            raw = configured.get(field_name, os.environ.get(env))
+            try:
+                values[field_name] = float(raw)
+            except (TypeError, ValueError):
+                values[field_name] = getattr(defaults, field_name)
+        try:
+            return AcceptanceThresholds(**values)
+        except ValueError:  # e.g. accept_below > review_below
+            logger.info("[validate] ignoring incoherent acceptance thresholds "
+                        "%s; using the defaults.", values)
+            return defaults
+
+    def _acceptance_fallback(self, normalized: dict):
+        """Judge against the plan's acceptance criteria (target +/- tolerance).
+
+        Returns ``(status, rationale, gap)`` where gap is the worst relative
+        miss (drives the rerun controller's convergence check). Within tolerance
+        -> accepted; within twice the tolerance -> needs_review; beyond that ->
+        rejected. With no criteria matching an extracted metric there is nothing
+        to judge, so the result is delivered as-is (accepted) and the rationale
+        says exactly that.
+        """
+        plan = self._load_artifact("execution_plan") or {}
+        criteria = [c for c in plan.get("acceptance_metrics") or []
+                    if isinstance(c, dict) and c.get("metric_name") is not None]
+        metrics = self._normalized_metrics(normalized)
+        by_name = {str(m["name"]): m for m in metrics}
+
+        checked, worst_status, worst_gap = [], "accepted", None
+        for criterion in criteria:
+            match = self._pick_metric(list(by_name), [criterion["metric_name"]])
+            if match is None:
+                continue
+            try:
+                value = float(by_name[match]["value"])
+                target = float(criterion.get("target_value", 0.0))
+                tolerance = abs(float(criterion.get("tolerance", 0.0)))
+            except (TypeError, ValueError):
+                continue  # malformed criterion -> nothing to judge against
+            miss = abs(value - target)
+            if miss <= tolerance:
+                status = "accepted"
+            elif tolerance and miss <= 2 * tolerance:
+                status = "needs_review"
+            else:
+                status = "rejected"
+            checked.append(
+                f"{criterion['metric_name']}: {value:.4g} vs target {target:.4g} "
+                f"+/- {tolerance:.4g} -> {status}")
+            if _SEVERITY[status] > _SEVERITY[worst_status]:
+                worst_status = status
+            rel_miss = miss / tolerance if tolerance else miss
+            worst_gap = rel_miss if worst_gap is None else max(worst_gap, rel_miss)
+
+        if not checked:
+            return ("accepted",
+                    "No literature baseline or matching acceptance criterion "
+                    "covers this result; delivered without external validation.",
+                    None)
+        return (worst_status,
+                "Judged against the plan's acceptance criteria (no literature "
+                "baseline): " + "; ".join(checked),
+                worst_gap)
+
+    def _restore_rerun_budget(self) -> None:
+        """Rehydrate the correction budget from the last validation report.
+
+        ``_rerun`` is in-memory but a run spans job slices, so each pass would
+        otherwise start at zero and the iteration cap could never be reached --
+        the loop would run until the orchestrator's backstop failed the run,
+        the abort the cap exists to replace. Only restores when this process has
+        counted nothing yet, so a multi-pass run keeps its live counter.
+        """
+        if self._rerun.iteration or self._rerun.metric_history:
+            return
+        previous = (self._load_artifact("validation_report") or {}).get("rerun")
+        if not isinstance(previous, dict):
+            return
+        iteration = previous.get("iteration")
+        if isinstance(iteration, int) and iteration > 0:
+            self._rerun.iteration = min(iteration, self._rerun.policy.max_iterations)
+        history = previous.get("metric_history")
+        if isinstance(history, list):
+            self._rerun.metric_history = [
+                float(v) for v in history
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v)
+            ]
+
+    def _gate_rerun(self, status: str, gap: Optional[float], artifact: dict) -> str:
+        """Bound the correction loop (Story 6.3) and return the routing verdict.
+
+        Accepted results pass straight through. For needs_review/rejected, the
+        rerun controller decides whether another correction pass is worthwhile
+        (iteration cap, convergence, cost-benefit). When it says stop, the
+        flagged result is delivered -- routed as accepted so the run terminates
+        -- with the true verdict, stop reason and disposition recorded in the
+        validation report.
+        """
+        if status == "accepted":
+            return status
+        if gap is not None:
+            self._rerun.record_metric(gap)
+        # There is no per-iteration cost model yet, so the cost-benefit arm of
+        # the controller is inert (cost 0) and the loop is bounded by the
+        # iteration cap and the convergence check. A gap we could not measure
+        # still earns one pass rather than being scored as "no benefit".
+        decision = self._rerun.decide(
+            expected_benefit=gap if gap is not None else 1.0,
+            estimated_cost=0.0)
+        if decision.should_rerun:
+            self._rerun.begin_iteration()
+            artifact["rerun"] = {
+                "decision": "rerun",
+                "iteration": self._rerun.iteration,
+                # Carried so the next slice -- a different process, with a fresh
+                # controller -- can restore the budget instead of starting over.
+                "metric_history": list(self._rerun.metric_history),
+                "reason": decision.reason,
+            }
+            return status
+        artifact["rerun"] = {
+            "decision": "stop",
+            "stop_reason": decision.stop_reason,
+            "iteration": self._rerun.iteration,
+            "metric_history": list(self._rerun.metric_history),
+            "reason": decision.reason,
+            "final_verdict": status,
+            "disposition": "delivered_for_researcher_review",
+        }
+        logger.info("[validate] %s", decision.reason)
+        logger.info("[validate] Delivering the result flagged for review "
+                    "(verdict on record: %s).", status)
+        return "accepted"
+
     def accept(self) -> State:
         return State.TERMINATE
+
     def correct(self) -> State:
+        """Diagnose the marginal validation and record a CorrectionPlan (6.3).
+
+        Builds run evidence from the validation report, classifies the failure
+        mode, and writes the proposed corrections as the ``correction_plan``
+        artifact -- the auditable record of what the system thinks went wrong
+        and what it would change. Proposals are recorded, not yet auto-applied
+        to the execution plan; the rerun controller (see validate()) bounds how
+        many times this loop can come back around. Always returns BUILD, the
+        only transition the guard table allows out of CORRECT.
+        """
+        report = self._load_artifact("validation_report") or {}
+        cross = report.get("cross_validation") or {}
+        gap = report.get("gap")
+        if gap is None:
+            gap = cross.get("mean_relative_error")
+        context = CorrectionContext(
+            validation_report_id=str((report.get("metadata") or {}).get("ID") or ""),
+            iteration_count=self._rerun.iteration,
+            gap=gap,
+            next_candidate=self._next_discovery_candidate(),
+            iteration_allowance=max(
+                1, self._rerun.policy.max_iterations - self._rerun.iteration),
+            plan_id=f"corr-{self.run_id}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        # No scorer in failure_classifier reads relative_error, so the mode is
+        # UNKNOWN and the generic plan below is the honest outcome. Deriving a
+        # mode from the gap would mean dividing by the run's numerical-precision
+        # uncertainty, making the diagnosis track how tightly the script
+        # converged rather than the science. The real signals (rejected input,
+        # diverged loss, OOD score) belong to the stages that can observe them.
+        reflection = reflect(RunEvidence(relative_error=gap), context)
+        plan = reflection.correction_plan
+        if plan is None:
+            # UNKNOWN failure mode -- no strategy owns it. Record an honest
+            # generic plan: try the next-ranked discovery tool when one exists,
+            # otherwise rerun unchanged to confirm reproducibility, and escalate
+            # if that doesn't move the needle.
+            if context.next_candidate:
+                correction = {
+                    "modification_type": "switch_model",
+                    "target": "model",
+                    "new_value": context.next_candidate,
+                    "rationale": "No specific failure signal fired; the next-ranked "
+                                 "discovery candidate is the best untried lever.",
+                }
+            else:
+                correction = {
+                    "modification_type": "relax_constraints",
+                    "target": "param",
+                    "new_value": {"action": "rerun_unchanged"},
+                    "rationale": "No specific failure signal fired and no alternative "
+                                 "tool is available; rerun to confirm reproducibility "
+                                 "before escalating.",
+                }
+            plan = build_plan(
+                reflection.diagnosis.explanation
+                or "No diagnostic signal fired; failure mode undetermined.",
+                [correction],
+                "Escalate to the researcher with the validation report.",
+                context,
+                primary_metric_delta=0.0,
+                confidence=reflection.diagnosis.confidence,
+            )
+        plan["diagnosis_detail"] = reflection.diagnosis.to_dict()
+        self.context.artifacts["correction_plan"] = self._write_artifact(
+            "correction_plan", plan)
+        proposals = ", ".join(
+            str(c.get("modification_type"))
+            for c in plan.get("proposed_corrections", []))
+        logger.info("[correct] diagnosis: %s (confidence %s); proposed: %s. "
+                    "Rerunning the build (iteration %s/%s).",
+                    reflection.diagnosis.mode.value,
+                    reflection.diagnosis.confidence, proposals,
+                    self._rerun.iteration, self._rerun.policy.max_iterations)
         return State.BUILD
+
+    def _next_discovery_candidate(self) -> Optional[str]:
+        """The highest-ranked discovery candidate that isn't the tool just used."""
+        discovery = self._load_artifact("discovery") or {}
+        plan = self._load_artifact("execution_plan") or {}
+        current = str((plan.get("selected_method") or {}).get("tool_name") or "").lower()
+        for candidate in discovery.get("candidates") or []:
+            name = candidate.get("name") or candidate.get("id")
+            if name and str(name).lower() != current:
+                return str(name)
+        return None
+
     def replan(self) -> State:
         return State.PLAN

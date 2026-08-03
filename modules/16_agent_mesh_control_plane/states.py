@@ -25,6 +25,17 @@ class Context:
     execution_status: bool | None = None
     validation_result: str | None = None
 
+    # Fingerprint of the plan the researcher actually approved (see
+    # StateMachine._plan_fingerprint). A re-plan that lands on the same method
+    # and resources is still covered by that approval; one that changes them is
+    # not, and must go back to the gate.
+    approved_plan: str | None = None
+
+    # Calculator whose heavy run the researcher already confirmed. A correction
+    # or re-plan loop re-enters EXECUTE, and asking again for the same engine in
+    # the same run is noise -- they already agreed to spend that compute.
+    heavy_confirmed: str | None = None
+
     artifacts: dict[str, str] = field(default_factory=dict)
     # {"intent_spec": "<repo>/logs/artifacts/intent_spec_<run_id>.json"}
 

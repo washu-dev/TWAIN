@@ -104,7 +104,11 @@ class FakeDB:
         self.events.append({"event_type": event_type, "payload": payload})
 
     def upsert_artifact(self, sid, name, content, kind):
+        self.artifacts = [a for a in self.artifacts if a["name"] != name]
         self.artifacts.append({"name": name, "content": content, "kind": kind})
+
+    def delete_artifact(self, sid, name):
+        self.artifacts = [a for a in self.artifacts if a["name"] != name]
 
     def get_artifacts(self, sid):
         return [{"name": a["name"], "content": a["content"]} for a in self.artifacts]
@@ -272,6 +276,11 @@ class FakeEngine:
         # A real approve_plan flips the plan_approved guard flag; the fake records
         # that it happened so a test can assert the run was actually approved.
         self.approved = True
+
+    def plan_is_approved(self, orch):
+        # Mirrors the real engine reading context.plan_approved: once approved,
+        # a later BUILD re-entry (a correction pass) is not the approval gate.
+        return self.approved
 
     def read_execution_plan(self, orch):
         return self._plan
