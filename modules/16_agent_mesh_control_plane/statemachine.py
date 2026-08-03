@@ -314,20 +314,12 @@ def _as_float(cell):
     return value if math.isfinite(value) else None
 
 
-def _split_header_unit(header: str):
-    """``"logS (mol/L)"`` -> ``("logS", "mol/L")``; ``"logS"`` -> ``("logS", None)``."""
-    match = re.match(r"^\s*(.*?)\s*[\(\[]\s*([^\)\]]+?)\s*[\)\]]\s*$", str(header))
-    if match:
-        return match.group(1), match.group(2)
-    return str(header).strip(), None
-
-
 def _stamp_sample_count(normalized, parsed, primary_name: str):
     """Record how many samples the primary metric was aggregated from.
 
     One number that is the mean of many rows is a different claim from one
-    number that was measured once, and validation has to tell them apart before
-    comparing against a single reference value.
+    measured once, and validation has to tell them apart before comparing
+    against a single reference (see _ungradable_aggregate).
     """
     field = parsed.get(primary_name)
     if field is not None:
@@ -630,10 +622,9 @@ class StateMachine:
     def _plan_fingerprint(self) -> Optional[str]:
         """A digest of the parts of the plan an approval is actually about.
 
-        The approval card shows the researcher the method and the resources it
-        will consume, so those are what their decision covers. Everything else in
-        the plan (rationales, cost estimates, generated ids, timestamps) can
-        change without invalidating it.
+        The card shows the method and the resources, so those are what the
+        decision covers; rationales, cost estimates and timestamps can change
+        without invalidating it.
         """
         plan = self._load_artifact("execution_plan")
         if not plan:
@@ -1532,13 +1523,10 @@ class StateMachine:
     def _revoke_approval_if_plan_changed(self) -> None:
         """Withdraw a standing approval when this plan is not the approved one.
 
-        A re-plan (VALIDATE -> REPLAN -> PLAN) can land on a different method
-        than the researcher approved, and building and executing that on the old
-        decision spends their compute on a plan they never saw. But a re-plan
-        usually lands on the SAME method, and asking them to approve an identical
-        plan a second time is noise -- it was doubling the approval card on every
-        rejected run. So the two plans are compared and the gate is re-opened
-        only when the part they actually agreed to has changed.
+        A re-plan can land on a different method, and running that on the old
+        decision spends the researcher's compute on a plan they never saw. But it
+        usually lands on the SAME method, and re-asking then was doubling the
+        approval card on every rejected run -- so only a real change re-opens it.
         """
         if not self.context.plan_approved:
             return
@@ -2532,14 +2520,11 @@ class StateMachine:
     def _per_entity_rows(self, result: dict) -> list:
         """One (entity, metric, value) row per system in a benchmark table.
 
-        A run over many molecules writes a row per molecule, but the normalizer
-        collapses the metric column to a single aggregate -- and comparing that
-        mean against ONE molecule's literature value can land inside the
-        tolerance and report a false ACCEPT for a benchmark that is nowhere near
-        right. The identifiers live in a text column, which the numeric CSV
-        parser necessarily drops, so the table is re-read here to recover the
-        per-row identity. Empty when the output has no identifier column or only
-        one row (the ordinary single-system run).
+        Averaging the metric column and comparing that mean against ONE
+        molecule's reference can land inside the tolerance and falsely ACCEPT
+        (see _ungradable_aggregate). Identifiers live in a text column that the
+        numeric parser drops, so the table is re-read here. Empty for a
+        single-system run.
         """
         import csv as _csv
         rows = []
@@ -2568,9 +2553,7 @@ class StateMachine:
                 entity = str(record.get(entity_col) or "").strip()
                 value = _as_float(record.get(metric_col))
                 if entity and value is not None and math.isfinite(value):
-                    rows.append({"entity": entity,
-                                 "metric": _split_header_unit(metric_col)[0],
-                                 "unit": _split_header_unit(metric_col)[1],
+                    rows.append({"entity": entity, "metric": metric_col,
                                  "value": value})
             if rows:
                 return rows
@@ -2621,17 +2604,12 @@ class StateMachine:
     def _stop_unproductive_loop(self) -> str:
         """End a correction loop whose rerun produced nothing to grade.
 
-        The bounded gate lives in ``_cross_validate``, which only runs when
-        there IS a result. If a correction pass comes back empty -- the rebuilt
-        run was deferred or skipped, so INTERPRET had nothing to normalize --
-        routing on the previous pass's verdict sends the run straight back to
-        CORRECT/REPLAN without ever advancing the iteration counter meant to
-        stop it, and it loops until the orchestrator's backstop fails the run.
-
-        Nothing new was measured, so another identical round cannot help.
-        Deliver what the last graded pass found, flagged, and record why. Only
-        reachable once a report exists, so a seeded or first-pass verdict (the
-        runner seeds one to satisfy the stub guards) is never overridden.
+        The bounded gate only runs when there IS a result, so a pass that comes
+        back empty would route on the previous verdict -- back into
+        CORRECT/REPLAN, forever, without advancing the counter meant to stop it.
+        Nothing new was measured, so deliver the last graded result flagged.
+        Only reachable once a report exists, so a seeded verdict is never
+        overridden.
         """
         report = self._load_artifact("validation_report")
         if report is None:
@@ -2696,7 +2674,7 @@ class StateMachine:
             return [
                 Prediction(molecule=str(row["entity"]),
                            property=self._baseline_property(row.get("metric")),
-                           value=float(row["value"]), unit=row.get("unit"))
+                           value=float(row["value"]))
                 for row in entities
                 if isinstance(row, dict) and row.get("entity")
                 and isinstance(row.get("value"), (int, float))
@@ -2782,15 +2760,12 @@ class StateMachine:
     )
 
     def _ungradable_aggregate(self, normalized: dict, result) -> Optional[str]:
-        """``"needs_review"`` when the result is a mean nothing can be checked
-        against, else None.
+        """``"needs_review"`` when the result is a mean nothing can check, else None.
 
-        Averaging a benchmark's predictions and comparing that against ONE
-        molecule's literature value can land inside the tolerance and report a
-        confident ACCEPT for a run that is nowhere near right -- errors in
-        opposite directions cancel. When the rows carry identities each is
-        compared to its own reference (no aggregate is involved); when they do
-        not, the honest answer is that this cannot be graded.
+        Errors in opposite directions cancel, so an averaged benchmark can score
+        ~0% against one molecule's reference while every prediction is badly
+        wrong. Identified rows are graded individually instead; unidentified ones
+        cannot honestly be graded at all.
         """
         if normalized.get("entities"):
             return None
@@ -2804,12 +2779,10 @@ class StateMachine:
     def _acceptance_thresholds(self) -> AcceptanceThresholds:
         """The agreement thresholds to grade against.
 
-        Defaults are Story 6.2's 15% / 30%, overridable per deployment via
-        ``TWAIN_ACCEPT_BELOW`` / ``TWAIN_REVIEW_BELOW`` (fractions, not
-        percentages) and per run via ``acceptance_thresholds`` on the execution
-        plan, so a researcher whose property needs a looser or tighter bar is
-        not stuck with the built-in one. A malformed value falls back to the
-        default rather than failing the run.
+        Story 6.2's 15%/30% by default, overridable per deployment via
+        ``TWAIN_ACCEPT_BELOW`` / ``TWAIN_REVIEW_BELOW`` (fractions) and per run
+        via ``acceptance_thresholds`` on the plan. Malformed values fall back to
+        the defaults rather than failing the run.
         """
         plan = (self._load_artifact("execution_plan") or {})
         configured = plan.get("acceptance_thresholds")
@@ -2885,17 +2858,11 @@ class StateMachine:
     def _restore_rerun_budget(self) -> None:
         """Rehydrate the correction budget from the last validation report.
 
-        ``_rerun`` lives in memory, but a run does NOT stay in one process: the
-        runner drives it in slices, and a rejected result now hands control back
-        for a fresh approval, so the next pass is a new StateMachine with the
-        counter at zero. Left that way the iteration cap could never be reached
-        and the loop would run until the orchestrator's backstop failed the run
-        -- the exact abort the cap exists to replace. The previous report is the
-        durable record (it is written every pass and rehydrated with the other
-        artifacts), so the budget is restored from it.
-
-        Only restores when this process has not counted anything yet, so a
-        multi-pass run inside one process keeps its live counter.
+        ``_rerun`` is in-memory but a run spans job slices, so each pass would
+        otherwise start at zero and the iteration cap could never be reached --
+        the loop would run until the orchestrator's backstop failed the run,
+        the abort the cap exists to replace. Only restores when this process has
+        counted nothing yet, so a multi-pass run keeps its live counter.
         """
         if self._rerun.iteration or self._rerun.metric_history:
             return
@@ -2988,7 +2955,13 @@ class StateMachine:
             plan_id=f"corr-{self.run_id}",
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
-        reflection = reflect(self._run_evidence(report, gap), context)
+        # No scorer in failure_classifier reads relative_error, so the mode is
+        # UNKNOWN and the generic plan below is the honest outcome. Deriving a
+        # mode from the gap would mean dividing by the run's numerical-precision
+        # uncertainty, making the diagnosis track how tightly the script
+        # converged rather than the science. The real signals (rejected input,
+        # diverged loss, OOD score) belong to the stages that can observe them.
+        reflection = reflect(RunEvidence(relative_error=gap), context)
         plan = reflection.correction_plan
         if plan is None:
             # UNKNOWN failure mode -- no strategy owns it. Record an honest
@@ -3022,7 +2995,6 @@ class StateMachine:
                 confidence=reflection.diagnosis.confidence,
             )
         plan["diagnosis_detail"] = reflection.diagnosis.to_dict()
-        plan["application"] = self._correction_applicability(plan)
         self.context.artifacts["correction_plan"] = self._write_artifact(
             "correction_plan", plan)
         proposals = ", ".join(
@@ -3034,70 +3006,6 @@ class StateMachine:
                     reflection.diagnosis.confidence, proposals,
                     self._rerun.iteration, self._rerun.policy.max_iterations)
         return State.BUILD
-
-    def _correction_applicability(self, correction_plan: dict) -> dict:
-        """Why the proposed corrections are recorded rather than applied here.
-
-        CORRECT deliberately does NOT re-select the method. Method selection is
-        PLAN's job, and it is not a field edit: PLAN grounds a choice against
-        the calculator registry, picks the toolset and the code template to
-        match, and checks the engine is installable here. Hand-writing
-        ``selected_method.tool_name`` skips all of that and yields a plan whose
-        pieces disagree -- swapping an xtb solubility run to the next-ranked
-        candidate (Pymatgen) silently re-templated it as a crystal structure
-        analysis, which cannot compute a solubility and died in its smoke test
-        with "no structure to analyse". A candidate is ranked against the
-        objective; that does not mean it can compute the requested property.
-
-        So a correction needing a different method is out of scope here and says
-        so. Re-running from the planning stage is the route to a new method. The
-        rebuild is still worth its pass on its own: BUILD re-synthesizes the
-        script, and a fresh sample can fix a subtly wrong calculation without
-        changing the method at all.
-        """
-        needs_replan = sorted({
-            str(c.get("modification_type"))
-            for c in correction_plan.get("proposed_corrections") or []
-            if isinstance(c, dict) and c.get("modification_type") == "switch_model"
-        })
-        return {
-            "applied": [],
-            "requires_replanning": needs_replan,
-            "note": ("Recorded, not applied: changing the method is PLAN's job. "
-                     "Editing the selected tool here would leave the template, "
-                     "calculator and toolset disagreeing. Re-run from the "
-                     "planning stage to act on this.") if needs_replan
-                    else "No proposed correction needed a change outside BUILD.",
-        }
-
-    def _run_evidence(self, report: dict, gap: Optional[float]) -> RunEvidence:
-        """Collect the diagnostic signals this pipeline can honestly report.
-
-        The classifier grades four failure modes off specific signals -- a
-        rejected input, activations outside the model's calibrated range, a
-        diverged or plateaued loss curve, an out-of-distribution score -- and
-        this pipeline currently collects none of them: EXECUTE keeps stdout,
-        an exit code and resource metrics, and VALIDATE knows only how far the
-        answer sits from a reference. So the diagnosis is UNKNOWN, and correct()
-        records the generic next-candidate plan instead of a mode-specific one.
-
-        That is deliberate. It is tempting to synthesize ``activation_magnitude``
-        by dividing the gap by the run's reported uncertainty, but that
-        uncertainty is a numerical-precision estimate (repeat spread, or a flat
-        10% fallback), not the accuracy range the method claims for this class
-        of system. Dividing by it makes the diagnosis a function of how tightly
-        the script converged and how it printed its number, so the same physics
-        would read as "model mismatch" or "unknown" depending on output
-        formatting -- a confident, authoritative, wrong answer. Reaching CORRECT
-        at all means the verdict was *marginal*, which is weak evidence for any
-        specific mode. Feeding the real signals in belongs with the code that
-        can observe them (input validation at BUILD, convergence traces from
-        EXECUTE); until then, saying "undetermined" is the honest report.
-
-        ``relative_error`` is passed through for the record even though no
-        scorer reads it, so the evidence object shows what was known.
-        """
-        return RunEvidence(relative_error=gap)
 
     def _next_discovery_candidate(self) -> Optional[str]:
         """The highest-ranked discovery candidate that isn't the tool just used."""

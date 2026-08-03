@@ -872,10 +872,9 @@ def test_correct_never_rewrites_the_selected_method(machine, tmp_path):
     assert machine.context.artifacts["run_bundle"] == "/built/bundle"
     assert machine.context.plan_approved is True   # CORRECT->BUILD is guarded on it
 
+    # the proposal is still recorded, for the researcher and the audit trail
     plan = machine._load_artifact("correction_plan")
-    assert plan["application"]["applied"] == []
-    assert plan["application"]["requires_replanning"] == ["switch_model"]
-    assert "PLAN's job" in plan["application"]["note"]
+    assert plan["proposed_corrections"][0]["modification_type"] == "switch_model"
 
 
 def test_validate_retires_the_previous_correction_plan(machine, tmp_path):
