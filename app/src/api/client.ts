@@ -12,9 +12,19 @@ export type ConversationStatus =
   | 'cancelled';
 
 export type MessageRole = 'user' | 'assistant' | 'system';
+/**
+ * One kind per gate that can ask the researcher something, so a gate's question
+ * is recognised by identity rather than by matching its prompt text. Mirrors
+ * runner/bridges.py and the messages_kind_check migration. 'clarification' is
+ * still the CLARIFY question, and remains the kind on questions recorded before
+ * the others existed.
+ */
 export type MessageKind =
   | 'chat'
   | 'clarification'
+  | 'heavy_confirm'
+  | 'validation_gate'
+  | 'revision_request'
   | 'approval_request'
   | 'approval_response'
   | 'terminate';
@@ -279,10 +289,20 @@ class APIClient {
   // stage and everything after it; returns the conversation back in `running`.
   // With `feedback` (the mid-session revision path), the message is folded into
   // the run's intent before re-planning, so the new plan reflects it.
-  async rerunConversation(id: string, state: string, feedback?: string): Promise<Conversation> {
+  /**
+   * Re-run from an earlier stage. `request` replaces the opening prompt and is
+   * only accepted with state 'INTAKE' — the one stage that re-reads it.
+   */
+  async rerunConversation(
+    id: string,
+    state: string,
+    feedback?: string,
+    request?: string,
+  ): Promise<Conversation> {
     const response = await this.client.post(`/api/conversations/${id}/rerun`, {
       state,
       ...(feedback ? { feedback } : {}),
+      ...(request ? { request } : {}),
     });
     return response.data.data;
   }

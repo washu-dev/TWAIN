@@ -126,6 +126,9 @@ export const ChatScreen: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rerunOpen, setRerunOpen] = useState(false);  // "Re-run from…" picker
+  // Re-running from Intake re-reads the opening request, so it is offered for
+  // editing first; null means the picker is showing its stage list.
+  const [intakeDraft, setIntakeDraft] = useState<string | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -145,24 +148,19 @@ export const ChatScreen: React.FC = () => {
 
   const messages = conversation?.messages ?? [];
   const awaitingApproval = status === 'awaiting_approval';
+  // The prompt that started the run, prefilled when re-running from Intake.
+  const openingRequest =
+    messages.find((m) => m.role === 'user' && m.kind === 'chat')?.content ?? '';
 
-  // The heavy-calculation gate (e.g. a GPAW DFT run) asks a yes/no question —
-  // its prompt always ends with "[y/N]" (statemachine._confirm_heavy_execution).
-  // Offer buttons instead of making the user type y/n; the answer goes through
-  // the same reply channel the typed answer would.
+  // Each gate that can ask something posts its own message kind (see
+  // runner/bridges.py), so the buttons key off identity rather than sniffing the
+  // prompt text. Answers go through the same reply channel typing would, so the
+  // composer stays a valid fallback — including for conversations started before
+  // the kinds existed, whose questions are plain 'clarification'.
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
-  const yesNoPending =
-    status === 'awaiting_input' &&
-    lastAssistant?.kind === 'clarification' &&
-    /\[y\/n\]/i.test(lastAssistant.content);
-  // The accept-or-rerun gate: validation flagged the result and is asking whether
-  // another calculation is worth spending. Its prompt ends with "[accept/rerun]"
-  // (statemachine._accept_or_loop_prompt). Same treatment as the heavy-calc gate
-  // — tap instead of typing, through the same reply channel.
-  const acceptOrRerunPending =
-    status === 'awaiting_input' &&
-    lastAssistant?.kind === 'clarification' &&
-    /\[accept\/rerun\]/i.test(lastAssistant.content);
+  const pendingGate = status === 'awaiting_input' ? lastAssistant?.kind : undefined;
+  const yesNoPending = pendingGate === 'heavy_confirm';
+  const acceptOrRerunPending = pendingGate === 'validation_gate';
   const approvalContent =
     [...messages].reverse().find((m) => m.kind === 'approval_request')?.content ?? null;
   const approvalPlan = approvalContent ? parsePlanSummary(approvalContent) : null;
@@ -349,13 +347,14 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
-  const handleRerun = async (state: string) => {
+  const handleRerun = async (state: string, request?: string) => {
     if (!conversationId || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await apiClient.rerunConversation(conversationId, state);
+      await apiClient.rerunConversation(conversationId, state, undefined, request);
       setRerunOpen(false);
+      setIntakeDraft(null);
       // Reload the full conversation (now `running` at `state`, with the marker
       // message); the poll effect restarts automatically once it's active again.
       await refresh(conversationId);
@@ -611,11 +610,11 @@ export const ChatScreen: React.FC = () => {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.neutralBtn, busy && styles.disabled]}
-              onPress={() => handleQuickReply('rerun')}
+              onPress={() => setRerunOpen(true)}
               disabled={busy}
               accessibilityRole="button"
             >
-              <Text style={styles.neutralText}>Re-run to improve</Text>
+              <Text style={styles.neutralText}>Re-run from…</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -662,46 +661,96 @@ export const ChatScreen: React.FC = () => {
         visible={rerunOpen}
         transparent
         animationType="fade"
-        onRequestClose={() => (busy ? undefined : setRerunOpen(false))}
+        onRequestClose={() => {
+          if (busy) return;
+          setRerunOpen(false);
+          setIntakeDraft(null);
+        }}
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Re-run from a step</Text>
-            <Text style={styles.modalHint}>
-              Pick a step to restart from. That step and everything after it run again; the
-              earlier steps are kept.
-            </Text>
-            <ScrollView style={styles.stageList}>
-              {RERUN_STAGES.map((stage) => {
-                const stageIndex = PIPELINE_STATES.indexOf(stage.state);
-                // Offer only steps the run actually reached.
-                const enabled = reachedIndex >= 0 && stageIndex <= reachedIndex;
-                return (
+            {intakeDraft === null ? (
+              <>
+                <Text style={styles.modalTitle}>Re-run from a step</Text>
+                <Text style={styles.modalHint}>
+                  Pick a step to restart from. That step and everything after it run again;
+                  the earlier steps are kept.
+                </Text>
+                <ScrollView style={styles.stageList}>
+                  {RERUN_STAGES.map((stage) => {
+                    const stageIndex = PIPELINE_STATES.indexOf(stage.state);
+                    // Offer only steps the run actually reached.
+                    const enabled = reachedIndex >= 0 && stageIndex <= reachedIndex;
+                    return (
+                      <TouchableOpacity
+                        key={stage.state}
+                        style={[styles.stageRow, (!enabled || busy) && styles.disabled]}
+                        // Intake re-reads the opening request, so it opens the
+                        // editor first instead of restarting the old prompt.
+                        onPress={() =>
+                          stage.state === 'INTAKE'
+                            ? setIntakeDraft(openingRequest)
+                            : handleRerun(stage.state)
+                        }
+                        disabled={!enabled || busy}
+                        accessibilityRole="button"
+                        accessibilityState={{ disabled: !enabled || busy }}
+                      >
+                        <View style={styles.stageMain}>
+                          <Text style={styles.stageLabel}>{stage.label}</Text>
+                          <Text style={styles.stageDesc}>{stage.desc}</Text>
+                        </View>
+                        <Text style={styles.stageChevron}>›</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+                <TouchableOpacity
+                  style={styles.modalCancel}
+                  onPress={() => setRerunOpen(false)}
+                  disabled={busy}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.modalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={styles.modalTitle}>Edit your request</Text>
+                <Text style={styles.modalHint}>
+                  Re-running from Intake reads this prompt again, so you can change what
+                  you asked for. Everything after Intake is re-derived from it.
+                </Text>
+                <TextInput
+                  style={styles.promptInput}
+                  value={intakeDraft}
+                  onChangeText={setIntakeDraft}
+                  placeholder="Describe the simulation you want"
+                  placeholderTextColor={C.textSecondary}
+                  multiline
+                  editable={!busy}
+                  accessibilityLabel="Edited request"
+                />
+                <View style={styles.approvalButtons}>
                   <TouchableOpacity
-                    key={stage.state}
-                    style={[styles.stageRow, (!enabled || busy) && styles.disabled]}
-                    onPress={() => handleRerun(stage.state)}
-                    disabled={!enabled || busy}
+                    style={[styles.approveBtn, (busy || !intakeDraft.trim()) && styles.disabled]}
+                    onPress={() => handleRerun('INTAKE', intakeDraft.trim())}
+                    disabled={busy || !intakeDraft.trim()}
                     accessibilityRole="button"
-                    accessibilityState={{ disabled: !enabled || busy }}
                   >
-                    <View style={styles.stageMain}>
-                      <Text style={styles.stageLabel}>{stage.label}</Text>
-                      <Text style={styles.stageDesc}>{stage.desc}</Text>
-                    </View>
-                    <Text style={styles.stageChevron}>›</Text>
+                    <Text style={styles.approveText}>Re-run with this</Text>
                   </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-            <TouchableOpacity
-              style={styles.modalCancel}
-              onPress={() => setRerunOpen(false)}
-              disabled={busy}
-              accessibilityRole="button"
-            >
-              <Text style={styles.modalCancelText}>Cancel</Text>
-            </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.neutralBtn, busy && styles.disabled]}
+                    onPress={() => setIntakeDraft(null)}
+                    disabled={busy}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.neutralText}>Back</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
           </View>
         </View>
       </Modal>
@@ -1095,6 +1144,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   neutralText: { color: C.text, fontWeight: '700', fontSize: 15 },
+  promptInput: {
+    minHeight: 96,
+    maxHeight: 200,
+    borderWidth: 1,
+    borderColor: C.textSecondary,
+    borderRadius: 10,
+    padding: Spacing.three,
+    fontSize: 15,
+    color: C.text,
+    backgroundColor: C.washuWhite,
+    textAlignVertical: 'top',
+  },
   approvalNote: { fontSize: 13, color: C.textSecondary, lineHeight: 18 },
   terminalBar: {
     gap: Spacing.two,

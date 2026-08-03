@@ -215,6 +215,11 @@ class RerunConversation(BaseModel):
     # Optional mid-session revision: the researcher's "here's what to change"
     # message, folded into the run's intent before re-planning.
     feedback: str | None = None
+    # Replacement opening request, for re-running from INTAKE. Only INTAKE
+    # re-reads the raw request (every later stage works from the IntentSpec it
+    # produced), so the handler rejects it for any other target rather than
+    # accepting an edit that would silently do nothing.
+    request: str | None = None
 
 
 def _require_own_conversation(conversation_id: str, user: dict) -> dict:
@@ -295,10 +300,16 @@ async def post_terminate(conversation_id: str, user: CurrentUser):
 
 @app.post("/api/conversations/{conversation_id}/rerun")
 async def rerun_conversation(conversation_id: str, body: RerunConversation, user: CurrentUser):
-    """Re-run a finished conversation from an earlier pipeline stage.
+    """Re-run a conversation from an earlier pipeline stage.
 
     Resets that stage and everything after it and drives the run again; the
-    stages before it are kept as input. Only allowed on a finished run.
+    stages before it are kept as input. Allowed on a finished run, and on one
+    suspended at a gate (nothing is driving a suspended run) so the researcher
+    can redirect it from the accept-or-rerun question instead of only being
+    offered the automatic correction loop.
+
+    ``request`` replaces the opening prompt and is only accepted with INTAKE,
+    the one stage that re-reads it.
     """
     _require_own_conversation(conversation_id, user)
     state = body.state.strip().upper()
@@ -307,10 +318,18 @@ async def rerun_conversation(conversation_id: str, body: RerunConversation, user
             status_code=422,
             detail=f"state must be one of: {', '.join(convo.RERUNNABLE_STATES)}",
         )
+    request = (body.request or "").strip() or None
+    if request and state != "INTAKE":
+        raise HTTPException(
+            status_code=422,
+            detail="An edited request only applies when re-running from INTAKE; "
+                   "every later stage works from the spec intake already produced.",
+        )
     try:
         conversation = convo.rerun_conversation(
             conversation_id, user["id"], state,
             feedback=(body.feedback or "").strip() or None,
+            request=request,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

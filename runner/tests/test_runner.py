@@ -20,7 +20,9 @@ from runner.artifacts import (
 from runner.bridges import (
     DbAsk,
     PgEventSink,
+    awaiting_reject_feedback,
     consume_approval,
+    consume_reject_feedback,
     post_plan_for_approval,
 )
 from runner.pg_store import PgStore
@@ -70,8 +72,16 @@ class FakeDB:
         return self.messages[-1]["id"] if self.messages else 0
 
     def last_question_id(self, sid, kinds=("clarification",)):
-        ids = [m["id"] for m in self.messages if m["role"] == "assistant" and m["kind"] in kinds]
+        # Mirrors the real query: questions retired by a re-run are skipped.
+        ids = [m["id"] for m in self.messages
+               if m["role"] == "assistant" and m["kind"] in kinds
+               and m.get("state") != "consumed"]
         return max(ids) if ids else None
+
+    def retire_questions(self, sid):  # test-only: what a re-run does in SQL
+        for m in self.messages:
+            if m["role"] == "assistant" and m["kind"] in ("clarification", "approval_request"):
+                m["state"] = "consumed"
 
     def user_replies_after(self, sid, after_id, kind=None):
         return [
@@ -444,7 +454,7 @@ class TestProcessJob:
         assert db.status == "awaiting_input"
         assert engine.approved is False         # never approved -> guard stays closed
         assert not any(e["event_type"] == "run.completed" for e in db.events)
-        assert db.messages[-1]["kind"] == "clarification"
+        assert db.messages[-1]["kind"] == "revision_request"
         assert "what should change" in db.messages[-1]["content"].lower()
 
     def test_auto_run_skips_approval_gate(self, monkeypatch):
@@ -544,7 +554,7 @@ class TestProcessJob:
         engine = FakeEngine()
         runner.process_job(self._job(), db, engine)
         runner.process_job(self._job(kind="resume"), db, engine)
-        assert db.kinds().count("clarification") == 1
+        assert db.kinds().count("revision_request") == 1
         assert db.kinds().count("approval_request") == 1
         assert db.status == "awaiting_input"
 
@@ -956,3 +966,85 @@ class TestRematerializeInputs:
         )
         assert rematerialize_inputs(db, "s1", orch) == 0
         assert orch.sm.context.artifacts["intent_spec"] == "/gone.json"  # unchanged
+
+
+class TestAbandonedQuestionsDoNotSilenceTheNextOne:
+    """A question the researcher walked away from must not make the next gate
+    think it has already asked.
+
+    Reported: re-running from CLARIFY left the run waiting for an answer with no
+    question posted. The accept-or-rerun gate had asked at VALIDATE; choosing
+    "re-run from a step" instead of answering left that clarification looking
+    outstanding, so the next gate suspended without posting anything.
+    """
+
+    def _stale_gate_question(self):
+        db = FakeDB()
+        db.add_assistant_message(
+            SESSION,
+            "Validation says rejected: ...\nAccept this result, or rerun to try "
+            "improving it? [accept/rerun]: ",
+            kind="validation_gate", state="VALIDATE",
+        )
+        return db
+
+    def test_another_gates_abandoned_question_does_not_suppress_this_one(self):
+        """The defect: CLARIFY went silent because the validation gate's
+        abandoned question looked outstanding, so the researcher waited on a
+        question that was never posted. Each gate now matches its own kind.
+        """
+        db = self._stale_gate_question()
+        with pytest.raises(SuspendRun):
+            DbAsk(db, SESSION)("Which polymorph of silicon did you mean?")
+
+        assert len(db.messages) == 2
+        assert db.messages[-1]["kind"] == "clarification"
+        assert "polymorph" in db.messages[-1]["content"]
+        assert db.status == "awaiting_input"
+
+    def test_a_gates_own_outstanding_question_is_still_not_reposted(self):
+        """The protection that sharing a kind was providing must survive: a
+        redundant resume should not ask the same thing twice."""
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "Which polymorph?",
+                                 kind="clarification", state="CLARIFY")
+        with pytest.raises(SuspendRun):
+            DbAsk(db, SESSION)("Which polymorph?")
+        assert len(db.messages) == 1          # not asked again
+        assert db.status == "awaiting_input"
+
+    def test_retiring_questions_also_clears_a_same_gate_one(self):
+        """A re-run retires the abandoned pass's questions, so a rewind back
+        through the same gate asks afresh rather than looking already-asked."""
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "Which polymorph?",
+                                 kind="clarification", state="CLARIFY")
+        db.retire_questions(SESSION)
+
+        with pytest.raises(SuspendRun):
+            DbAsk(db, SESSION)("Which polymorph?")
+        assert len(db.messages) == 2
+
+    def test_a_stale_question_is_not_read_as_plan_revision_feedback(self):
+        """It was also mistaken for the BUILD gate's own "what should change?",
+        so the next thing the researcher typed was consumed as feedback and
+        silently drove a re-plan the researcher never asked for.
+
+        Now that each gate posts its own kind this is unreachable by
+        construction, not merely handled: the validation gate's question is not
+        a revision request, so it cannot be read as one whether or not it was
+        ever answered.
+        """
+        db = self._stale_gate_question()
+        assert awaiting_reject_feedback(db, SESSION) is False
+
+        db.add_user("continue")
+        assert consume_reject_feedback(db, SESSION) is None
+
+        # ... and the gate that DID ask still gets its answer
+        db2 = FakeDB()
+        db2.add_assistant_message(SESSION, "What should change?",
+                                  kind="revision_request", state="BUILD")
+        assert awaiting_reject_feedback(db2, SESSION) is True
+        db2.add_user("use xtb instead")
+        assert consume_reject_feedback(db2, SESSION) == "use xtb instead"

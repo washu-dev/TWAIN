@@ -20,13 +20,22 @@ when the user replies) drives the run onward.
 
 Pairing answers with questions
 ------------------------------
-CLARIFY, the heavy-calc confirmation, and plan approval all post an assistant
-*question* and read back a later user reply. To keep them from stealing each
-other's answers (CLARIFY and heavy-calc even share the ``clarification`` kind),
-a reply counts as "for this gate" only when the gate's question is the *most
-recent question of any kind* in the transcript — i.e. nothing has been asked
-since. Once the pipeline moves on and asks something else, an older answer is no
-longer pending. See :func:`_fresh_reply`.
+Several gates post an assistant *question* and read back a later user reply:
+CLARIFY, the heavy-calculation confirmation, the accept-or-rerun validation
+gate, the "what should change?" after a rejection, and plan approval. Each posts
+its **own message kind**, so a gate recognises its question by identity.
+
+They used to share ``clarification`` and be told apart by position — whichever
+question was most recent was assumed to be the asker's own. That held only while
+every question was answered before the run moved on. Once one could be abandoned
+(re-running from the validation gate instead of answering it), the next gate read
+that stale question as its own, suspended without posting anything, and claimed
+the next thing the researcher typed as its answer.
+
+Position is still checked *in addition*: a reply counts as "for this gate" only
+when the gate's own question is also the most recent question of any kind, so an
+answer that arrives after the pipeline has moved on is not applied late. See
+:func:`_fresh_reply`.
 """
 import json
 from functools import lru_cache
@@ -36,8 +45,29 @@ from runner.db import RunnerDB
 from runner.notifications import default_notifier
 from runner.suspend import SuspendRun
 
-# The assistant message kinds that represent an outstanding question to the user.
-_QUESTION_KINDS = ("clarification", "approval_request")
+# One kind per gate that can ask the researcher something. Mirrored by the
+# ``ASK_*`` constants in the state machine (which name the asker), by
+# ``api.conversations.QUESTION_KINDS`` (which retires them on a re-run), and by
+# the app, which keys its per-gate buttons off them. Adding a gate means adding
+# its kind here, in the messages_kind_check migration, and nowhere else.
+KIND_CLARIFY = "clarification"
+KIND_HEAVY_CONFIRM = "heavy_confirm"
+KIND_VALIDATION_GATE = "validation_gate"
+KIND_REVISION_REQUEST = "revision_request"
+KIND_APPROVAL_REQUEST = "approval_request"
+
+# Every kind that represents an outstanding question to the researcher.
+_QUESTION_KINDS = (
+    KIND_CLARIFY, KIND_HEAVY_CONFIRM, KIND_VALIDATION_GATE,
+    KIND_REVISION_REQUEST, KIND_APPROVAL_REQUEST,
+)
+
+# The pipeline stage each question belongs to, for the transcript's state column.
+_ASK_STATE = {
+    KIND_CLARIFY: "CLARIFY",
+    KIND_HEAVY_CONFIRM: "EXECUTE",
+    KIND_VALIDATION_GATE: "VALIDATE",
+}
 
 
 # messages.state value marking a user reply a gate has already acted on. A
@@ -73,10 +103,14 @@ def _fresh_reply(db: RunnerDB, session_id: str, question_kind: str, reply_kind):
     return row["content"] if row else None
 
 
-def _has_outstanding_clarification(db: RunnerDB, session_id: str) -> bool:
-    """True when a clarification question is the latest question and unanswered."""
+def _has_outstanding_question(db: RunnerDB, session_id: str, kind: str) -> bool:
+    """True when ``kind``'s own question is the latest one and still unanswered.
+
+    Keyed on ``kind`` so one gate's abandoned question cannot convince another
+    that it has already asked.
+    """
     latest_any = db.last_question_id(session_id, kinds=_QUESTION_KINDS)
-    mine = db.last_question_id(session_id, kinds=("clarification",))
+    mine = db.last_question_id(session_id, kinds=(kind,))
     if mine is None or mine != latest_any:
         return False
     return not db.user_replies_after(session_id, mine, kind=None)
@@ -97,10 +131,17 @@ class DbAsk:
         self._notify = notifier
         self._consumed = False
 
-    def __call__(self, message: str) -> str:
+    def __call__(self, message: str, purpose: str = KIND_CLARIFY) -> str:
+        """Return a waiting answer to ``purpose``'s question, or post + suspend.
+
+        ``purpose`` is the asking gate's message kind (the state machine's
+        ``ASK_*`` constants), so this only ever consumes a reply to its own
+        question and only stays silent for its own outstanding one.
+        """
+        kind = purpose if purpose in _QUESTION_KINDS else KIND_CLARIFY
         if not self._consumed:
             reply = _fresh_reply_row(
-                self.db, self.session_id, question_kind="clarification", reply_kind=None
+                self.db, self.session_id, question_kind=kind, reply_kind=None
             )
             if reply is not None:
                 # Resume: hand the researcher's answer back so the paused handler
@@ -110,7 +151,7 @@ class DbAsk:
                 self.db.mark_reply_consumed(reply["id"])
                 self.db.set_conversation_status(self.session_id, "running")
                 return reply["content"]
-            if _has_outstanding_clarification(self.db, self.session_id):
+            if _has_outstanding_question(self.db, self.session_id, kind):
                 # A question is already posted and unanswered (a redundant resume):
                 # stay suspended without re-posting, so the user sees it only once.
                 self.db.set_conversation_status(self.session_id, "awaiting_input")
@@ -118,7 +159,8 @@ class DbAsk:
         # First question of the run, or a fresh round after consuming the last
         # answer: post it, mark the run as waiting, notify, and suspend.
         self.db.add_assistant_message(
-            self.session_id, message, kind="clarification", state="CLARIFY"
+            self.session_id, message, kind=kind,
+            state=_ASK_STATE.get(kind, "CLARIFY"),
         )
         self.db.set_conversation_status(self.session_id, "awaiting_input")
         self._notify(self.session_id, "input", message)
@@ -143,7 +185,7 @@ def post_reject_feedback_question(
     resume, folded into the run, and a fresh plan is posted for approval.
     """
     db.add_assistant_message(
-        session_id, REJECT_FEEDBACK_PROMPT, kind="clarification", state="BUILD"
+        session_id, REJECT_FEEDBACK_PROMPT, kind=KIND_REVISION_REQUEST, state="BUILD"
     )
     db.set_conversation_status(session_id, "awaiting_input")
     notifier(session_id, "input", REJECT_FEEDBACK_PROMPT)
@@ -152,14 +194,13 @@ def post_reject_feedback_question(
 def consume_reject_feedback(db: RunnerDB, session_id: str) -> str | None:
     """The user's pending plan-revision feedback (one-shot), or None.
 
-    Only meaningful while the run is parked at the BUILD approval gate, where
-    the sole clarification question that can be outstanding is the gate's own
-    "what should change?" (CLARIFY-stage answers were consumed long before the
-    run reached BUILD). Like an approval decision, the reply is consumed so a
-    later visit to the gate asks afresh instead of replaying it.
+    Matched on the gate's own question kind, so no other gate's answer -- or
+    abandoned question -- can be mistaken for revision feedback. Like an approval
+    decision, the reply is consumed so a later visit asks afresh instead of
+    replaying it.
     """
     reply = _fresh_reply_row(
-        db, session_id, question_kind="clarification", reply_kind=None
+        db, session_id, question_kind=KIND_REVISION_REQUEST, reply_kind=None
     )
     if reply is None:
         return None
@@ -169,7 +210,7 @@ def consume_reject_feedback(db: RunnerDB, session_id: str) -> str | None:
 
 def awaiting_reject_feedback(db: RunnerDB, session_id: str) -> bool:
     """True while the gate's "what should change?" question is unanswered."""
-    return _has_outstanding_clarification(db, session_id)
+    return _has_outstanding_question(db, session_id, KIND_REVISION_REQUEST)
 
 
 def post_plan_for_approval(

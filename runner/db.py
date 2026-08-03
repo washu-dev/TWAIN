@@ -239,17 +239,25 @@ class RunnerDB:
     def last_question_id(
         self, session_id: str, kinds: tuple[str, ...] = ("clarification",)
     ) -> int | None:
-        """Id of the most recent assistant *question* of the given kind(s).
+        """Id of the most recent *live* assistant question of the given kind(s).
 
         Used by the bridges to pair an answer with its question: the user's reply
         to a question is a later user message; if none exists yet the run is still
         awaiting input. Returns None when no such question has been asked.
+
+        Questions marked ``state='consumed'`` are retired and skipped. A re-run
+        retires the questions of the pass it rewinds past (see
+        ``conversations.rerun_conversation``): choosing to re-run *is* the answer,
+        and an abandoned question left looking outstanding makes the next gate
+        believe it has already asked -- so it suspends the run without posting
+        anything and the researcher waits on a question that never arrives.
         """
         placeholders = ", ".join(["%s"] * len(kinds))
         row = self._query_one(
             "SELECT MAX(id) AS m FROM messages "
             "WHERE conversation_id = %s AND role = 'assistant' "
-            f"AND kind IN ({placeholders});",
+            f"AND kind IN ({placeholders}) "
+            "AND (state IS NULL OR state <> 'consumed');",
             (session_id, *kinds),
         )
         return row["m"] if row and row["m"] is not None else None
