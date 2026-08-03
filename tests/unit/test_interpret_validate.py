@@ -61,10 +61,23 @@ def _validator(schema_name):
 
 @pytest.fixture
 def machine(tmp_path):
-    """A StateMachine built offline (no eager AgentInterface) writing to tmp_path."""
+    """A StateMachine built offline (no eager AgentInterface) writing to tmp_path.
+
+    ``ask`` answers "rerun" at the accept-or-rerun gate, so the tests below
+    exercise the automated loop -- the path taken when the researcher chooses to
+    keep going. The gate itself is covered by TestAcceptOrLoopGate, which scripts
+    its own answers. Questions are recorded on ``machine.asked``.
+    """
     with patch.object(DataStorage, "load", return_value=None):
         m = SM.StateMachine(data_path=str(tmp_path / "state.json"), run_id="testrun")
     m.artifacts_dir = tmp_path
+    m.asked = []
+
+    def ask(question):
+        m.asked.append(question)
+        return "rerun"
+
+    m.ask = ask
     return m
 
 
@@ -693,6 +706,7 @@ def test_the_rerun_budget_survives_a_new_process(machine, tmp_path):
         resumed = SM.StateMachine(data_path=str(tmp_path / "state2.json"),
                                   run_id="testrun")
     resumed.artifacts_dir = tmp_path
+    resumed.ask = lambda question: "rerun"     # the researcher keeps going
     resumed.context.artifacts = dict(machine.context.artifacts)
     assert resumed._rerun.iteration == 0  # nothing counted in this process yet
 
@@ -997,3 +1011,105 @@ def test_rewinding_to_execute_asks_again(machine, tmp_path):
     machine.context.artifacts["intent_spec"] = "/x/intent.json"
     machine.rewind_to(State.EXECUTE)
     assert machine.context.heavy_confirmed is None
+
+
+# -- the accept-or-rerun gate --------------------------------------------------
+
+class TestAcceptOrLoopGate:
+    """A failing verdict does not mean the run is wrong, so the researcher
+    decides whether another calculation is worth spending."""
+
+    def _answer(self, machine, reply):
+        asked = []
+
+        def ask(question):
+            asked.append(question)
+            return reply
+
+        machine.ask = ask
+        return asked
+
+    def test_accepting_delivers_the_result_and_stops(self, machine, tmp_path):
+        _seed_planning(machine, tmp_path)
+        _seed_normalized(machine, tmp_path, -3.0)          # would be rejected
+        asked = self._answer(machine, "accept")
+
+        assert machine.validate() == State.ACCEPT
+        assert len(asked) == 1
+        report = machine._load_artifact("validation_report")
+        assert report["acceptance_status"] == "rejected"    # true verdict kept
+        assert report["rerun"]["stop_reason"] == "researcher_accepted"
+        assert report["rerun"]["disposition"] == "accepted_by_researcher"
+        assert machine._rerun.iteration == 0               # no calculation spent
+
+    def test_choosing_rerun_enters_the_bounded_loop(self, machine, tmp_path):
+        _seed_planning(machine, tmp_path)
+        _seed_normalized(machine, tmp_path, -3.0)
+        self._answer(machine, "rerun")
+
+        assert machine.validate() == State.REPLAN
+        assert machine._rerun.iteration == 1
+
+    def test_an_accepted_result_is_never_questioned(self, machine, tmp_path):
+        """Nothing to decide when the result already agrees with the reference."""
+        _seed_planning(machine, tmp_path)
+        _seed_normalized(machine, tmp_path, -1.70)
+        asked = self._answer(machine, "accept")
+
+        assert machine.validate() == State.ACCEPT
+        assert asked == []
+
+    def test_the_question_says_what_the_result_was_compared_against(self, machine, tmp_path):
+        """The researcher cannot judge a verdict without knowing whether the
+        target is a measurement or a value the plan proposed."""
+        plan = _plan_for("unobtainium-oxide", [
+            {"metric_name": "logS", "target_value": -2.0, "tolerance": 0.1}])
+        _seed(machine, tmp_path, "execution_plan", plan)
+        _seed_normalized(machine, tmp_path, -4.0)
+        asked = self._answer(machine, "accept")
+
+        machine.validate()
+        assert "not taken from a measurement" in asked[0]
+
+    def test_the_silicon_bandgap_case_is_offered_for_acceptance(self, machine, tmp_path):
+        """The run that motivated this gate: PBE puts silicon's gap near 0.6 eV
+        against an experimental ~1.17, so the verdict fails forever and the loop
+        can never fix it -- only a human can say the run is as good as PBE gets.
+        """
+        plan = {"selected_method": {"tool_name": "GPAW", "calculator": "GPAW"},
+                "requested_property": "band_gap",
+                "target_system": {"crystal": {"name": "silicon", "formula": "Si"}},
+                "acceptance_metrics": [{"metric_name": "band_gap",
+                                        "target_value": 1.17, "tolerance": 0.1}]}
+        _seed(machine, tmp_path, "execution_plan", plan)
+        _seed(machine, tmp_path, "normalized_result", {
+            "primary_metric": {"name": "band_gap", "value": 0.570,
+                               "uncertainty": 0.057,
+                               "uncertainty_method": "fallback", "unit": "eV"},
+            "secondary_metrics": [], "metadata": {"primary_samples": 1}})
+        asked = self._answer(machine, "accept")
+
+        assert machine.validate() == State.ACCEPT
+        assert "0.57" in asked[0] and "GPAW" in asked[0]
+        report = machine._load_artifact("validation_report")
+        assert report["rerun"]["stop_reason"] == "researcher_accepted"
+
+    def test_unattended_runs_keep_looping_without_asking(self, machine, tmp_path):
+        _seed_planning(machine, tmp_path)
+        _seed_normalized(machine, tmp_path, -3.0)
+        machine.auto_approve = True
+        asked = self._answer(machine, "accept")
+
+        assert machine.validate() == State.REPLAN
+        assert asked == []
+
+    def test_with_no_way_to_ask_the_result_is_accepted_not_rerun(self, machine, tmp_path):
+        """Spending an unattended DFT calculation on an unreviewed guess is the
+        worse default, so a headless run delivers instead of looping."""
+        _seed_planning(machine, tmp_path)
+        _seed_normalized(machine, tmp_path, -3.0)
+        machine.ask = None
+
+        with patch.object(SM.sys, "stdin", None):
+            assert machine.validate() == State.ACCEPT
+        assert machine._rerun.iteration == 0

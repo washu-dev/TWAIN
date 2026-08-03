@@ -2649,6 +2649,71 @@ class StateMachine:
                     "(verdict on record: %s).", verdict)
         return "accepted"
 
+    def _accept_or_loop(self, normalized: dict, artifact: dict) -> bool:
+        """Ask whether to rerun (True) or accept this result as it stands (False).
+
+        A failing verdict has three very different causes and the grader cannot
+        tell them apart: the generated code is wrong (the aspirin solubility run
+        computed a partition constant and called it a solubility), or the method
+        is systematically offset from the reference and the run is as good as
+        that method gets (PBE puts silicon's gap near 0.6 eV against an
+        experimental 1.17 -- a textbook DFT underestimate, not a failure), or the
+        reference is not comparable at all. Only the first is worth another
+        calculation. A researcher can see which it is in seconds, so they are
+        asked before the compute is spent, and the answer is recorded.
+
+        Unattended runs keep looping automatically. When there is no way to ask,
+        the result is accepted rather than rerun: spending an unattended DFT
+        calculation on an unreviewed guess is the worse default.
+        """
+        if self.auto_approve:
+            return True
+        if not self._can_prompt():
+            logger.info("[validate] no interactive input available; accepting the "
+                        "flagged result rather than rerunning unattended.")
+            return False
+        answer = self._ask_user(self._accept_or_loop_prompt(normalized, artifact))
+        text = str(answer).strip().lower()
+        if text in {"rerun", "loop", "retry", "again", "r", "y", "yes"}:
+            return True
+        logger.info("[validate] the researcher accepted the flagged result.")
+        return False
+
+    def _accept_or_loop_prompt(self, normalized: dict, artifact: dict) -> str:
+        """The question posed at the accept-or-rerun gate.
+
+        States what was computed, what it was compared against and where that
+        reference came from -- the researcher cannot judge a verdict without
+        knowing whether the target is an experimental number, a value the plan
+        proposed, or nothing comparable at all.
+        """
+        metric = normalized.get("primary_metric") or {}
+        unit = f" {metric['unit']}" if metric.get("unit") else ""
+        value = metric.get("value")
+        shown = f"{value:.6g}{unit}" if isinstance(value, (int, float)) else "n/a"
+        method = ((self._load_artifact("execution_plan") or {})
+                  .get("selected_method") or {})
+        engine = method.get("calculator") or method.get("tool_name") or "the plan's method"
+        comparisons = (artifact.get("cross_validation") or {}).get("comparisons") or []
+        if comparisons:
+            reference = (f"literature values from the baseline database "
+                         f"({len(comparisons)} compared)")
+        elif artifact.get("gap_basis") == "tolerance_multiples":
+            reference = ("the target this run's own plan proposed, which was not "
+                         "taken from a measurement")
+        else:
+            reference = "no comparable reference"
+        return (
+            f"Validation says {artifact.get('acceptance_status')}: "
+            f"{artifact.get('rationale')}\n"
+            f"  computed: {metric.get('name', 'result')} = {shown} (via {engine})\n"
+            f"  compared against: {reference}\n"
+            f"Bear in mind a method can be right and still miss a reference it was "
+            f"never meant to reproduce (a DFT functional against an experimental "
+            f"value, say). Rerunning costs another full calculation.\n"
+            f"Accept this result, or rerun to try improving it? [accept/rerun]: "
+        )
+
     def _run_molecule(self) -> Optional[str]:
         """The molecule/material this run is about (baseline DB lookup key)."""
         plan = self._load_artifact("execution_plan") or {}
@@ -2756,6 +2821,22 @@ class StateMachine:
         artifact["gap"] = gap
         artifact["gap_basis"] = basis
         logger.info("[validate] %s -- %s", status, artifact["rationale"])
+        # Ask the researcher before spending another calculation. Deliberately
+        # BEFORE _gate_rerun: everything above only reads, so if this suspends
+        # for the answer the re-entry re-grades identically and no metric has
+        # been recorded twice (which would read as 0% improvement -> converged).
+        if status != "accepted" and not self._accept_or_loop(normalized, artifact):
+            artifact["rerun"] = {
+                "decision": "stop",
+                "stop_reason": "researcher_accepted",
+                "reason": "The researcher accepted this result as it stands.",
+                "iteration": self._rerun.iteration,
+                "final_verdict": status,
+                "disposition": "accepted_by_researcher",
+            }
+            self.context.artifacts["validation_report"] = self._write_artifact(
+                "validation_report", artifact)
+            return "accepted"
         self._restore_rerun_budget()
         final = self._gate_rerun(status, gap, artifact)
         self.context.artifacts["validation_report"] = self._write_artifact(
