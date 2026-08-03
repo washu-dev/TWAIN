@@ -53,7 +53,12 @@ from code_gen import dependency_inferencer as _depinf
 # Output-token budget for LLM code synthesis. A whole main.py runs well past the
 # gateway's small default (1024), so give it generous headroom -- a truncated
 # script compiles but has no entrypoint and silently produces nothing.
-_CODEGEN_MAX_TOKENS = 8192
+# A whole main.py has to fit: geometry + method + thermochemistry + CSV output
+# + argparse + a smoke path, on top of the header the prompt mandates. At 8192
+# a Psi4 thermochemistry script was cut off mid-body -- it still compiled, so
+# only the entrypoint check caught it, and BUILD then shipped the placeholder
+# scaffold (job 2569967).
+_CODEGEN_MAX_TOKENS = 16384
 
 
 def _module_importable(module: str) -> bool:
@@ -446,7 +451,8 @@ _STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
     State.DECOMPOSE: {"artifacts": ["goal_graph", "goal_graph_error"], "flags": []},
     State.DISCOVER:  {"artifacts": ["discovery"], "flags": []},
     State.PLAN:      {"artifacts": ["execution_plan"], "flags": []},
-    State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report"],
+    State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report",
+                                    "codegen_report"],
                       "flags": ["plan_approved", "approved_plan"]},
     State.EXECUTE:   {"artifacts": ["execution_result"],
                       "flags": ["execution_status", "heavy_confirmed"]},
@@ -1803,10 +1809,25 @@ class StateMachine:
                 smoke_compute = not ce.heavy and not ce.needs_external_data
         else:
             smoke_compute = True
-        bundle = CodegenEngine().generate(
-            plan, intent=intent,
-            agent=lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS),
-            smoke_compute=smoke_compute)
+        engine = CodegenEngine()
+        try:
+            bundle = engine.generate(
+                plan, intent=intent,
+                agent=lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS),
+                smoke_compute=smoke_compute,
+                # A run that is going to EXECUTE must not fall back to the
+                # placeholder scaffold: it loads the tool, writes a stub and
+                # exits 0, so the job, the scheduler and TWAIN all report success
+                # having computed nothing. Planning-only runs keep the fallback --
+                # there the bundle is a deliverable to read, not to run.
+                require_synthesis=(self.execute_locally or self.execute_slurm))
+        finally:
+            # Recorded either way: on success it says which attempt produced the
+            # script, and on failure why each attempt was rejected -- the thing
+            # that was missing when a scaffolded run reached the cluster.
+            if engine.last_synthesis is not None:
+                self.context.artifacts["codegen_report"] = self._write_artifact(
+                    "codegen_report", engine.last_synthesis)
         bundle_dir = Path(self.artifacts_dir) / f"run_bundle_{self.run_id}"
         bundle.write(bundle_dir)
         self.context.artifacts["run_bundle"] = str(bundle_dir)
