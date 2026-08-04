@@ -1799,14 +1799,20 @@ class StateMachine:
         # its data -- e.g. DFTB+ (semiempirical; .skf files fetched into DFTB_PREFIX).
         method = plan.get("selected_method") or {}
         calc_name = method.get("calculator")
+        # The engine's own binary, when it is an external program driven through
+        # ASE. None for a calculator that IS a python package (GPAW), where the
+        # import check already proves the environment can run it.
+        calc_executable = None
         if calc_name:
             ce = find_calculator(calc_name)
             if ce is None:
                 smoke_compute = False
-            elif ce.smoke_can_compute is not None:
-                smoke_compute = ce.smoke_can_compute
             else:
-                smoke_compute = not ce.heavy and not ce.needs_external_data
+                calc_executable = ce.executable
+                if ce.smoke_can_compute is not None:
+                    smoke_compute = ce.smoke_can_compute
+                else:
+                    smoke_compute = not ce.heavy and not ce.needs_external_data
         else:
             smoke_compute = True
         engine = CodegenEngine()
@@ -1815,6 +1821,10 @@ class StateMachine:
                 plan, intent=intent,
                 agent=lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS),
                 smoke_compute=smoke_compute,
+                # So the smoke gate rejects an env that has the ASE bindings but
+                # not the engine binary, instead of the run dying mid-calculation
+                # with "command not found" after a queue wait.
+                calculator_executable=calc_executable,
                 # A run that is going to EXECUTE must not fall back to the
                 # placeholder scaffold: it loads the tool, writes a stub and
                 # exits 0, so the job, the scheduler and TWAIN all report success

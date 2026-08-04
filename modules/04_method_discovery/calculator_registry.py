@@ -194,6 +194,14 @@ class CalculatorEntry:
     # e.g. DFTB+ is semiempirical (a tiny single-point is <1s) and its Slater-Koster
     # files are fetched into DFTB_PREFIX by runner/fetch_slako.sh.
     smoke_can_compute: Optional[bool] = None
+    # The engine's own executable, for calculators that are external programs
+    # driven through ASE (nwchem, dftb+). Their python side imports fine wherever
+    # ASE is installed, so only checking the import cannot tell an environment
+    # that can run the engine from one that merely has the bindings -- the
+    # cluster picked twain-envs/default that way and the run died mid-optimization
+    # with "nwchem: command not found". None for a calculator that IS a python
+    # package (GPAW), where the import check is already sufficient.
+    executable: Optional[str] = None
 
     def covers(self, property_key: str) -> bool:
         """Whether this calculator can compute ``property_key`` (case-insensitive)."""
