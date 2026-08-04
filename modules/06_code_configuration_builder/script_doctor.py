@@ -406,6 +406,19 @@ class ScriptDoctor:
                 'numbers and raises TypeError at calculator init. For a '
                 'frozen-occupations band-structure pass use '
                 '{"name": "fixed-uniform"} instead.', line))
+        for line in _uncorrelated_method_for_thermochemistry(
+                source, self.brief.get("property")):
+            diags.append(Diagnostic(
+                "uncorrelated-thermochemistry", "error",
+                "selects a bare Hartree-Fock method (scf/hf) for a property "
+                "assembled from bond energies. Correlation is most of a bond's "
+                "energy, so HF underestimates every bond by a large systematic "
+                "amount and the run reports a clean, confident, badly wrong "
+                "number -- for CO2 an atomization of ~1012 kJ/mol against ~1628, "
+                "putting the heat of formation at +245.7 where the answer is "
+                "-393.5, i.e. the wrong SIGN. Use at least a hybrid functional "
+                "(B3LYP, PBE0, wB97X-D) or a correlated wavefunction method "
+                "(MP2, CCSD(T)).", line))
         for line in _ambiguous_spin_specification(source):
             diags.append(Diagnostic(
                 "ambiguous-spin-state", "error",
@@ -853,6 +866,75 @@ _SPIN_COUNT_KEYS = {
 # ``reference``. Those switch spin polarization on and are the CORRECT companion
 # to magnetic moments rather than a competing statement of the spin count, so
 # flagging them would punish the idiomatic GPAW/QE/ABINIT spelling.
+
+
+# Uncorrelated methods, by the spelling each engine uses. Bare Hartree-Fock
+# recovers no electron correlation at all, which is most of a bond's energy.
+_UNCORRELATED_METHODS = frozenset({"scf", "hf", "rhf", "uhf", "rohf",
+                                   "hfexch", "hartree-fock"})
+
+
+def _uncorrelated_method_for_thermochemistry(source: str,
+                                             property_name: str) -> List[int]:
+    """Lines selecting bare Hartree-Fock for a property built from bond energies.
+
+    Correlation IS the bulk of a bond's energy, so an uncorrelated method
+    underestimates every bond energy by a large, systematic amount: for CO2 it
+    puts the atomization at ~1012 kJ/mol against ~1628, i.e. a standard heat of
+    formation of +245.7 where the answer is -393.5. The run converges cleanly and
+    reports a confident number of the wrong sign.
+
+    Only raised for a property assembled from several species' energies -- an SCF
+    orbital energy or a Hartree-Fock geometry is a perfectly reasonable thing to
+    ask for, so the property, not the method, decides whether this is an error.
+    """
+    if not _thermochemical_property(property_name):
+        return []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        # Keyword form: energy(method='scf'), NWChem(theory='scf'), dft(xc='hf').
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg in ("method", "theory", "xc", "functional") and (
+                        isinstance(kw.value, ast.Constant)
+                        and str(kw.value.value).strip().lower()
+                        in _UNCORRELATED_METHODS):
+                    lines.append(node.lineno)
+                    break
+        # Mapping form, and plain assignment: method = "scf".
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (isinstance(key, ast.Constant)
+                        and str(key.value).lower() in ("method", "theory", "xc",
+                                                       "functional")
+                        and isinstance(value, ast.Constant)
+                        and str(value.value).strip().lower() in _UNCORRELATED_METHODS):
+                    lines.append(node.lineno)
+                    break
+        elif isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if (any(t in ("method", "theory", "xc", "functional") for t in targets)
+                    and isinstance(node.value, ast.Constant)
+                    and str(node.value.value).strip().lower() in _UNCORRELATED_METHODS):
+                lines.append(node.lineno)
+    return sorted(set(lines))
+
+
+# Properties assembled from several species' energies, where a method's per-bond
+# error lands directly in the answer. Mirrors codegen_engine.wants_thermo_cycle;
+# kept as its own copy because the doctor sees only the brief, not the plan.
+_THERMOCHEMICAL_WORDS = ("formation", "atomization", "dissociation", "combustion",
+                         "reaction_enthalpy", "reaction enthalpy", "hydrogenation",
+                         "binding_energy", "binding energy", "cohesive")
+
+
+def _thermochemical_property(property_name: str) -> bool:
+    text = str(property_name or "").lower()
+    return any(word in text for word in _THERMOCHEMICAL_WORDS)
 
 
 def _ambiguous_spin_specification(source: str) -> List[int]:

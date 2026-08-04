@@ -1024,3 +1024,163 @@ class TestAmbiguousSpinStateGuard:
             assert "state it exactly ONCE" in prompt, (library, calculator)
             assert "3P triplets" in prompt, (library, calculator)
             assert "set_initial_magnetic_moments" in prompt, (library, calculator)
+
+
+# ── a multi-species thermochemical cycle gets the helper ──────────────────────
+
+class TestThermoCycleWiring:
+    """Gated on the PROPERTY, not on an engine or a molecule.
+
+    The run that exposed the dropped term used NWChem; the one before it used
+    Psi4. What they had in common was the quantity -- a heat of formation
+    assembled from atomic references -- so that is what the gate reads. Note the
+    plan's requested_property was null and only the acceptance metric named the
+    property, so the gate has to look at both.
+    """
+
+    def _plan(self, metric, prop=None):
+        return {
+            "selected_method": {"tool_name": "ASE", "libraries": ["ASE"],
+                                "calculator": "NWChem",
+                                "calculator_import": "ase.calculators.nwchem",
+                                "calculator_library": "ASE"},
+            "requested_property": prop,
+            "metadata": {"timestamp": "t", "goal_id": "g", "candidate_rank": 1},
+            "acceptance_metrics": [{"metric_name": metric, "target_value": -393.5,
+                                    "tolerance": 5.0}],
+            "compute_estimate": {"cpu_hours": 1.0}, "cost_estimate": {"min_cost": 0.1},
+            "safety_notes": [],
+            "target_system": {"molecule": {"name": "carbon dioxide", "SMILES": "O=C=O"}},
+        }
+
+    _SCRIPT = ("import ase\ndef main():\n    print('ok')\n"
+               "if __name__ == '__main__':\n    main()\n")
+
+    def test_the_predicate_reads_the_quantity(self):
+        assert eng.wants_thermo_cycle("standard_heat_of_formation_kJ_per_mol")
+        assert eng.wants_thermo_cycle("atomization_energy_kJ_per_mol")
+        assert eng.wants_thermo_cycle("bond_dissociation_enthalpy")
+        assert eng.wants_thermo_cycle("cohesive_energy")
+        assert eng.wants_thermo_cycle(None, "compute the enthalpy of combustion")
+        # Single-species properties need no cycle.
+        assert not eng.wants_thermo_cycle("band_gap")
+        assert not eng.wants_thermo_cycle("bulk_modulus", None)
+        assert not eng.wants_thermo_cycle(None, None)
+
+    def test_a_formation_enthalpy_bundle_carries_the_helper(self):
+        bundle = CodegenEngine().generate(
+            self._plan("standard_heat_of_formation_kJ_per_mol"),
+            agent=lambda p: self._SCRIPT)
+        assert "twain_thermo.py" in bundle.files()
+        assert "monatomic_enthalpy_correction" in bundle.files()["twain_thermo.py"]
+
+    def test_the_metric_alone_is_enough_to_trigger_it(self):
+        """requested_property was null in the run that dropped the term."""
+        plan = self._plan("standard_heat_of_formation_kJ_per_mol", prop=None)
+        assert plan["requested_property"] is None
+        assert "twain_thermo.py" in CodegenEngine().generate(
+            plan, agent=lambda p: self._SCRIPT).files()
+
+    def test_a_single_species_property_does_not(self):
+        bundle = CodegenEngine().generate(
+            self._plan("band_gap"), agent=lambda p: self._SCRIPT)
+        assert "twain_thermo.py" not in bundle.files()
+
+    def test_the_helper_is_written_out_verbatim(self, tmp_path):
+        from pathlib import Path
+        bundle = CodegenEngine().generate(
+            self._plan("standard_heat_of_formation_kJ_per_mol"),
+            agent=lambda p: self._SCRIPT)
+        dest = bundle.write(tmp_path / "b")
+        written = (dest / "twain_thermo.py").read_text()
+        assert written == (Path(eng.__file__).resolve().parent / "bundle_helpers"
+                          / "twain_thermo.py").read_text(encoding="utf-8")
+        compile(written, "twain_thermo.py", "exec")
+
+    def test_the_prompt_names_the_dropped_term(self):
+        captured = []
+        CodegenEngine().generate(
+            self._plan("standard_heat_of_formation_kJ_per_mol"),
+            agent=lambda p: (captured.append(p) or self._SCRIPT))
+        prompt = captured[0]
+        assert "twain_thermo" in prompt
+        assert "5/2 kT" in prompt
+        assert "6.197" in prompt
+        # The false justification that shipped must be contradicted explicitly.
+        assert "do NOT absorb it" in prompt
+
+    def test_no_thermo_note_on_an_unrelated_property(self):
+        captured = []
+        CodegenEngine().generate(self._plan("band_gap"),
+                                 agent=lambda p: (captured.append(p) or self._SCRIPT))
+        assert "THERMOCHEMICAL CYCLE" not in captured[0]
+
+
+class TestUncorrelatedThermochemistryGuard:
+    """Bare Hartree-Fock for a bond-energy property is a wrong-sign answer.
+
+    A rerun of the CO2 conversation asked Psi4 for method='scf' and reported
+    dHf = +245.7 kJ/mol against -393.5. HF recovers no electron correlation,
+    which is most of a bond's energy: its atomization came out ~1012 kJ/mol
+    against ~1628. The run converged cleanly and printed a confident number.
+
+    Gated on the PROPERTY, not the method: an SCF orbital energy or an HF
+    geometry is a reasonable request, so only a multi-species energy difference
+    makes this an error.
+    """
+
+    def _brief_for(self, prop):
+        b = _brief()
+        b["property"] = prop
+        return b
+
+    HF_SCRIPT = ("import matgl\n"
+                 "def run():\n"
+                 "    return psi4.energy(method='scf', molecule=m)\n"
+                 "if __name__ == '__main__':\n    run()\n")
+
+    def test_hf_for_a_formation_enthalpy_is_an_error(self):
+        diags = ScriptDoctor(
+            brief=self._brief_for("standard_heat_of_formation_kJ_per_mol")
+        ).static_diagnostics(self.HF_SCRIPT)
+        hits = [d for d in diags if d.source == "uncorrelated-thermochemistry"]
+        assert hits and hits[0].severity == "error"
+        assert "wrong SIGN" in hits[0].message
+
+    def test_hf_for_an_orbital_property_is_fine(self):
+        """The method is not the problem; the property decides."""
+        diags = ScriptDoctor(brief=self._brief_for("homo_lumo_gap")
+                             ).static_diagnostics(self.HF_SCRIPT)
+        assert not [d for d in diags if d.source == "uncorrelated-thermochemistry"]
+
+    def test_each_engine_spelling_is_caught(self):
+        for snippet in ("psi4.energy(method='scf')", "NWChem(theory='scf')",
+                        "NWChem(dft={'xc': 'hf'})", "Psi4(method='hf')",
+                        "method = 'scf'"):
+            script = (f"import matgl\ndef run():\n    x = {snippet}\n"
+                      "if __name__ == '__main__':\n    run()\n")
+            diags = ScriptDoctor(brief=self._brief_for("atomization_energy")
+                                 ).static_diagnostics(script)
+            assert [d for d in diags
+                    if d.source == "uncorrelated-thermochemistry"], snippet
+
+    def test_a_correlated_method_is_clean(self):
+        for method in ("b3lyp", "pbe0", "wb97x-d", "mp2", "ccsd(t)"):
+            script = (f"import matgl\ndef run():\n"
+                      f"    return psi4.energy(method='{method}')\n"
+                      "if __name__ == '__main__':\n    run()\n")
+            diags = ScriptDoctor(brief=self._brief_for("heat_of_formation")
+                                 ).static_diagnostics(script)
+            assert not [d for d in diags
+                        if d.source == "uncorrelated-thermochemistry"], method
+
+    def test_the_reaction_route_is_recommended_in_the_prompt(self):
+        captured = []
+        CodegenEngine().generate(
+            TestThermoCycleWiring()._plan("standard_heat_of_formation_kJ_per_mol"),
+            agent=lambda p: (captured.append(p) or TestThermoCycleWiring._SCRIPT))
+        prompt = captured[0]
+        assert "ERROR-CANCELLING REACTION" in prompt
+        assert "CO + 1/2 O2 -> CO2" in prompt
+        assert "formation_enthalpy_via_reaction" in prompt
+        assert "never plain SCF" in prompt
