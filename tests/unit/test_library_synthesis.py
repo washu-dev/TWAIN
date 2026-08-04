@@ -88,10 +88,16 @@ def test_library_only_falls_back_when_synthesis_invalid():
     assert bundle.template_name == _GENERIC.filename
 
 
-def test_library_run_without_property_stays_generic():
-    # No requested_property -> nothing to compute -> template path, no synthesis.
-    bundle = CodegenEngine().generate(_plan(requested_property=None),
-                                      agent=lambda p: PYSCF_SCRIPT)
+def test_library_run_with_nothing_to_compute_stays_generic():
+    # Neither a requested_property NOR an acceptance metric: nothing names a
+    # quantity, so there is genuinely nothing to synthesize and the template
+    # stands. (A plan with a metric but no requested_property is a different
+    # case -- the metric names the quantity, so it gets real code. Treating the
+    # two alike is what scaffolded Slurm job 2571447; see
+    # TestNullRequestedPropertyStillGetsRealCode.)
+    bundle = CodegenEngine().generate(
+        _plan(requested_property=None, acceptance_metrics=[]),
+        agent=lambda p: PYSCF_SCRIPT)
     assert bundle.template_name == _GENERIC.filename
 
 
@@ -271,6 +277,18 @@ def test_crystal_polymorph_reaches_codegen_prompt():
 # Compiles and references the library, but defines a function it never calls:
 # the fingerprint of a reply cut off at the token cap. Must name the plan's own
 # library (pyscf) or it is rejected earlier, for the wrong reason.
+PSI4_SCRIPT = """import psi4
+
+def main():
+    psi4.set_memory('500 MB')
+    mol = psi4.geometry('O=C=O')
+    print(psi4.energy('scf/cc-pvdz'))
+
+if __name__ == '__main__':
+    main()
+"""
+
+
 TRUNCATED_REPLY = (
     "from pyscf import gto, scf\n\n"
     "def compute_gap(mol):\n"
@@ -408,3 +426,60 @@ class TestBuildRefusesAScaffoldedExecution:
         m.build()
         report = json.loads(Path(m.context.artifacts["codegen_report"]).read_text())
         assert report["ok"] is True and report["attempt"] == 1
+
+
+class TestNullRequestedPropertyStillGetsRealCode:
+    """Regression for Slurm job 2571447, the run that scaffolded a *second* time
+    after the first guard went in.
+
+    Its plan named an acceptance metric but carried requested_property=None, and
+    the library-only branch gated synthesis on requested_property alone. So no
+    synthesis was attempted at all, _generate_standard rendered the placeholder,
+    and the guard -- which lived inside the synthesis path -- was never reached.
+    """
+
+    def _psi4_plan(self):
+        return {
+            "selected_method": {"tool_name": "Psi4", "libraries": ["Psi4"],
+                                "calculator": None, "calculator_import": None,
+                                "calculator_library": "Psi4"},
+            "requested_property": None,          # the null that caused this
+            "metadata": {"timestamp": "t", "goal_id": "g1", "candidate_rank": 1},
+            "acceptance_metrics": [{
+                "metric_name": "standard_heat_of_formation_kJ_per_mol",
+                "target_value": -393.5, "tolerance": 5.0}],
+            "compute_estimate": {"cpu_hours": 1.0},
+            "cost_estimate": {"min_cost": 0.1},
+            "slurm_request": {"cpu_count": 2, "gpu_count": 0, "max_time": 1.0, "ram": 8},
+            "safety_notes": [],
+            "target_system": {"molecule": {"name": "carbon dioxide", "SMILES": "O=C=O"}},
+        }
+
+    def test_synthesis_is_attempted_from_the_metric_name(self):
+        """The metric names what the run is for, so it is enough to ask for code."""
+        prompts = []
+        CodegenEngine().generate(
+            self._psi4_plan(), agent=lambda p: (prompts.append(p), PSI4_SCRIPT)[1])
+        assert prompts, "no synthesis was attempted"
+        assert "standard_heat_of_formation_kJ_per_mol" in prompts[0]
+
+    def test_a_synthesized_script_is_used(self):
+        bundle = CodegenEngine().generate(
+            self._psi4_plan(), agent=lambda p: PSI4_SCRIPT)
+        assert bundle.template_name == "llm_synthesized"
+
+    def test_an_executing_run_refuses_the_scaffold_on_this_path_too(self):
+        """The guard has to sit where the scaffold is CHOSEN, not only on the
+        synthesis route -- this plan reaches it by a different road."""
+        with pytest.raises(SynthesisFailed):
+            CodegenEngine().generate(
+                self._psi4_plan(), agent=lambda p: "print('nope')\n",
+                require_synthesis=True)
+
+    def test_it_refuses_even_with_no_agent_at_all(self):
+        with pytest.raises(SynthesisFailed):
+            CodegenEngine().generate(self._psi4_plan(), require_synthesis=True)
+
+    def test_planning_only_still_gets_the_scaffold(self):
+        bundle = CodegenEngine().generate(self._psi4_plan())
+        assert bundle.template_name == _GENERIC.filename

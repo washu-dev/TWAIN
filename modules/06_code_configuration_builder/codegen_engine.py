@@ -206,6 +206,19 @@ def extract_valid_source(raw, calculator_import: Optional[str] = None) -> Option
     return validate_source(raw, calculator_import)[0]
 
 
+def _first_metric_name(plan: dict) -> Optional[str]:
+    """The first acceptance metric's name, or None.
+
+    Stands in for a plan whose ``requested_property`` the planner left unset: the
+    metric names what the run is for, so it is enough to decide that real code is
+    wanted rather than a scaffold.
+    """
+    for metric in plan.get("acceptance_metrics") or []:
+        if isinstance(metric, dict) and metric.get("metric_name"):
+            return str(metric["metric_name"])
+    return None
+
+
 class SynthesisFailed(RuntimeError):
     """Code synthesis produced nothing usable and the caller needs a real script.
 
@@ -860,13 +873,28 @@ class CodegenEngine:
         # REPAIR rather than aborting the run. When a real structure IS present it
         # is baked into the template below, so we keep the deterministic path.
         needs_structure = spec.requires_structure and not self._structure_for(plan, intent)
-        if (spec is _GENERIC or needs_structure) and plan.get("requested_property") and agent is not None:
+        # What to compute: the plan's requested_property, or the acceptance
+        # metric's name when the planner left it unset. Gating on
+        # requested_property alone meant a plan carrying
+        # standard_heat_of_formation_kJ_per_mol but a null requested_property
+        # skipped synthesis and rendered the placeholder scaffold instead --
+        # which then ran on the cluster and "succeeded" (job 2571447).
+        wants_property = plan.get("requested_property") or _first_metric_name(plan)
+        if (spec is _GENERIC or needs_structure) and wants_property and agent is not None:
             return self._generate_with_calculator(
                 plan, libraries, None, None, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
                 require_synthesis=require_synthesis,
             )
-        return self._generate_standard(plan, tool_name, intent=intent)
+        bundle = self._generate_standard(plan, tool_name, intent=intent)
+        # (b) The backstop. Any route to the placeholder scaffold is refused when
+        # the run is going to execute, not just the synthesis route -- the first
+        # version of this guard only covered synthesis, so this path walked
+        # straight past it.
+        if require_synthesis and bundle.template_name == _GENERIC.filename:
+            raise SynthesisFailed(
+                tool_name, calculator, agent is None, self.last_synthesis)
+        return bundle
 
     # -- standard (library-only) path ----------------------------------------
     def _generate_standard(self, plan: dict, tool_name: str, *, intent) -> RunBundle:
