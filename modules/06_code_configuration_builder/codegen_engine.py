@@ -206,6 +206,45 @@ def extract_valid_source(raw, calculator_import: Optional[str] = None) -> Option
     return validate_source(raw, calculator_import)[0]
 
 
+_BUNDLE_HELPERS = Path(__file__).resolve().parent / "bundle_helpers"
+
+
+def _thermo_helper_source() -> str:
+    """Source of ``twain_thermo.py``, copied verbatim into a bundle."""
+    return (_BUNDLE_HELPERS / "twain_thermo.py").read_text(encoding="utf-8")
+
+
+# Property classes whose value is assembled from several species' energies, where
+# a dropped term or a wrong stoichiometric coefficient yields a plausible number
+# rather than a crash. Keyed on the QUANTITY, not on any engine or molecule.
+_THERMO_CYCLE_WORDS = (
+    "formation", "atomization", "dissociation", "reaction_enthalpy",
+    "reaction enthalpy", "combustion", "hydrogenation", "binding_energy",
+    "binding energy", "cohesive",
+)
+
+
+def wants_thermo_cycle(*fields) -> bool:
+    """Whether any field names a property built from a multi-species cycle.
+
+    >>> wants_thermo_cycle("standard_heat_of_formation_kJ_per_mol")
+    True
+    >>> wants_thermo_cycle("band_gap", None)
+    False
+    """
+    text = " ".join(str(f).lower() for f in fields if f)
+    return any(word in text for word in _THERMO_CYCLE_WORDS)
+
+
+def _pseudo_helper_source() -> str:
+    """Source of ``twain_pseudo.py``, copied verbatim into a bundle.
+
+    Read from disk rather than templated: it is a real module, imported directly
+    by its unit tests, so what a run executes is exactly what the tests cover.
+    """
+    return (_BUNDLE_HELPERS / "twain_pseudo.py").read_text(encoding="utf-8")
+
+
 def _first_metric_name(plan: dict) -> Optional[str]:
     """The first acceptance metric's name, or None.
 
@@ -325,6 +364,34 @@ _SMOKE_LOAD_ONLY = (
     "is unmistakable. Building the real structure and loading the calculator here is what "
     "surfaces a broken builder or wrong API before a costly run. Downloading the tool's "
     "own model weights / parameter files is allowed; do not use the network otherwise."
+)
+
+
+# Spliced into BOTH synthesis prompts, unconditionally. Not gated on the toolset:
+# the two rival spin channels are an ASE-wide design split, so any engine list
+# here would protect only the engines already known to have bitten us -- and the
+# ground-state multiplicity of an open-shell reference is a correctness issue for
+# every electronic-structure run, not a per-engine quirk.
+_SPIN_GUIDANCE = (
+    "- OPEN-SHELL SPECIES -- get the spin state right, and state it exactly ONCE. "
+    "Atoms and radicals are usually NOT closed-shell singlets: an O atom and a C "
+    "atom are 3P triplets (multiplicity 3), O2 is a 3Sigma-g- triplet (3), an N "
+    "atom is 4S (4). A singlet stands in silently for any of these and corrupts "
+    "every energy difference built on it.\n"
+    "- ASE has two rival ways to convey that spin state and each calculator reads "
+    "only one: GPAW, Quantum ESPRESSO, ABINIT and DFTB+ read the Atoms object's "
+    "initial magnetic moments, while Psi4, CP2K, NWChem and xTB read an explicit "
+    "count keyword (`multiplicity`, `mult`, `uhf`). If BOTH are set the loser is "
+    "discarded with no warning -- ASE's Psi4 goes further and overwrites your "
+    "`reference` with 'uhf' and your `multiplicity` with None whenever the atoms "
+    "carry moments, and `ase.build.molecule` puts moments on exactly the "
+    "open-shell species that need a multiplicity. That pairing turned a CO2 heat "
+    "of formation of -393.5 into -1072 kJ/mol. So pick the channel your "
+    "calculator actually reads and neutralize the other: passing a count, first "
+    "call `atoms.set_initial_magnetic_moments([0.0] * len(atoms))` (a no-op when "
+    "they were already zero) and pass `reference=`/unrestricted explicitly; "
+    "relying on moments, set them yourself and pass no count keyword. Never let "
+    "the two disagree, and never leave which one wins to the calculator.\n"
 )
 
 
@@ -480,7 +547,7 @@ so the module still imports where they are not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{database_note}{smoke_instruction}
+{spin_note}{thermo_note}{pseudo_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "calculator", "property", and "output_file". Write the same \
 metrics as one CSV row to --output.
@@ -556,7 +623,7 @@ imports where it is not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{database_note}{smoke_instruction}
+{spin_note}{thermo_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "property", and "output_file"; print each metric WITH its \
 physical unit, and for any fitted or derived value also print a fit-quality / \
@@ -704,18 +771,33 @@ class RunBundle:
     tool_name: str
     template_name: str
     entrypoint: str = "main.py"
+    # twain_pseudo.py, present only for an engine that ships no pseudopotentials
+    # (Quantum ESPRESSO, ABINIT). Copied verbatim rather than generated, so the
+    # element -> filename lookup that keeps a hallucinated pseudopotential out of
+    # a run is version-controlled and unit-tested instead of re-derived per plan.
+    pseudo_helper_py: Optional[str] = None
+    # twain_thermo.py, present only when the property is assembled from several
+    # species' energies (a formation/atomization/reaction enthalpy). Keeps the
+    # cycle's algebra -- every species' H(T)-E_elec, including each free atom's
+    # 5/2 kT, and the stoichiometry -- out of generated code.
+    thermo_helper_py: Optional[str] = None
 
     def files(self) -> Dict[str, str]:
         """Map of filename -> contents for the bundle."""
-        return {
+        files = {
             "main.py": self.main_py,
             "config.yaml": self.config_yaml,
             "requirements.txt": self.requirements_txt,
             "inline_tests.py": self.inline_tests_py,
         }
+        if self.pseudo_helper_py is not None:
+            files["twain_pseudo.py"] = self.pseudo_helper_py
+        if self.thermo_helper_py is not None:
+            files["twain_thermo.py"] = self.thermo_helper_py
+        return files
 
     def write(self, dest: Union[str, Path]) -> Path:
-        """Write all four files into ``dest`` (created if needed); return it."""
+        """Write every bundle file into ``dest`` (created if needed); return it."""
         dest = Path(dest)
         dest.mkdir(parents=True, exist_ok=True)
         for name, content in self.files().items():
@@ -825,7 +907,8 @@ class CodegenEngine:
     def generate(self, plan, *, intent: Optional[dict] = None, agent=None,
                  smoke_compute: bool = False,
                  require_synthesis: bool = False,
-                 calculator_executable: Optional[str] = None) -> RunBundle:
+                 calculator_executable: Optional[str] = None,
+                 pseudo_library: Optional[str] = None) -> RunBundle:
         """Build a :class:`RunBundle` from an ExecutionPlan.
 
         ``plan`` may be an ``ExecutionPlan`` dataclass, a plain dict, or a path
@@ -859,6 +942,7 @@ class CodegenEngine:
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
                 require_synthesis=require_synthesis,
                 calculator_executable=calculator_executable,
+                pseudo_library=pseudo_library,
             )
         # Library-only run. Prefer a dedicated, tested template when one fits the
         # tool (Pymatgen/ASE/RDKit). Otherwise, if the plan asks for a real property
@@ -952,10 +1036,18 @@ class CodegenEngine:
                                   calculator_import, calculator_library,
                                   *, intent, agent, smoke_compute: bool = False,
                                   require_synthesis: bool = False,
-                                  calculator_executable: Optional[str] = None) -> RunBundle:
+                                  calculator_executable: Optional[str] = None,
+                                  pseudo_library: Optional[str] = None) -> RunBundle:
         generated_at = (plan.get("metadata") or {}).get("timestamp", "") or ""
         acceptance = plan.get("acceptance_metrics", []) or []
         requested_property = plan.get("requested_property") or "the requested property"
+        # Read the metric names too: this plan's requested_property was null while
+        # its metric was standard_heat_of_formation_kJ_per_mol.
+        wants_cycle = wants_thermo_cycle(
+            plan.get("requested_property"),
+            *[m.get("metric_name") for m in (plan.get("acceptance_metrics") or [])
+              if isinstance(m, dict)],
+            (intent or {}).get("objective") if isinstance(intent, dict) else None)
 
         # The calculator is driven through this library (e.g. GPAW via ASE); the
         # rest of the toolset is available too (e.g. Pymatgen for structure work).
@@ -988,6 +1080,13 @@ class CodegenEngine:
             # When True, the generated --smoke path runs the real (tiny) computation
             # so an API/keyword error is caught in REPAIR, not at the real run.
             "smoke_compute": smoke_compute,
+            # "sssp"/"pseudodojo" for an engine shipping no pseudopotentials:
+            # switches the prompt to resolve filenames and cutoffs through the
+            # bundle's twain_pseudo.py instead of writing them out.
+            "pseudo_library": pseudo_library,
+            # True when the property is a formation/atomization/reaction enthalpy:
+            # switches the prompt to assemble it through twain_thermo.py.
+            "thermo_cycle": wants_cycle,
         }
 
         # The script is written by the LLM from the discovered toolset + material
@@ -1046,6 +1145,8 @@ class CodegenEngine:
             inline_tests_py=inline_tests_py,
             tool_name=driver,
             template_name=template_name,
+            pseudo_helper_py=(_pseudo_helper_source() if pseudo_library else None),
+            thermo_helper_py=(_thermo_helper_source() if wants_cycle else None),
         )
 
     def _render_generic_fallback(self, brief, generated_at, acceptance) -> str:
@@ -1184,6 +1285,107 @@ class CodegenEngine:
                 "calculation.\n")
         else:
             database_note = ""
+        # A plane-wave engine that ships no pseudopotentials (Quantum ESPRESSO,
+        # ABINIT). The filenames are unguessable but look guessable -- silicon's
+        # SSSP file is Si.pbe-n-rrkjus_psl.1.0.0.UPF while the equally plausible
+        # Si.pbe-n-kjpaw_psl.1.0.0.UPF (oxygen's naming scheme) does not exist --
+        # and a wrong one either dies hours into a queued job or names a real file
+        # for different physics. Same for the cutoffs. So the bundle carries
+        # twain_pseudo.py and the model is told to look both up through it.
+        if brief.get("pseudo_library") == "sssp":
+            pseudo_note = (
+                "- PSEUDOPOTENTIALS -- never write a pseudopotential filename or "
+                "an energy cutoff yourself. The bundle contains `twain_pseudo.py`, "
+                "which reads the installed SSSP library's own manifest. Use it "
+                "verbatim: `from twain_pseudo import espresso_pseudopotentials, "
+                "espresso_cutoffs, pseudo_dir`, then `pseudos = "
+                "espresso_pseudopotentials(atoms)`, `ecutwfc, ecutrho = "
+                "espresso_cutoffs(atoms)` (both already in Ry), and build the "
+                "profile as `EspressoProfile(command='pw.x', "
+                "pseudo_dir=pseudo_dir())`. Pass `pseudopotentials=pseudos` and "
+                "those cutoffs into the Espresso calculator's input data. Do NOT "
+                "hardcode a .UPF name, do NOT invent ecutwfc/ecutrho, and do NOT "
+                "wrap these calls in try/except -- if the library cannot supply an "
+                "element the run MUST fail loudly rather than substitute another "
+                "pseudopotential.\n")
+        elif brief.get("pseudo_library") == "pseudodojo":
+            pseudo_note = (
+                "- PSEUDOPOTENTIALS -- never write a pseudopotential filename or "
+                "an energy cutoff yourself. The bundle contains `twain_pseudo.py`, "
+                "which reads the installed PseudoDojo table's own manifest. Use it "
+                "verbatim: `from twain_pseudo import abinit_pp_paths, abinit_ecut`, "
+                "then build the profile as `AbinitProfile(command='abinit', "
+                "pp_paths=abinit_pp_paths(atoms))` and take `ecut = "
+                "abinit_ecut(atoms)` (Hartree, PseudoDojo's recommended hint -- ASE's "
+                "Abinit takes ecut in eV, so pass `ecut * 27.2114`). Do NOT hardcode "
+                "a .psp8 name, do NOT invent ecut, and do NOT wrap these calls in "
+                "try/except -- if the table cannot supply an element the run MUST "
+                "fail loudly rather than substitute another pseudopotential.\n"
+                "- ABINIT keyword requirements, all three verified against ABINIT "
+                "10.0.3 with this pseudopotential table: pass `pps='psp8'` (without "
+                "it ASE searches for LDA/FHI-format files and aborts with \"Could "
+                "not find lda pseudopotential fhi\" even though the .psp8 files are "
+                "right there), pass `xc='PBE'` (the table is PBE; an LDA functional "
+                "with PBE pseudopotentials is silently inconsistent physics), and "
+                "pass `chksymbreak=0` (ASE writes a shifted Monkhorst-Pack grid, "
+                "which ABINIT rejects for symmetric cells like diamond with \"the k "
+                "point grid is not symmetric\"; note ASE's Abinit does NOT accept a "
+                "dict for `kpts`, so a gamma-centred grid is not an alternative).\n")
+        else:
+            pseudo_note = ""
+        # A property assembled from several species' energies. The algebra is
+        # short and looks obvious, and both of its failure modes return a
+        # plausible number: a dropped H(T)-E_elec term, or a stoichiometric
+        # coefficient that does not match the molecule.
+        if brief.get("thermo_cycle"):
+            thermo_note = (
+                "- THERMOCHEMICAL CYCLE -- this property is assembled from "
+                "several species' energies, so do not write the algebra yourself. "
+                "The bundle contains `twain_thermo.py`; use it verbatim. It counts "
+                "stoichiometry from the structure, supplies each free atom's "
+                "H(T)-E_elec, refuses an unbalanced reaction, and refuses a "
+                "polyatomic species whose correction you forgot to pass.\n"
+                "- PREFER AN ERROR-CANCELLING REACTION over atomization. "
+                "Atomization breaks every bond, so the method's per-bond error "
+                "accumulates straight into the answer -- on CO2's 1608 kJ/mol "
+                "atomization that is ~17 kJ/mol for B3LYP and ~616 for "
+                "Hartree-Fock. Instead pick a BALANCED reaction that forms the "
+                "target from reference species whose standard formation "
+                "enthalpies are known experimentally, conserving bond count and "
+                "type as closely as you can (for CO2: CO + 1/2 O2 -> CO2, not "
+                "C + 2 O -> CO2), so the errors cancel between the two sides. "
+                "Use `from twain_thermo import species, "
+                "formation_enthalpy_via_reaction`, build each participant with "
+                "`species(symbols, energy_eV, correction=H_minus_Eelec_eV, "
+                "coefficient=...)`, and call "
+                "`formation_enthalpy_via_reaction(target_symbols, reactants, "
+                "products, {'C1O1': -110.53, 'O2': 0.0})` -- reference enthalpies "
+                "keyed by formula with elements sorted, 0.0 for an element in its "
+                "standard state. State in the printed output which reaction you "
+                "used and where each reference enthalpy came from. Fall back to "
+                "`atomization_enthalpy` + `formation_enthalpy` only when no "
+                "suitable reference reaction exists, and say so.\n"
+                "- The method must include electron correlation. Bare "
+                "Hartree-Fock (Psi4's `method='scf'`, NWChem's `theory='scf'`) "
+                "recovers none of it and underestimates bond energies by "
+                "hundreds of kJ/mol -- it put this very property at +245.7 "
+                "instead of -393.5. For a bond-energy or thermochemical quantity "
+                "use at least a hybrid functional (B3LYP, PBE0, wB97X-D) or a "
+                "correlated wavefunction method (MP2, CCSD(T)); never plain SCF.\n"
+                "- Every species in the cycle contributes its own H(T)-E_elec, "
+                "the reference ATOMS included. An atom has no vibrations and no "
+                "rotations, so it is tempting to give it no correction at all, but "
+                "it still carries 3/2 kT of translation plus kT of PV = 5/2 kT = "
+                "6.197 kJ/mol at 298.15 K. Omitting it for three reference atoms "
+                "is 18.6 kJ/mol, which is what put a CO2 heat of formation at "
+                "-357.6 against a -393.5 target. The tabulated atomic formation "
+                "enthalpies do NOT absorb it -- those are the atoms' own formation "
+                "enthalpies, and the cycle they feed needs a true enthalpy "
+                "difference at T. Compute the molecule's correction with "
+                "`ase.thermochemistry.IdealGasThermo` (its real geometry and "
+                "symmetry number) and let twain_thermo handle the atoms.\n")
+        else:
+            thermo_note = ""
         return template.format(
             property=brief["property"],
             material_desc=brief["material_desc"],
@@ -1198,6 +1400,10 @@ class CodegenEngine:
             smoke_instruction=smoke_instruction,
             structure_note=structure_note,
             database_note=database_note,
+            # Ignored by the library-only template, which has no such placeholder.
+            pseudo_note=pseudo_note,
+            thermo_note=thermo_note,
+            spin_note=_SPIN_GUIDANCE,
         )
 
     @staticmethod

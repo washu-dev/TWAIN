@@ -1,0 +1,45 @@
+# Shared cluster env: twain-envs/qe -- Quantum ESPRESSO plane-wave DFT (solids).
+#
+# This file is the source of truth for what the env contains; apply it with
+# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
+# manual drift is exactly what these specs exist to prevent).
+#
+# qe ships only through conda-forge, so without this spec planning vetoes Quantum
+# ESPRESSO outright (statemachine's _cluster_cannot_run, which reads these files)
+# and reroutes to a pip-installable tool.
+#
+# openmpi is explicit for the same reason as in gpaw.yml: pw.x is MPI-parallel
+# and the Slurm payload auto-detects the env's mpirun to run one rank per
+# allocated CPU.
+#
+# NOTE: Quantum ESPRESSO ships NO pseudopotentials. pw.x needs a UPF file per
+# element, fetched by scripts/ris/fetch_data.sh (pinned SSSP library) and found
+# through ESPRESSO_PSEUDO, which the activate.d hook provision_envs.sh writes
+# exports.
+#
+# Unlike NWChem's basis library, that variable is not enough on its own: ASE 3.29
+# takes the directory as a CONSTRUCTOR argument --
+# ``EspressoProfile(command="pw.x", pseudo_dir=...)`` -- and the per-element
+# FILENAMES as ``Espresso(pseudopotentials={...})``. Generated code must never
+# spell those filenames itself; a plausible-but-absent name is the silent
+# scientific error this project keeps having to design against. It resolves them
+# at run time from the pinned SSSP manifest instead -- see the bundle's
+# twain_pseudo.py, emitted deterministically by pseudo_helper_generator.py.
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - qe
+  - openmpi
+  - ase
+  # pymatgen + spglib do the crystal-structure prep pw.x needs; rdkit rides along
+  # because the job's smoke probe rejects an env missing ANY bundle import, and a
+  # rejected env falls through to one without the engine -- how an NWChem run
+  # ended up in twain-envs/default (job 2573801, exit 127). Cheap insurance next
+  # to a wasted queue wait.
+  - pymatgen
+  - spglib
+  - rdkit
+  - numpy
+  - pandas
+  - pyyaml
