@@ -304,7 +304,12 @@ class TestPlanningSelectsCalculator:
         bundle = CodegenEngine().generate(plan)  # no agent -> fallback template
         compile(bundle.main_py, "main.py", "exec")
         reqs = bundle.requirements_txt
-        assert "pymatgen==" in reqs and "ase==" in reqs and "gpaw==" in reqs
+        # The conda-only engine is NOT pinned for pip -- listing it turned a
+        # recoverable "use the provisioned env" into a hard install failure on
+        # RIS ("No matching distribution found for nwchem==7.3.1"). It is named
+        # as a comment so the file still records the whole toolset.
+        assert "pymatgen==" in reqs and "ase==" in reqs
+        assert "gpaw==" not in reqs and "# gpaw: conda-only" in reqs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -417,7 +422,12 @@ class TestBuildGeneratesSiliconScript:
         assert "gpaw" in main_py.lower()
         assert 'bulk("Si"' in main_py                 # the exact script we synthesized
         reqs = (Path(m.context.artifacts["run_bundle"]) / "requirements.txt").read_text()
-        assert "gpaw==" in reqs and "ase==" in reqs
+        # The conda-only engine is NOT pinned for pip -- listing it turned a
+        # recoverable "use the provisioned env" into a hard install failure on
+        # RIS ("No matching distribution found for nwchem==7.3.1"). It is named
+        # as a comment so the file still records the whole toolset.
+        assert "ase==" in reqs
+        assert "gpaw==" not in reqs and "# gpaw: conda-only" in reqs
 
     def test_fallback_is_generic_scaffold_not_a_preset(self, tmp_path):
         # No gateway -> a tool-agnostic scaffold, NOT a band-gap preset template.
@@ -684,4 +694,9 @@ class TestNoPresetTemplates:
         compile(main_py, "main.py", "exec")
         assert "ase.calculators.dftb" in main_py       # the LLM's DFTB+ script
         reqs = (Path(m.context.artifacts["run_bundle"]) / "requirements.txt").read_text()
-        assert "dftbplus==" in reqs and "ase==" in reqs
+        # The conda-only engine is NOT pinned for pip -- listing it turned a
+        # recoverable "use the provisioned env" into a hard install failure on
+        # RIS ("No matching distribution found for nwchem==7.3.1"). It is named
+        # as a comment so the file still records the whole toolset.
+        assert "ase==" in reqs
+        assert "dftbplus==" not in reqs and "# dftbplus: conda-only" in reqs

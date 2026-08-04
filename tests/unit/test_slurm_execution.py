@@ -350,8 +350,13 @@ def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
     assert payload.startswith("set -e")
     assert 'for CAND in /envs/gpaw/bin/python /envs/default/bin/python' in payload
     assert '[ -x "$CAND" ] || continue' in payload
-    assert ('if "$CAND" inline_tests.py >/dev/null 2>&1; '
-            'then PY="$CAND"; break; fi') in payload
+    # Probed with the bundle's own smoke test, inside a subshell: the candidate's
+    # env is put on PATH first (an ASE calculator shells out to its engine
+    # binary), and a rejected candidate must not leave that PATH behind for the
+    # next one. See TestEnvActivationInThePayload.
+    assert '( twain_use_env "$CAND"' in payload
+    assert ('    "$CAND" inline_tests.py >/dev/null 2>&1 ) '
+            '&& { PY="$CAND"; break; }') in payload
     assert "python3 -m venv .venv" in payload      # fallback still present
     assert '"$PY" inline_tests.py' in payload
     # main.py runs under mpirun when the env ships it (openmpi GPAW build) --
@@ -663,3 +668,53 @@ def test_execute_slurm_off_keeps_execute_a_noop(tmp_path):
     m.artifacts_dir = tmp_path
     assert m.execute() == State.INTERPRET
     assert "execution_result" not in m.context.artifacts
+
+
+# ── a provisioned env must not be rejected for a PATH it never got ────────────
+
+class TestEnvActivationInThePayload:
+    """Slurm job on 5c658c50 reported dependency_error: every env "failed the
+    bundle's smoke test", including twain-envs/nwchem, which was provisioned and
+    correct. An ASE calculator shells out to its engine binary, and invoking
+    <prefix>/bin/python by absolute path never activates the env -- so nwchem was
+    not on PATH and the probe failed for a reason unrelated to the env.
+    """
+
+    def _payload(self, tmp_path, **kw):
+        from execution_adapter.cluster_profile import ClusterProfile
+        from execution_adapter.slurm_execution_adapter import SlurmExecutionAdapter
+        (tmp_path / "requirements.txt").write_text("ase\n")
+        (tmp_path / "inline_tests.py").write_text("pass\n")
+        adapter = SlurmExecutionAdapter(
+            ClusterProfile.load("compute2"),
+            env_pythons=["/envs/nwchem/bin/python", "/envs/default/bin/python"])
+        return adapter._env_payload(tmp_path, install_deps=True, run_smoke=True, **kw)
+
+    def test_the_env_bin_goes_on_path(self, tmp_path):
+        payload = self._payload(tmp_path)
+        assert 'export PATH="$BIN:$PATH"' in payload
+
+    def test_activation_hooks_are_sourced(self, tmp_path):
+        """NWChem finds its basis sets via NWCHEM_BASIS_LIBRARY, set only by an
+        activate.d hook -- the same gap that broke the local adapter."""
+        payload = self._payload(tmp_path)
+        assert "etc/conda/activate.d" in payload
+        assert 'CONDA_PREFIX="$PREFIX" . "$hook"' in payload
+
+    def test_each_candidate_is_probed_in_a_subshell(self, tmp_path):
+        """A rejected candidate must not leave its PATH behind for the next one."""
+        payload = self._payload(tmp_path)
+        assert '( twain_use_env "$CAND"' in payload
+
+    def test_the_env_is_set_up_before_anything_runs(self, tmp_path):
+        lines = self._payload(tmp_path).splitlines()
+        activate = next(i for i, l in enumerate(lines) if l.strip() == 'twain_use_env "$PY"')
+        smoke = next(i for i, l in enumerate(lines) if l.strip() == '"$PY" inline_tests.py')
+        run = next(i for i, l in enumerate(lines) if "main.py" in l)
+        assert activate < smoke < run
+
+    def test_the_payload_is_valid_shell(self, tmp_path):
+        import subprocess
+        proc = subprocess.run(["bash", "-n"], input=self._payload(tmp_path),
+                              text=True, capture_output=True)
+        assert proc.returncode == 0, proc.stderr
