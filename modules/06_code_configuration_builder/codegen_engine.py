@@ -824,7 +824,8 @@ class CodegenEngine:
     # -- main entry ----------------------------------------------------------
     def generate(self, plan, *, intent: Optional[dict] = None, agent=None,
                  smoke_compute: bool = False,
-                 require_synthesis: bool = False) -> RunBundle:
+                 require_synthesis: bool = False,
+                 calculator_executable: Optional[str] = None) -> RunBundle:
         """Build a :class:`RunBundle` from an ExecutionPlan.
 
         ``plan`` may be an ``ExecutionPlan`` dataclass, a plain dict, or a path
@@ -857,6 +858,7 @@ class CodegenEngine:
                 plan, libraries, calculator, calculator_import, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
                 require_synthesis=require_synthesis,
+                calculator_executable=calculator_executable,
             )
         # Library-only run. Prefer a dedicated, tested template when one fits the
         # tool (Pymatgen/ASE/RDKit). Otherwise, if the plan asks for a real property
@@ -949,7 +951,8 @@ class CodegenEngine:
     def _generate_with_calculator(self, plan, libraries, calculator,
                                   calculator_import, calculator_library,
                                   *, intent, agent, smoke_compute: bool = False,
-                                  require_synthesis: bool = False) -> RunBundle:
+                                  require_synthesis: bool = False,
+                                  calculator_executable: Optional[str] = None) -> RunBundle:
         generated_at = (plan.get("metadata") or {}).get("timestamp", "") or ""
         acceptance = plan.get("acceptance_metrics", []) or []
         requested_property = plan.get("requested_property") or "the requested property"
@@ -1017,6 +1020,10 @@ class CodegenEngine:
         inline_tests_py = _smoke.generate_inline_tests(
             tool_name="+".join(libraries + ([calculator] if calculator else [])),
             required_import_names=import_names,
+            # An external engine's ASE bindings import wherever ASE is installed,
+            # so the import list alone cannot prove this environment can RUN it.
+            required_executables=([calculator_executable]
+                                  if calculator_executable else []),
             main_filename="main.py",
             output_filename="results.csv",
             run_smoke=True,

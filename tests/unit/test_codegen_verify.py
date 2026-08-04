@@ -682,3 +682,96 @@ class TestConfigRecordsEnvironment:
         # No agent -> generic fallback, but the config still records the run env.
         bundle = CodegenEngine().generate(plan)
         assert "environment: sim" in bundle.config_yaml
+
+
+# ── the smoke gate must prove the ENGINE runs, not just that ASE imports ──────
+
+class TestEngineBinaryIsGated:
+    """Slurm job 2573801 died mid-optimization with "nwchem: command not found"
+    (exit 127) after passing the smoke gate and a queue wait.
+
+    An external engine's ASE bindings are pure Python: `import
+    ase.calculators.nwchem` succeeds wherever ASE is installed, binary or not. So
+    the import check accepted twain-envs/default -- ASE and pymatgen present, no
+    nwchem executable -- and the run failed at execution instead of at the gate.
+    """
+
+    def _smoke(self, **kw):
+        from code_gen.smoke_test_generator import generate_inline_tests
+        return generate_inline_tests(
+            tool_name="ASE+NWChem",
+            required_import_names=["ase", "ase.calculators.nwchem"], **kw)
+
+    def test_the_executable_is_required_when_given(self):
+        src = self._smoke(required_executables=["nwchem"])
+        assert 'REQUIRED_EXECUTABLES = ["nwchem"]' in src
+        assert "shutil.which" in src
+
+    def test_no_binary_check_when_the_calculator_is_a_python_package(self):
+        """GPAW is importable Python -- the import check already suffices."""
+        src = self._smoke()
+        assert "REQUIRED_EXECUTABLES = []" in src
+
+    def test_the_rendered_smoke_compiles(self):
+        compile(self._smoke(required_executables=["nwchem"]), "inline_tests.py", "exec")
+
+    def test_a_missing_binary_fails_the_gate(self, tmp_path):
+        """The behaviour that matters: run the generated smoke in an environment
+        without the engine and confirm it refuses instead of passing."""
+        import subprocess
+        import sys
+        src = self._smoke(required_executables=["definitely-not-a-real-engine"])
+        (tmp_path / "inline_tests.py").write_text(src)
+        (tmp_path / "main.py").write_text("print('hi')\n")
+        proc = subprocess.run([sys.executable, "inline_tests.py"], cwd=tmp_path,
+                              capture_output=True, text=True)
+        assert proc.returncode == 2, proc.stdout
+        assert "MISSING DEPENDENCY" in proc.stdout
+        assert "executable not on PATH" in proc.stdout
+
+    def test_a_present_binary_passes_the_gate(self, tmp_path):
+        import subprocess
+        import sys
+        src = self._smoke(required_executables=["sh"])   # certainly on PATH
+        (tmp_path / "inline_tests.py").write_text(src)
+        (tmp_path / "main.py").write_text("print('hi')\n")
+        proc = subprocess.run([sys.executable, "inline_tests.py"], cwd=tmp_path,
+                              capture_output=True, text=True)
+        assert "executables OK: sh" in proc.stdout, proc.stdout
+
+    def test_build_passes_the_registrys_executable_through(self, tmp_path):
+        """End to end: an NWChem plan's bundle demands the nwchem binary."""
+        import json
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import statemachine as SM
+        from crash_recovery import DataStorage
+
+        plan = {
+            "selected_method": {"tool_name": "ASE", "libraries": ["ASE"],
+                                "calculator": "NWChem",
+                                "calculator_import": "ase.calculators.nwchem",
+                                "calculator_library": "ASE"},
+            "requested_property": "total_energy",
+            "metadata": {"timestamp": "t", "goal_id": "g", "candidate_rank": 1},
+            "acceptance_metrics": [{"metric_name": "total_energy",
+                                    "target_value": -1.0, "tolerance": 0.1}],
+            "compute_estimate": {"cpu_hours": 1.0}, "cost_estimate": {"min_cost": 0.1},
+            "slurm_request": {"cpu_count": 2, "gpu_count": 0, "max_time": 1.0, "ram": 8},
+            "safety_notes": [],
+            "target_system": {"molecule": {"name": "carbon dioxide", "SMILES": "O=C=O"}},
+        }
+        path = tmp_path / "execution_plan.json"
+        path.write_text(json.dumps(plan))
+        script = ("import ase\nfrom ase.calculators.nwchem import NWChem\n"
+                  "def main():\n    print('ok')\nif __name__ == '__main__':\n    main()\n")
+        with patch.object(DataStorage, "load", return_value=None):
+            m = SM.StateMachine(data_path=str(tmp_path / "s.json"), run_id="exe",
+                                agent=lambda p: script)
+        m.artifacts_dir = tmp_path
+        m.context.artifacts["execution_plan"] = str(path)
+        m.build()
+
+        tests = (Path(m.context.artifacts["run_bundle"]) / "inline_tests.py").read_text()
+        assert 'REQUIRED_EXECUTABLES = ["nwchem"]' in tests

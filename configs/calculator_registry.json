@@ -80,7 +80,8 @@
       ],
       "license": "LGPL-3.0-only",
       "needs_external_data": true,
-      "smoke_can_compute": true
+      "smoke_can_compute": true,
+      "executable": "dftb+"
     },
     {
       "id": "emt",
@@ -267,7 +268,8 @@
         "osx-arm64"
       ],
       "needs_external_data": false,
-      "license": "ECL-2.0"
+      "license": "ECL-2.0",
+      "executable": "nwchem"
     },
     {
       "id": "xtb",
