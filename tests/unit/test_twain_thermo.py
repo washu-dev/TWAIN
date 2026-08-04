@@ -17,8 +17,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]
-                       / "modules" / "06_code_configuration_builder" / "bundle_helpers"))
+from conftest import FakeAtoms  # noqa: E402  (conftest owns sys.path)
 
 import twain_thermo as tt  # noqa: E402
 
@@ -227,16 +226,3 @@ class TestErrorCancellingReactionRoute:
                  tt.species(["O", "O"], 0.0, correction=0.0, coefficient=0.5)],
                 [tt.species(["C", "O", "O"], 0.0, correction=0.0)],
                 {"O2": 0.0})   # CO missing
-
-    def test_it_beats_atomization_under_a_per_bond_error(self):
-        """The actual claim: a per-bond error hurts atomization far more.
-
-        Model a functional that misses e kJ/mol of binding per bond. CO2 has 4
-        bond-equivalents (2 double bonds); the reaction CO + 1/2 O2 -> CO2 leaves
-        most of that bonding intact on both sides, so the residual is a fraction
-        of what atomization carries.
-        """
-        e_per_bond = 20.0
-        atomization_error = 4 * e_per_bond          # every bond broken
-        reaction_error = abs(4 - (2 + 1)) * e_per_bond   # net bonds changed
-        assert reaction_error < atomization_error / 3

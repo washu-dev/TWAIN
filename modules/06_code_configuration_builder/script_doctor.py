@@ -57,12 +57,14 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 try:  # pragma: no cover - import shim (package alias vs. bare name)
     from code_gen.codegen_engine import (
         SIM_ENV, extract_valid_source, has_runnable_entrypoint,
-        pixi_env_python, strip_code_fences, _LEFTOVER_PLACEHOLDER,
+        pixi_env_python, strip_code_fences, wants_thermo_cycle,
+        _LEFTOVER_PLACEHOLDER,
     )
 except ImportError:  # pragma: no cover
     from codegen_engine import (
         SIM_ENV, extract_valid_source, has_runnable_entrypoint,
-        pixi_env_python, strip_code_fences, _LEFTOVER_PLACEHOLDER,
+        pixi_env_python, strip_code_fences, wants_thermo_cycle,
+        _LEFTOVER_PLACEHOLDER,
     )
 
 # Sentinel so ``sim_python=None`` ("explicitly no interpreter, skip smoke") is
@@ -870,112 +872,82 @@ _SPIN_COUNT_KEYS = {
 
 # Uncorrelated methods, by the spelling each engine uses. Bare Hartree-Fock
 # recovers no electron correlation at all, which is most of a bond's energy.
+# Keyword names that select the electronic-structure method, across engines:
+# Psi4's `method=`, NWChem's `theory=`, ASE/GPAW's `xc=`, and `functional=`.
+_METHOD_KEYS = frozenset({"method", "theory", "xc", "functional"})
+
 _UNCORRELATED_METHODS = frozenset({"scf", "hf", "rhf", "uhf", "rohf",
                                    "hfexch", "hartree-fock"})
+
+
+def _keyword_bindings(tree):
+    """Yield ``(lineno, key, value_node)`` for every keyword bound in ``tree``.
+
+    Covers both spellings engines use for the same setting: a call keyword
+    (``Psi4(multiplicity=3)``) and a key in a nested input mapping
+    (``NWChem(dft={"mult": 3})``). Several checks need exactly this, and writing
+    the ast.Call/ast.Dict pair out per check is how they drift apart.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg:
+                    yield node.lineno, kw.arg, kw.value
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    yield node.lineno, key.value, value
 
 
 def _uncorrelated_method_for_thermochemistry(source: str,
                                              property_name: str) -> List[int]:
     """Lines selecting bare Hartree-Fock for a property built from bond energies.
 
-    Correlation IS the bulk of a bond's energy, so an uncorrelated method
-    underestimates every bond energy by a large, systematic amount: for CO2 it
-    puts the atomization at ~1012 kJ/mol against ~1628, i.e. a standard heat of
-    formation of +245.7 where the answer is -393.5. The run converges cleanly and
-    reports a confident number of the wrong sign.
-
-    Only raised for a property assembled from several species' energies -- an SCF
-    orbital energy or a Hartree-Fock geometry is a perfectly reasonable thing to
-    ask for, so the property, not the method, decides whether this is an error.
+    Gated on the PROPERTY, not the method: an SCF orbital energy or a
+    Hartree-Fock geometry is a perfectly reasonable thing to ask for. Rationale
+    and the measured cost are in the Diagnostic message this feeds.
     """
-    if not _thermochemical_property(property_name):
+    if not wants_thermo_cycle(property_name):
         return []
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
-    lines: List[int] = []
+    lines = [lineno for lineno, key, value in _keyword_bindings(tree)
+             if key in _METHOD_KEYS and isinstance(value, ast.Constant)
+             and str(value.value).strip().lower() in _UNCORRELATED_METHODS]
+    # `method = "scf"` as a plain assignment, which binds no keyword.
     for node in ast.walk(tree):
-        # Keyword form: energy(method='scf'), NWChem(theory='scf'), dft(xc='hf').
-        if isinstance(node, ast.Call):
-            for kw in node.keywords:
-                if kw.arg in ("method", "theory", "xc", "functional") and (
-                        isinstance(kw.value, ast.Constant)
-                        and str(kw.value.value).strip().lower()
-                        in _UNCORRELATED_METHODS):
-                    lines.append(node.lineno)
-                    break
-        # Mapping form, and plain assignment: method = "scf".
-        elif isinstance(node, ast.Dict):
-            for key, value in zip(node.keys, node.values):
-                if (isinstance(key, ast.Constant)
-                        and str(key.value).lower() in ("method", "theory", "xc",
-                                                       "functional")
-                        and isinstance(value, ast.Constant)
-                        and str(value.value).strip().lower() in _UNCORRELATED_METHODS):
-                    lines.append(node.lineno)
-                    break
-        elif isinstance(node, ast.Assign):
-            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
-            if (any(t in ("method", "theory", "xc", "functional") for t in targets)
-                    and isinstance(node.value, ast.Constant)
-                    and str(node.value.value).strip().lower() in _UNCORRELATED_METHODS):
-                lines.append(node.lineno)
+        if (isinstance(node, ast.Assign)
+                and any(t.id in _METHOD_KEYS for t in node.targets
+                        if isinstance(t, ast.Name))
+                and isinstance(node.value, ast.Constant)
+                and str(node.value.value).strip().lower() in _UNCORRELATED_METHODS):
+            lines.append(node.lineno)
     return sorted(set(lines))
-
-
-# Properties assembled from several species' energies, where a method's per-bond
-# error lands directly in the answer. Mirrors codegen_engine.wants_thermo_cycle;
-# kept as its own copy because the doctor sees only the brief, not the plan.
-_THERMOCHEMICAL_WORDS = ("formation", "atomization", "dissociation", "combustion",
-                         "reaction_enthalpy", "reaction enthalpy", "hydrogenation",
-                         "binding_energy", "binding energy", "cohesive")
-
-
-def _thermochemical_property(property_name: str) -> bool:
-    text = str(property_name or "").lower()
-    return any(word in text for word in _THERMOCHEMICAL_WORDS)
 
 
 def _ambiguous_spin_specification(source: str) -> List[int]:
     """Lines stating an open-shell spin state twice, in two rival channels.
 
-    ASE calculators take the spin state one of two ways, and which one they read
-    is engine-specific:
+    ASE takes the spin state either from the Atoms object's magnetic moments or
+    from an explicit count keyword, and which one a calculator reads is
+    engine-specific -- so stating both means one is silently discarded. Flagged
+    when an open-shell COUNT is given and the magmom channel is never reconciled.
 
-    * from the Atoms object -- ``atoms.set_initial_magnetic_moments(...)``, used
-      by GPAW, Quantum ESPRESSO (``starting_magnetization`` is derived from the
-      magmoms), ABINIT and DFTB+;
-    * from an explicit count keyword -- Psi4's and CP2K's ``multiplicity``,
-      NWChem's ``mult``, xTB's ``uhf``.
-
-    When a script states it BOTH ways, one statement is silently discarded, and
-    there is no general rule for which: ASE's Psi4 goes as far as overwriting
-    ``reference`` with ``'uhf'`` and ``multiplicity`` with ``None`` whenever the
-    atoms carry magmoms (``Psi4.calculate``), so the SCF then converges to a
-    multiplicity-1 state while the script says 3. Nothing warns, nothing raises,
-    and the geometry and forces all look reasonable.
-
-    That is not hypothetical and it is not cheap. A CO2 heat-of-formation run
-    computed its C and O atomic references as singlets this way and reported
-    dHf = -1072 kJ/mol against a -393.5 target (run 103d9c1b); measured at
-    b3lyp/sto-3g the discarded multiplicity is worth +313 kJ/mol on an O atom and
-    +226 on a C atom, and ``ase.build.molecule`` assigns magmoms to precisely the
-    open-shell species that need a multiplicity.
-
-    So: flagged when an open-shell spin COUNT is specified and the script never
-    reconciles the magnetic-moment channel. Deliberately conservative about which
-    engine is in play -- naming engines here would only catch the ones already
-    known to bite, and the remedy (state the spin once, explicitly) is a single
-    line that is a harmless no-op when the moments were already zero.
+    Deliberately engine-agnostic: naming engines here would only catch the ones
+    already known to bite, and the remedy is one line that is a no-op when the
+    moments were already zero. Which engine reads which channel, and the measured
+    cost, are in the Diagnostic message this feeds.
     """
+    # Touching the magmom channel at all counts as reconciling it: the author has
+    # made a deliberate choice between the two mechanisms, which is the ask.
+    # Checked before parsing -- no need to build a tree we will discard.
+    if "set_initial_magnetic_moments" in source or "initial_magmoms" in source:
+        return []
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return []
-    # Touching the magmom channel at all counts as reconciling it: the author has
-    # made a deliberate choice between the two mechanisms, which is the ask.
-    if "set_initial_magnetic_moments" in source or "initial_magmoms" in source:
         return []
 
     def open_shell(key: str, value) -> bool:
@@ -986,22 +958,8 @@ def _ambiguous_spin_specification(source: str) -> List[int]:
             return not isinstance(value, ast.Constant)
         return value.value != _SPIN_COUNT_KEYS[key]
 
-    lines: List[int] = []
-    for node in ast.walk(tree):
-        # Keyword form: Psi4(multiplicity=3), static_job(spin_multiplicity=3).
-        if isinstance(node, ast.Call):
-            for kw in node.keywords:
-                if kw.arg in _SPIN_COUNT_KEYS and open_shell(kw.arg, kw.value):
-                    lines.append(node.lineno)
-                    break
-        # Mapping form: NWChem's nested input dict, {"mult": 2}.
-        elif isinstance(node, ast.Dict):
-            for key, value in zip(node.keys, node.values):
-                if (isinstance(key, ast.Constant) and key.value in _SPIN_COUNT_KEYS
-                        and open_shell(key.value, value)):
-                    lines.append(node.lineno)
-                    break
-    return sorted(set(lines))
+    return sorted({lineno for lineno, key, value in _keyword_bindings(tree)
+                   if key in _SPIN_COUNT_KEYS and open_shell(key, value)})
 
 
 def _signature_probe_calls(source: str) -> List[int]:

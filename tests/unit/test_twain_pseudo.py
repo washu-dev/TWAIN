@@ -19,8 +19,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]
-                       / "modules" / "06_code_configuration_builder" / "bundle_helpers"))
+from conftest import FakeAtoms  # noqa: E402  (conftest owns sys.path)
 
 import twain_pseudo as tp  # noqa: E402
 
@@ -33,9 +32,6 @@ SSSP = {
     "O": {"filename": "O.pbe-n-kjpaw_psl.0.1.UPF", "cutoff_wfc": 50.0,
           "cutoff_rho": 400.0, "md5": "0234752ac141de4415c5fc33072bef88",
           "pseudopotential": "031PAW"},
-    "Fe": {"filename": "Fe.pbe-spn-kjpaw_psl.0.2.1.UPF", "cutoff_wfc": 90.0,
-           "cutoff_rho": 1080.0, "md5": "e86618425769142926afa95317d90200",
-           "pseudopotential": "031PAW"},
 }
 # Real entry shape, copied from ONCVPSP-PBE-PDv0.4/standard.djson.
 DOJO = {
@@ -74,16 +70,6 @@ def dojo(tmp_path, monkeypatch):
     monkeypatch.setenv("ABINIT_PP_PATH", str(d))
     monkeypatch.delenv("TWAIN_PSEUDO_MANIFEST", raising=False)
     return d
-
-
-class FakeAtoms:
-    """Stands in for ase.Atoms, which the bundle has but the test env need not."""
-
-    def __init__(self, symbols):
-        self._symbols = symbols
-
-    def get_chemical_symbols(self):
-        return self._symbols
 
 
 class TestEspresso:
@@ -147,22 +133,23 @@ class TestAbinit:
     def test_pp_paths_is_the_library_directory(self, dojo):
         assert tp.abinit_pp_paths(["Si"]) == [str(dojo)]
 
-    def test_absolute_psp8_paths_are_returned(self, dojo):
-        got = tp.abinit_pseudopotentials(FakeAtoms(["Si", "O"]))
-        assert got == [str(dojo / "Si.psp8"), str(dojo / "O.psp8")]
-
     def test_ecut_is_the_max_normal_hint(self, dojo):
         # PseudoDojo hints: Si normal 18.0, O normal 42.0.
         assert tp.abinit_ecut(FakeAtoms(["Si", "O"])) == 42.0
 
     def test_the_djson_wrapper_key_is_unwrapped(self, dojo):
-        """standard.djson nests entries under pseudos_metadata, SSSP does not."""
-        assert tp.abinit_pseudopotentials(["O"])[0].endswith("O.psp8")
+        """standard.djson nests entries under pseudos_metadata, SSSP does not.
+
+        Reaching _load through abinit_ecut: if the wrapper key were not unwrapped
+        the element lookup would miss and this would raise.
+        """
+        assert tp.abinit_ecut(["O"]) == 42.0
 
     def test_a_missing_psp8_raises(self, dojo):
+        """The on-disk check fires for ABINIT too, not just Espresso."""
         (dojo / "Si.psp8").unlink()
         with pytest.raises(tp.PseudoLibraryError, match="missing from"):
-            tp.abinit_pseudopotentials(["Si"])
+            tp.abinit_ecut(["Si"])
 
 
 class TestItRunsStandaloneInABundle:

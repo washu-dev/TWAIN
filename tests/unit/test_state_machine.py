@@ -1278,19 +1278,6 @@ class TestClusterEngineDataIsProvisioned:
 
     RIS = Path(__file__).resolve().parents[2] / "scripts" / "ris"
 
-    def _entries_needing_data(self):
-        from method_discovery.calculator_registry import load_calculators
-        return [c for c in load_calculators() if c.needs_external_data]
-
-    def test_each_data_engine_has_an_env_spec(self):
-        specs = {p.stem for p in (self.RIS / "envs").glob("*.yml")}
-        # Env spec names follow the conda package, which is what the payload's
-        # candidate list is built from (statemachine's env_pythons).
-        expected = {"dftbplus": "DFTB+", "qe": "Quantum ESPRESSO",
-                    "abinit": "ABINIT", "cp2k": "CP2K"}
-        missing = sorted(env for env in expected if env not in specs)
-        assert not missing, f"engines needing data with no env spec: {missing}"
-
     def test_each_data_engine_has_a_hook_case_in_provision_envs(self):
         provision = (self.RIS / "provision_envs.sh").read_text()
         for env, var in (("dftbplus", "DFTB_PREFIX"),
@@ -1309,17 +1296,6 @@ class TestClusterEngineDataIsProvisioned:
         adapter = (Path(__file__).resolve().parents[2] / "modules"
                    / "08_execution_adapter" / "slurm_execution_adapter.py").read_text()
         assert "etc/conda/activate.d" in adapter
-
-    def test_pseudopotential_engines_are_fetchable(self):
-        """A pseudo_library value must correspond to a set fetch_data.sh knows."""
-        from method_discovery.calculator_registry import load_calculators
-        fetch = (self.RIS / "fetch_data.sh").read_text()
-        for calc in load_calculators():
-            if calc.pseudo_library:
-                assert f"fetch_{calc.pseudo_library}" in fetch, (
-                    f"{calc.name} wants the '{calc.pseudo_library}' library but "
-                    f"fetch_data.sh has no fetch_{calc.pseudo_library} function")
-
 
 class TestClusterEnvCandidates:
     """Which pre-provisioned envs a Slurm job will try, and in what order.
@@ -1401,3 +1377,134 @@ class TestClusterEnvCandidates:
         names = SM._cluster_env_names()
         assert {"default", "psi4", "gpaw", "nwchem", "qe", "abinit", "cp2k",
                 "dftbplus"} <= names
+
+
+class TestRegistryInvariantsHoldForNewEngines:
+    """Drift guards, so 'generic' is enforced rather than currently-true.
+
+    Each of these encodes a rule that must hold for an engine nobody has added
+    yet. Without them, the session's fixes stay correct only for the engines that
+    happened to break: adding a sixth external engine and forgetting one field
+    would fail on the cluster, after a queue wait, with a message about something
+    else.
+    """
+
+    @staticmethod
+    def _external_binary(calc) -> bool:
+        """Whether this calculator is an external program driven through ASE.
+
+        The discriminator is derived, not curated: driven via ``ase.calculators.*``
+        AND backed by a conda-only package. That is exactly the combination whose
+        python side is pure bindings -- ``import ase.calculators.nwchem`` succeeds
+        wherever ASE is installed -- so an import check cannot prove the engine can
+        run. A pure-python calculator fails one of the two halves: GPAW and xTB are
+        imported directly rather than through ase.calculators, and EMT ships inside
+        ASE itself.
+        """
+        packages = [d.package.lower() for d in SM._depinf.import_names(calc.name)]
+        return (calc.import_name.startswith("ase.calculators.")
+                and any(p in SM._depinf.CONDA_ONLY_PACKAGES for p in packages))
+
+    def _calculators(self):
+        from method_discovery.calculator_registry import load_calculators
+        return load_calculators()
+
+    def test_every_external_engine_declares_its_binary(self):
+        missing = [c.name for c in self._calculators()
+                   if self._external_binary(c) and not c.executable]
+        assert not missing, (
+            f"external engines with no `executable`: {missing}. Their ASE bindings "
+            f"import wherever ASE is installed, so without it the smoke gate "
+            f"cannot tell an env that can RUN the engine from one that merely has "
+            f"the bindings -- how a run reached twain-envs/default and died "
+            f"mid-optimization with 'nwchem: command not found'")
+
+    def test_a_python_package_calculator_declares_no_binary(self):
+        """The inverse matters: a spurious executable is a gate nothing can pass."""
+        spurious = [(c.name, c.executable) for c in self._calculators()
+                    if not self._external_binary(c) and c.executable]
+        assert not spurious, (
+            f"pure-python calculators naming a binary: {spurious}; the import "
+            f"check already proves these can run")
+
+    def test_every_pseudo_library_is_resolvable_and_fetchable(self):
+        """A pseudo_library value needs a manifest reader AND a way to get the data."""
+        root = Path(__file__).resolve().parents[2]
+        helper = (root / "modules" / "06_code_configuration_builder"
+                  / "bundle_helpers" / "twain_pseudo.py").read_text()
+        fetch = (root / "scripts" / "ris" / "fetch_data.sh").read_text()
+        for calc in self._calculators():
+            library = calc.pseudo_library
+            if not library:
+                continue
+            assert f"fetch_{library}" in fetch, (
+                f"{calc.name} wants '{library}' but fetch_data.sh cannot fetch it")
+            # The resolver keys off the engine, so it must know this engine too.
+            engine = "espresso" if "espresso" in calc.import_name else "abinit"
+            assert engine in helper, (
+                f"{calc.name} wants '{library}' but twain_pseudo.py has no "
+                f"'{engine}' branch to read its manifest")
+
+    def test_every_engine_with_a_data_hook_has_a_spec(self):
+        """provision_envs.sh must not write a hook for an env nothing provisions."""
+        import re
+        root = Path(__file__).resolve().parents[2]
+        provision = (root / "scripts" / "ris" / "provision_envs.sh").read_text()
+        specs = {p.stem for p in (root / "scripts" / "ris" / "envs").glob("*.yml")}
+        # Each hook case is `    <name>)` inside write_data_hook.
+        block = provision.split("write_data_hook()", 1)[1].split("\nif ", 1)[0]
+        cases = re.findall(r"^\s{4}([a-z0-9_]+)\)", block, re.M)
+        orphans = sorted(set(cases) - specs)
+        assert not orphans, f"data-hook cases with no env spec: {orphans}"
+
+
+class TestTheRepairBriefCarriesTheRealProperty:
+    """A property-class check is only as good as the property it is handed.
+
+    _repair_brief used `requested_property or "the requested property"`. Real
+    plans leave requested_property null and name the property only in the
+    acceptance metric -- both CO2 runs did -- so the doctor received the literal
+    placeholder, every property-class check saw a non-thermochemical run, and the
+    uncorrelated-Hartree-Fock guard could never fire on the run that motivated it.
+    Codegen already had the right fallback; the brief now uses the same one.
+    """
+
+    def _brief_for(self, tmp_path, plan):
+        m = _offline_machine(tmp_path)
+        path = tmp_path / "execution_plan.json"
+        path.write_text(json.dumps(plan))
+        m.context.artifacts["execution_plan"] = str(path)
+        return m._repair_brief(plan, plan["selected_method"])
+
+    PLAN = {
+        "selected_method": {"tool_name": "quacc", "calculator": "NWChem",
+                            "calculator_import": "ase.calculators.nwchem",
+                            "libraries": ["quacc", "ASE"]},
+        "requested_property": None,
+        "acceptance_metrics": [
+            {"metric_name": "standard_heat_of_formation_kJ_per_mol",
+             "target_value": -393.5, "tolerance": 10.0}],
+    }
+
+    def test_a_null_requested_property_falls_back_to_the_metric(self, tmp_path):
+        brief = self._brief_for(tmp_path, self.PLAN)
+        assert brief["property"] == "standard_heat_of_formation_kJ_per_mol"
+
+    def test_the_guard_now_fires_through_the_real_brief(self, tmp_path):
+        """End to end: no injected property, and bare HF is still caught."""
+        from code_gen.script_doctor import ScriptDoctor
+        brief = self._brief_for(tmp_path, self.PLAN)
+        script = ("from ase.calculators.nwchem import NWChem\n"
+                  "def run():\n    return psi4.energy(method='scf')\n"
+                  "if __name__ == '__main__':\n    run()\n")
+        diags = ScriptDoctor(brief=brief).static_diagnostics(script)
+        assert [d for d in diags if d.source == "uncorrelated-thermochemistry"], (
+            "the guard must fire on a plan whose property is only in the metric")
+
+    def test_an_explicit_requested_property_still_wins(self, tmp_path):
+        plan = dict(self.PLAN, requested_property="band_gap")
+        assert self._brief_for(tmp_path, plan)["property"] == "band_gap"
+
+    def test_a_plan_with_neither_keeps_the_placeholder(self, tmp_path):
+        plan = dict(self.PLAN, requested_property=None, acceptance_metrics=[])
+        assert self._brief_for(tmp_path, plan)["property"] == "the requested property"

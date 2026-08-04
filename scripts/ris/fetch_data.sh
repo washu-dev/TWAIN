@@ -161,7 +161,6 @@ Cite: G. Prandini, A. Marrazzo, I. E. Castelli, N. Mounet, N. Marzari,
 \`$json\` maps each element to its recommended file **and** its recommended
 \`cutoff_wfc\`/\`cutoff_rho\` -- read it rather than guessing either.
 EOF
-  log "  done: $(find "$dest" -iname '*.upf' | wc -l | tr -d ' ') pseudopotential files"
 }
 
 fetch_pseudodojo() {
@@ -205,7 +204,6 @@ Cite: M. J. van Setten et al., *Computer Physics Communications* **226**, 39 (20
 \`standard.djson\` maps each element to its \`basename\` **and** its recommended
 \`hints.{low,normal,high}.ecut\` -- read it rather than guessing either.
 EOF
-  log "  done: $(find "$dest" -iname '*.psp8' | wc -l | tr -d ' ') .psp8 files"
 }
 
 mkdir -p "$DATA_ROOT"
