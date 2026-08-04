@@ -84,6 +84,7 @@ export const ReportScreen: React.FC = () => {
 
           <ResultCard
             result={report.result ?? {}}
+            primaryMetric={primaryMetric(report)}
             resultsDir={report.results_dir}
             fallbackOutput={report.result ? null : stdoutTail(report)}
           />
@@ -101,6 +102,25 @@ export const ReportScreen: React.FC = () => {
   );
 };
 
+// The metric INTERPRET (module 10) selected as the answer. Both the Result card
+// and the Validation card read it through primaryMetric() so the headline and the
+// verdict can never be about different numbers.
+type PrimaryMetric = {
+  name?: string;
+  value?: number;
+  uncertainty?: number;
+  unit?: string;
+};
+
+function primaryMetric(report: Report | null): PrimaryMetric | null {
+  const normalized =
+    typeof report?.normalized_result === 'object' && report.normalized_result
+      ? report.normalized_result
+      : null;
+  const metric = (normalized?.['primary_metric'] ?? null) as PrimaryMetric | null;
+  return metric && typeof metric.value === 'number' ? metric : null;
+}
+
 // How the result was checked (Epic 6): the interpreted metric and the
 // cross-validation verdict. Renders only when the run interpreted something —
 // planning-only or failed runs have nothing to validate.
@@ -113,9 +133,7 @@ const ValidationCard: React.FC<{ report: Report }> = ({ report }) => {
       : null;
   if (!validation && !normalized) return null;
 
-  const metric = (normalized?.['primary_metric'] ?? null) as
-    | { name?: string; value?: number; uncertainty?: number; unit?: string }
-    | null;
+  const metric = primaryMetric(report);
   const metricText =
     metric && typeof metric.value === 'number'
       ? `${metric.name} = ${formatValue(metric.value)}` +
@@ -396,17 +414,34 @@ function stdoutTail(report: Report, maxLines = 12): string | null {
 // the top of the report always answers "what did the run produce?".
 const ResultCard: React.FC<{
   result: Record<string, unknown>;
+  primaryMetric?: PrimaryMetric | null;
   resultsDir?: string | null;
   fallbackOutput?: string | null;
-}> = ({ result, resultsDir, fallbackOutput }) => {
+}> = ({ result, primaryMetric, resultsDir, fallbackOutput }) => {
   const propName = typeof result['property'] === 'string' ? (result['property'] as string) : null;
-  const headline = propName ? result[propName] : undefined;
-  const unit = propName ? result[`${propName}_unit`] : undefined;
+  // `property` is only usable as a headline when it names a key verbatim. Scripts
+  // routinely print the quantity instead of the key it was stored under —
+  // "standard_heat_of_formation" while the number lives in
+  // standard_heat_of_formation_kJ_per_mol — and then this lookup is undefined.
+  const direct = propName ? result[propName] : undefined;
+
+  // Second choice: the metric INTERPRET chose. The agent has already decided
+  // which of the printed numbers is the answer, and it is the same one validation
+  // graded, so reusing it keeps the headline from ever disagreeing with the
+  // verdict below — which a second, independent guess here could.
+  const interpreted = typeof primaryMetric?.value === 'number' ? primaryMetric : null;
+
+  const headlineName = direct != null ? propName : (interpreted?.name ?? null);
+  const headlineValue = direct != null ? direct : interpreted?.value;
+  const headlineUnit =
+    direct != null ? result[`${propName}_unit`] : (interpreted?.unit ?? undefined);
 
   const hidden = new Set<string>(['property', 'smoke', 'output_file']);
-  if (propName) {
-    hidden.add(propName);
-    hidden.add(`${propName}_unit`);
+  for (const key of [propName, headlineName]) {
+    if (key) {
+      hidden.add(key);
+      hidden.add(`${key}_unit`);
+    }
   }
   const rows = Object.entries(result).filter(
     ([k, v]) =>
@@ -414,15 +449,15 @@ const ResultCard: React.FC<{
       (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'),
   );
 
-  const hasStructured = (propName && headline != null) || rows.length > 0;
+  const hasStructured = headlineValue != null || rows.length > 0;
 
   return (
     <View style={styles.resultCard}>
       <Text style={styles.resultCardTitle}>Result</Text>
-      {propName && headline != null && (
+      {headlineName && headlineValue != null && (
         <Text style={styles.resultHeadline}>
-          {propName}: {formatValue(headline)}
-          {unit ? ` ${String(unit)}` : ''}
+          {headlineName}: {formatValue(headlineValue)}
+          {headlineUnit ? ` ${String(headlineUnit)}` : ''}
         </Text>
       )}
       {rows.map(([k, v]) => (

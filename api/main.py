@@ -396,25 +396,40 @@ def _load_json_artifact(conversation_id: str, name: str):
 def _extract_result(execution_result):
     """Pull the structured result the generated script prints to stdout, if any.
 
-    Convention: the run's ``main.py`` prints a single-line JSON object with the
-    computed property, e.g. ``{"property": "band_gap", "band_gap": 6.73, ...}``.
-    Returns the last such object found, or None.
+    Convention: the run's ``main.py`` prints a JSON object with the computed
+    property, e.g. ``{"property": "band_gap", "band_gap": 6.73, ...}``. Returns
+    the last such object found, or None.
+
+    The object may span several lines. Scripts routinely print it with
+    ``json.dumps(obj, indent=2)``, and an earlier version of this function tested
+    ``line.startswith("{") and line.endswith("}")`` -- which only ever matches a
+    one-line object, so a pretty-printed result parsed to None and the report card
+    fell back to "no structured result found" while displaying that very JSON as
+    raw output. The value was never lost (INTERPRET parses the same stdout for the
+    normalized metric), but the headline was blank.
+
+    Decoding starts only at a line that begins with ``{``, so a brace inside an
+    engine's log text cannot start a spurious parse, and the scan stays cheap on
+    the tens of kilobytes of solver output these runs produce.
     """
     if not isinstance(execution_result, dict):
         return None
     stdout = execution_result.get("stdout")
     if not isinstance(stdout, str):
         return None
+    decoder = json.JSONDecoder()
     result = None
-    for raw in stdout.splitlines():
-        line = raw.strip()
-        if line.startswith("{") and line.endswith("}"):
+    offset = 0
+    for raw in stdout.splitlines(keepends=True):
+        if raw.lstrip().startswith("{"):
+            start = offset + (len(raw) - len(raw.lstrip()))
             try:
-                parsed = json.loads(line)
+                parsed, _ = decoder.raw_decode(stdout, start)
             except ValueError:
-                continue
+                parsed = None
             if isinstance(parsed, dict):
                 result = parsed
+        offset += len(raw)
     # json.loads accepts bare NaN; the response renderer does not.
     return _json_safe(result)
 
