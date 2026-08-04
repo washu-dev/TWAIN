@@ -1319,3 +1319,85 @@ class TestClusterEngineDataIsProvisioned:
                 assert f"fetch_{calc.pseudo_library}" in fetch, (
                     f"{calc.name} wants the '{calc.pseudo_library}' library but "
                     f"fetch_data.sh has no fetch_{calc.pseudo_library} function")
+
+
+class TestClusterEnvCandidates:
+    """Which pre-provisioned envs a Slurm job will try, and in what order.
+
+    Slurm job 2580169 died at the smoke gate with "MISSING DEPENDENCY: psi4"
+    after a four-minute queue wait. Its plan was library-only -- calculator None,
+    tool_name "quacc", Psi4 third in `libraries` -- and the candidate list was
+    built from calculator + tool_name only, so it probed twain-envs/quacc (absent)
+    and twain-envs/default (no psi4) and never twain-envs/psi4, which has it. The
+    venv fallback then correctly refused to pip-install a conda-only package.
+
+    Two independent defects, both fixed by deriving candidates from the whole
+    toolset via each library's conda PACKAGE name.
+    """
+
+    def _candidates(self, tmp_path, method):
+        m = _offline_machine(tmp_path)
+        plan = tmp_path / "execution_plan.json"
+        plan.write_text(json.dumps({"selected_method": method, "slurm_request": {}}))
+        m.context.artifacts["execution_plan"] = str(plan)
+        adapter = m._build_slurm_adapter()
+        return [p.split("/")[-3] for p in adapter.env_pythons]
+
+    def test_a_library_only_toolset_still_gets_its_conda_env(self, tmp_path):
+        got = self._candidates(tmp_path, {
+            "tool_name": "quacc", "calculator": None,
+            "libraries": ["quacc", "ASE", "Psi4"]})
+        assert got[0] == "psi4", (
+            "Psi4 sits in `libraries`, not in calculator/tool_name; without it "
+            "the job can only reach an env that cannot run the toolset")
+        assert got[-1] == "default"
+
+    def test_display_names_resolve_to_their_env_names(self, tmp_path):
+        """The env is named for the conda package, not the prose name.
+
+        "Quantum ESPRESSO".lower() and "DFTB+".lower() name no env at all, so
+        those engines were unreachable however well provisioned they were.
+        """
+        for calculator, env in (("Quantum ESPRESSO", "qe"), ("DFTB+", "dftbplus"),
+                                ("NWChem", "nwchem"), ("CP2K", "cp2k"),
+                                ("GPAW", "gpaw"), ("Psi4", "psi4")):
+            got = self._candidates(tmp_path, {
+                "tool_name": "ASE", "calculator": calculator, "libraries": ["ASE"]})
+            assert got[0] == env, f"{calculator} -> {got}"
+
+    def test_default_is_always_last(self, tmp_path):
+        """It exists but carries only the common stack, so it must never shadow."""
+        for method in ({"tool_name": "ASE", "calculator": "GPAW", "libraries": ["ASE"]},
+                       {"tool_name": "Pymatgen", "calculator": None,
+                        "libraries": ["Pymatgen"]}):
+            assert self._candidates(tmp_path, method)[-1] == "default"
+
+    def test_a_pip_installable_toolset_gets_only_default(self, tmp_path):
+        assert self._candidates(tmp_path, {
+            "tool_name": "Pymatgen", "calculator": None,
+            "libraries": ["Pymatgen", "ASE"]}) == ["default"]
+
+    def test_a_library_in_default_needs_no_dedicated_env(self, tmp_path):
+        """xtb-python is declared by default.yml, so default is the right answer."""
+        assert self._candidates(tmp_path, {
+            "tool_name": "ASE", "calculator": "xTB", "libraries": ["ASE"]}) == ["default"]
+
+    def test_no_duplicates_when_a_library_repeats_the_calculator(self, tmp_path):
+        got = self._candidates(tmp_path, {
+            "tool_name": "Psi4", "calculator": "Psi4", "libraries": ["Psi4", "ASE"]})
+        assert got == ["psi4", "default"], got
+
+    def test_only_provisioned_envs_are_offered(self, tmp_path):
+        """A conda-only library with no spec must not invent a candidate path."""
+        SM._CLUSTER_ENV_NAMES_CACHE = frozenset({"default"})
+        try:
+            assert self._candidates(tmp_path, {
+                "tool_name": "ASE", "calculator": "GPAW",
+                "libraries": ["ASE"]}) == ["default"]
+        finally:
+            SM._CLUSTER_ENV_NAMES_CACHE = None
+
+    def test_env_names_match_the_spec_files(self):
+        names = SM._cluster_env_names()
+        assert {"default", "psi4", "gpaw", "nwchem", "qe", "abinit", "cp2k",
+                "dftbplus"} <= names

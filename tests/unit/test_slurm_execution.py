@@ -632,8 +632,16 @@ def test_build_slurm_adapter_uses_plan_request(machine, tmp_path):
 
 
 def test_build_slurm_adapter_wires_env_candidates_from_profile(machine, tmp_path):
-    # calculator first, then tool_name, then the shared default env.
-    plan = {"selected_method": {"tool_name": "ASE", "calculator": "GPAW"},
+    """The engine's env first, the shared default last, and nothing invented.
+
+    This used to assert ``[gpaw, ase, default]``. ``twain-envs/ase`` has no spec
+    and has never existed -- ASE is pip-installable and ships inside every engine
+    env -- so it was a candidate the payload could only ever skip. Candidates are
+    now the toolset entries that a scripts/ris/envs spec actually provisions,
+    keyed by conda package name (see statemachine._cluster_env_names).
+    """
+    plan = {"selected_method": {"tool_name": "ASE", "calculator": "GPAW",
+                                "libraries": ["ASE", "Pymatgen"]},
             "slurm_request": {"cpu_count": 4, "gpu_count": 0,
                               "max_time": 0.5, "ram": 8}}
     path = tmp_path / "execution_plan_seed.json"
@@ -644,7 +652,6 @@ def test_build_slurm_adapter_wires_env_candidates_from_profile(machine, tmp_path
     root = "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs"
     assert adapter.env_pythons == [
         f"{root}/gpaw/bin/python",
-        f"{root}/ase/bin/python",
         f"{root}/default/bin/python",
     ]
 
@@ -707,8 +714,12 @@ class TestEnvActivationInThePayload:
         assert '( twain_use_env "$CAND"' in payload
 
     def test_the_env_is_set_up_before_anything_runs(self, tmp_path):
+        # Guarded by LAYERED: a venv layered on an engine env activated that env
+        # already, and re-activating on the venv would put .venv/bin ahead of the
+        # engine's bin and drop CONDA_PREFIX.
         lines = self._payload(tmp_path).splitlines()
-        activate = next(i for i, l in enumerate(lines) if l.strip() == 'twain_use_env "$PY"')
+        activate = next(i for i, l in enumerate(lines)
+                        if 'twain_use_env "$PY"' in l)
         smoke = next(i for i, l in enumerate(lines) if l.strip() == '"$PY" inline_tests.py')
         run = next(i for i, l in enumerate(lines) if "main.py" in l)
         assert activate < smoke < run
@@ -718,3 +729,97 @@ class TestEnvActivationInThePayload:
         proc = subprocess.run(["bash", "-n"], input=self._payload(tmp_path),
                               text=True, capture_output=True)
         assert proc.returncode == 0, proc.stderr
+
+
+class TestLayeredVenvFallback:
+    """When no single env satisfies the toolset, layer pip on the engine env.
+
+    Slurm job 2580169: the plan was quacc+ASE+Psi4. quacc is pip-only and in no
+    cluster env; psi4 is conda-only and in exactly one. No env can host both, and
+    the old fallback built a BARE venv, where pip correctly refuses the conda-only
+    psi4 -- so the gate failed with "MISSING DEPENDENCY: psi4" after a four-minute
+    queue wait. Layering the venv on the engine env satisfies both halves.
+    """
+
+    def _payload(self, tmp_path, *, requirements="quacc\nnumpy==1.26.4\n"):
+        bundle = tmp_path / "bundle"
+        bundle.mkdir(exist_ok=True)
+        (bundle / "main.py").write_text("print('x')\n")
+        (bundle / "inline_tests.py").write_text("print('smoke')\n")
+        (bundle / "requirements.txt").write_text(requirements)
+        adapter = SlurmExecutionAdapter(
+            ClusterProfile.load("compute2"), host="",
+            env_pythons=["/envs/psi4/bin/python", "/envs/default/bin/python"])
+        return adapter._env_payload(bundle, install_deps=True, run_smoke=True)
+
+    def test_the_venv_inherits_the_engine_env(self, tmp_path):
+        payload = self._payload(tmp_path)
+        assert '"$BASE" -m venv --system-site-packages .venv' in payload
+
+    def test_the_base_is_the_first_env_that_exists(self, tmp_path):
+        """Candidates are engine-first, so the first existing one is the best base."""
+        payload = self._payload(tmp_path)
+        assert '[ -n "$BASE" ] || BASE="$CAND"' in payload
+
+    def test_the_base_env_is_activated_before_the_venv_is_built(self, tmp_path):
+        """Otherwise a compiled package could build against the wrong toolchain."""
+        lines = self._payload(tmp_path).splitlines()
+        activate = next(i for i, l in enumerate(lines) if 'twain_use_env "$BASE"' in l)
+        build = next(i for i, l in enumerate(lines) if '-m venv --system-site-packages' in l)
+        assert activate < build
+
+    def test_only_missing_distributions_are_installed(self, tmp_path):
+        """Installing the whole file would let a pin shadow the conda build.
+
+        requirements.txt pins numpy/ase for reproducibility; forcing those into a
+        venv layered on an engine compiled against the conda numpy breaks the
+        engine in a way that reads like a code bug.
+        """
+        payload = self._payload(tmp_path)
+        assert "-r .twain-missing.txt" in payload
+        assert "md.distribution(name)" in payload
+        # The unfiltered install must NOT be what the layered path runs.
+        layered = payload.split('if [ -n "$BASE" ]; then', 1)[1].split("else", 1)[0]
+        assert "-r requirements.txt" not in layered
+
+    def test_the_engine_bin_stays_ahead_of_nothing_important(self, tmp_path):
+        """The venv python wins for imports; the engine's bin stays on PATH."""
+        payload = self._payload(tmp_path)
+        assert 'export PATH="$PWD/.venv/bin:$PATH"' in payload
+        assert 'PY="$PWD/.venv/bin/python"' in payload
+
+    def test_a_layered_env_is_not_reactivated(self, tmp_path):
+        """twain_use_env on the venv would drop the engine's CONDA_PREFIX."""
+        payload = self._payload(tmp_path)
+        assert 'if [ -z "$LAYERED" ]; then twain_use_env "$PY"; fi' in payload
+
+    def test_a_bare_venv_is_still_the_last_resort(self, tmp_path):
+        """With no provisioned env at all, the old behaviour must remain."""
+        payload = self._payload(tmp_path)
+        tail = payload.split('  else', 1)[1]
+        assert "python3 -m venv .venv" in tail
+
+    def test_what_is_layered_is_logged(self, tmp_path):
+        """A silent cap on coverage reads as 'it worked'."""
+        assert "[env] layering on $BASE" in self._payload(tmp_path)
+
+    def test_the_payload_is_valid_shell(self, tmp_path):
+        import subprocess
+        proc = subprocess.run(["bash", "-n"], input=self._payload(tmp_path),
+                              text=True, capture_output=True)
+        assert proc.returncode == 0, proc.stderr
+
+    def test_a_stale_venv_is_removed_before_rebasing(self, tmp_path):
+        """`python -m venv` reuses an existing dir and does NOT rebase it.
+
+        Found the hard way while verifying this on the cluster: a .venv left by an
+        earlier attempt kept its original base interpreter, so the toolset was
+        satisfied by the wrong python entirely and the smoke passed for the wrong
+        reason. In a reused workdir that is a run against packages nobody chose.
+        """
+        payload = self._payload(tmp_path)
+        lines = payload.splitlines()
+        remove = next(i for i, l in enumerate(lines) if l.strip() == "rm -rf .venv")
+        create = next(i for i, l in enumerate(lines)
+                      if "-m venv --system-site-packages" in l)
+        assert remove < create

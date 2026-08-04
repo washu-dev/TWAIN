@@ -484,8 +484,14 @@ class SlurmExecutionAdapter:
             '  export CONDA_PREFIX="$PREFIX"',
             "}",
             'PY=""',
+            'BASE=""',
+            'LAYERED=""',
             f"for CAND in {candidates}; do",
             '  [ -x "$CAND" ] || continue',
+            # The first env that EXISTS is the most specific one (the candidate
+            # list is engine-first), so it is the right base to layer pip onto if
+            # no candidate satisfies the toolset outright.
+            '  [ -n "$BASE" ] || BASE="$CAND"',
             # Probe each candidate with its own env set up, in a subshell so a
             # rejected candidate leaves no PATH behind for the next one.
             '  ( twain_use_env "$CAND"'.rstrip(),
@@ -501,18 +507,70 @@ class SlurmExecutionAdapter:
         ]
         if install_deps and (bundle / "requirements.txt").is_file():
             lines += [
-                "  python3 -m venv .venv",
-                "  .venv/bin/python -m pip install -q --upgrade pip",
-                "  .venv/bin/python -m pip install -q -r requirements.txt",
-                '  PY=".venv/bin/python"',
+                # No single env satisfies the toolset. That is routine for a mixed
+                # one: quacc is pip-only and in no env, psi4 is conda-only and in
+                # exactly one, so neither an env nor a bare venv can host both.
+                # Layer the venv ON the engine env -- conda-only packages come
+                # through --system-site-packages, pip-only ones get installed.
+                # (Slurm job 2580169 died here: it built a bare venv, pip
+                # correctly refused the conda-only psi4, and the gate failed.)
+                '  if [ -n "$BASE" ]; then',
+                '    twain_use_env "$BASE"',
+                # Remove any existing .venv first: `python -m venv` REUSES an
+                # existing directory and does NOT rebase it on the new
+                # interpreter, so a venv left by an earlier attempt in a reused
+                # workdir would silently keep its old base env -- the toolset
+                # would then be satisfied by the wrong python and the job would
+                # look fine while running against packages nobody chose.
+                '    rm -rf .venv',
+                '    "$BASE" -m venv --system-site-packages .venv',
+                # Install ONLY what the base env is missing. Installing the whole
+                # requirements file would let a pin (numpy==1.26.4) shadow the
+                # conda build the engine was compiled against, which breaks the
+                # engine in a way that looks like a code bug.
+                '    "$BASE" - <<\'TWAIN_MISSING\' > .twain-missing.txt',
+                "import importlib.metadata as md",
+                "import re",
+                'for raw in open("requirements.txt"):',
+                '    line = raw.split("#")[0].strip()',
+                "    if not line:",
+                "        continue",
+                '    name = re.split(r"[=<>!~\\[;]", line, maxsplit=1)[0].strip()',
+                "    if not name:",
+                "        continue",
+                "    try:",
+                "        md.distribution(name)",
+                "    except Exception:",
+                "        print(line)",
+                "TWAIN_MISSING",
+                '    if [ -s .twain-missing.txt ]; then',
+                '      echo "[env] layering on $BASE; pip adding: '
+                '$(tr \'\\n\' \' \' < .twain-missing.txt)"',
+                "      .venv/bin/python -m pip install -q --upgrade pip",
+                "      .venv/bin/python -m pip install -q -r .twain-missing.txt",
+                "    fi",
+                # The venv's python wins for imports, while BASE stays on PATH and
+                # keeps its activate.d data vars -- the engine binary and its
+                # basis/pseudopotential directories must still resolve.
+                '    export PATH="$PWD/.venv/bin:$PATH"',
+                '    PY="$PWD/.venv/bin/python"',
+                '    LAYERED=1',
+                "  else",
+                "    python3 -m venv .venv",
+                "    .venv/bin/python -m pip install -q --upgrade pip",
+                "    .venv/bin/python -m pip install -q -r requirements.txt",
+                '    PY=".venv/bin/python"',
+                "  fi",
             ]
         else:
             lines.append('  PY="python3"')
         lines.append("fi")
         # Before anything actually runs: the confirmation smoke below invokes
         # main.py --smoke, which shells out to the engine binary just as the real
-        # run does, so it needs the same PATH and data directories.
-        lines.append('twain_use_env "$PY"')
+        # run does, so it needs the same PATH and data directories. A layered venv
+        # already activated its base env above; re-running twain_use_env on the
+        # venv would put .venv/bin ahead of the engine's bin and drop CONDA_PREFIX.
+        lines.append('if [ -z "$LAYERED" ]; then twain_use_env "$PY"; fi')
         if run_smoke and (bundle / "inline_tests.py").is_file():
             lines.append('"$PY" inline_tests.py')
         # Run the real payload under MPI when the selected env ships mpirun
