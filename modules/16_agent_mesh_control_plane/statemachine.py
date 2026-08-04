@@ -117,6 +117,29 @@ def _cluster_env_packages() -> frozenset:
     return _CLUSTER_ENV_PKGS_CACHE
 
 
+_CLUSTER_ENV_NAMES_CACHE: Optional[frozenset] = None
+
+
+def _cluster_env_names() -> frozenset:
+    """Names of the pre-provisioned cluster envs (the spec filenames' stems).
+
+    ``scripts/ris/envs/psi4.yml`` provisions ``<envs_root>/psi4``, so the stems
+    are exactly the env directory names -- and each stem is the conda PACKAGE the
+    env exists to provide, which is what makes a library's package name the right
+    key for finding its env (see the candidate list in ``_slurm_adapter``).
+    """
+    global _CLUSTER_ENV_NAMES_CACHE
+    if _CLUSTER_ENV_NAMES_CACHE is not None:
+        return _CLUSTER_ENV_NAMES_CACHE
+    specs_dir = twain_paths.REPO_ROOT / "scripts" / "ris" / "envs"
+    try:
+        names = {spec.stem.lower() for spec in specs_dir.glob("*.yml")}
+    except OSError:
+        names = set()
+    _CLUSTER_ENV_NAMES_CACHE = frozenset(names)
+    return _CLUSTER_ENV_NAMES_CACHE
+
+
 # Cache of PyPI availability verdicts keyed by (package, version): a plan-time
 # network probe must not repeat per candidate per run. Values are True / False /
 # None (= could not determine; treated as available, the preflight and the job
@@ -2196,19 +2219,41 @@ class StateMachine:
                 )
             except (TypeError, ValueError):
                 request = None  # malformed plan request -> adapter default
-        # Pre-provisioned cluster envs: try <envs_root>/<calculator>/bin/python
-        # then <envs_root>/default/bin/python before falling back to a venv --
-        # compiled calculators (GPAW needs libxc) can't be pip-built on nodes.
+        # Pre-provisioned cluster envs to try, in order, before falling back to a
+        # venv + pip: conda-only packages (GPAW needs libxc, Psi4 and NWChem have
+        # no PyPI distribution at all) cannot be pip-built on a compute node, so
+        # the env that ships them has to be a candidate or the run is doomed.
+        #
+        # Derived from the WHOLE toolset and via each library's conda PACKAGE name,
+        # which is how the specs are keyed. Both parts are load-bearing:
+        #
+        #   * Whole toolset, not just calculator + tool_name. A library-only plan
+        #     still needs its conda-only member: quacc+ASE+Psi4 has calculator=None
+        #     and tool_name="quacc", so Psi4 sat in `libraries` and the only env
+        #     with psi4 was never probed. The job fell through to pip, which
+        #     correctly refuses a conda-only package, and died at the smoke gate
+        #     with "MISSING DEPENDENCY: psi4" (Slurm job 2580169).
+        #   * Package name, not the display name lowercased. "NWChem" -> "nwchem"
+        #     happens to work, but "Quantum ESPRESSO" -> "quantum espresso" and
+        #     "DFTB+" -> "dftb+" name no env at all, so those two engines could
+        #     never have been selected however well provisioned they were.
         env_pythons = []
         if profile.envs_root:
             method = plan.get("selected_method") or {}
+            provisioned = _cluster_env_names()
             names = []
-            for key in ("calculator", "tool_name"):
-                name = method.get(key)
-                if isinstance(name, str) and name.strip():
-                    name = name.strip().lower()
-                    if name not in names:
-                        names.append(name)
+            wanted = ([method.get("calculator")]
+                      + list(method.get("libraries") or [])
+                      + [method.get("tool_name")])
+            for entry in wanted:
+                if not isinstance(entry, str) or not entry.strip():
+                    continue
+                for dep in _depinf.import_names(entry.strip()):
+                    package = dep.package.lower()
+                    if package in provisioned and package not in names:
+                        names.append(package)
+            # Always last: it exists but carries only the common stack, so it must
+            # never shadow an engine env (see the adapter's candidate probe).
             names.append("default")
             env_pythons = [f"{profile.envs_root}/{n}/bin/python" for n in names]
 
