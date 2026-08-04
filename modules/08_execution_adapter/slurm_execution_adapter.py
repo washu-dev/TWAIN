@@ -461,15 +461,40 @@ class SlurmExecutionAdapter:
         candidates = " ".join(shlex.quote(p) for p in self.env_pythons)
         lines = [
             "set -e",
+            # An ASE calculator shells out to its engine binary (nwchem, dftb+,
+            # pw.x). Invoking <prefix>/bin/python by absolute path does not
+            # activate the env, so its bin/ is absent from PATH and the binary is
+            # "command not found" -- which surfaces as the env failing the smoke
+            # probe, indistinguishable from the env being wrong. The local adapter
+            # already does this; the cluster payload did not, so a correctly
+            # provisioned twain-envs/nwchem was rejected and the run fell through
+            # to a pip install of a conda-only package.
+            "twain_use_env() {",
+            '  BIN="$(dirname "$1")"',
+            '  export PATH="$BIN:$PATH"',
+            '  PREFIX="$(dirname "$BIN")"',
+            # Engines read their data directories from variables that the conda
+            # activate.d hooks normally set; sourcing them reproduces activation.
+            '  if [ -d "$PREFIX/etc/conda/activate.d" ]; then',
+            '    for hook in "$PREFIX"/etc/conda/activate.d/*.sh; do',
+            '      [ -r "$hook" ] || continue',
+            '      CONDA_PREFIX="$PREFIX" . "$hook" >/dev/null 2>&1 || true',
+            '    done',
+            '  fi',
+            '  export CONDA_PREFIX="$PREFIX"',
+            "}",
             'PY=""',
             f"for CAND in {candidates}; do",
             '  [ -x "$CAND" ] || continue',
+            # Probe each candidate with its own env set up, in a subshell so a
+            # rejected candidate leaves no PATH behind for the next one.
+            '  ( twain_use_env "$CAND"'.rstrip(),
         ]
         if have_smoke:
-            lines.append('  if "$CAND" inline_tests.py >/dev/null 2>&1; '
-                         'then PY="$CAND"; break; fi')
+            lines.append('    "$CAND" inline_tests.py >/dev/null 2>&1 ) '
+                         '&& { PY="$CAND"; break; }')
         else:
-            lines.append('  PY="$CAND"; break')
+            lines.append('    true ) && { PY="$CAND"; break; }')
         lines += [
             "done",
             'if [ -z "$PY" ]; then',
@@ -484,6 +509,10 @@ class SlurmExecutionAdapter:
         else:
             lines.append('  PY="python3"')
         lines.append("fi")
+        # Before anything actually runs: the confirmation smoke below invokes
+        # main.py --smoke, which shells out to the engine binary just as the real
+        # run does, so it needs the same PATH and data directories.
+        lines.append('twain_use_env "$PY"')
         if run_smoke and (bundle / "inline_tests.py").is_file():
             lines.append('"$PY" inline_tests.py')
         # Run the real payload under MPI when the selected env ships mpirun
