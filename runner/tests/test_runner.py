@@ -31,6 +31,16 @@ from runner.suspend import SuspendRun
 SESSION = "conv-1"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_notify_throttle():
+    """process_job builds the real notifier, whose flood rails keep module state."""
+    from runner import notifications
+
+    notifications.reset_notify_throttle()
+    yield
+    notifications.reset_notify_throttle()
+
+
 class FakeDB:
     """In-memory stand-in for RunnerDB with a faithful message log."""
 
@@ -97,6 +107,9 @@ class FakeDB:
     # -- status / state / events ------------------------------------------------
     def set_conversation_status(self, sid, status):
         self.status = status
+
+    def conversation_status(self, sid):
+        return self.status
 
     def set_conversation_state(self, sid, state):
         self.state = state
@@ -635,6 +648,23 @@ class TestProcessJob:
         runner._drive_run(db, SESSION, orch, engine, notifier=notes)
         assert "completed" in [reason for _sid, reason, _msg in notes.calls]
 
+    def test_finished_run_is_not_re_announced(self):
+        # A redundant slice on a run already parked at TERMINATE (a resume from a
+        # late reply, a job the reaper re-queued) has nothing to drive: no second
+        # summary in the transcript and no second "has finished" email. This is
+        # how one run mailed its owner over and over.
+        db = FakeDB()
+        engine = FakeEngine()
+        orch = engine.build_orchestrator(
+            session_id=SESSION, researcher_id="", request="r",
+            ask=DbAsk(db, SESSION), sink=PgEventSink(db, SESSION), store=None,
+        )
+        orch._set("TERMINATE")
+        notes = RecordingNotifier()
+        runner._drive_run(db, SESSION, orch, engine, notifier=notes)
+        assert notes.calls == []
+        assert db.messages == []
+
     def test_failure_fires_a_notification(self):
         db = FakeDB()
         notes = RecordingNotifier()
@@ -703,6 +733,19 @@ class TestProcessJob:
         assert db.status == "cancelled"
         assert "terminated by user" in db.messages[-1]["content"].lower()
         assert not any(e["event_type"] == "run.completed" for e in db.events)
+
+    def test_cancellation_is_announced_once(self):
+        # A terminate request is sticky: it stays in the transcript, so every
+        # later slice for this session reaches _finalize_cancelled too. Settling
+        # an already-cancelled run must add nothing (no repeat chat, no repeat
+        # email) -- otherwise every subsequent job re-notifies the owner.
+        db = FakeDB()
+        notes = RecordingNotifier()
+        runner._finalize_cancelled(db, SESSION, notes)
+        runner._finalize_cancelled(db, SESSION, notes)
+        runner._finalize_cancelled(db, SESSION, notes)
+        assert [reason for _sid, reason, _msg in notes.calls] == ["terminated"]
+        assert len(db.messages) == 1
 
 
 # ── run_loop ──────────────────────────────────────────────────────────────────

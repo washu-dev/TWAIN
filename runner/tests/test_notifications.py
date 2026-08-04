@@ -5,6 +5,7 @@ the SES/SNS backends, a fake ``boto3`` is installed into ``sys.modules`` so we c
 assert the dispatch targets the run *owner* (their email / phone) and falls back
 to the configured default address when the owner has no contact on file.
 """
+import io
 import json
 import sys
 import types
@@ -15,6 +16,14 @@ from runner import notifications
 from runner.notifications import default_notifier, make_notifier
 
 SESSION = "conv-1"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_throttle():
+    """The flood rails keep per-run state in the module, so clear it per test."""
+    notifications.reset_notify_throttle()
+    yield
+    notifications.reset_notify_throttle()
 
 
 # ── _compose: subject carries the request + a short run id ────────────────────
@@ -188,6 +197,68 @@ class TestNotifyPrefs:
         assert "was terminated" in subject
 
 
+# ── flood rails: de-dup + hourly cap (the 1900-email incident) ─────────────────
+class TestFloodRails:
+    def _capture(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(
+            notifications, "default_notifier",
+            lambda sid, reason, msg, recipient=None, request=None: sent.append((reason, msg)),
+        )
+        return sent
+
+    def test_identical_notification_is_sent_once(self, monkeypatch):
+        # The same run being driven twice (a redundant resume, a re-queued job)
+        # must not mail the same thing twice.
+        sent = self._capture(monkeypatch)
+        notify = make_notifier(FakeContactDB({"email": "r@wustl.edu"}))
+        for _ in range(50):
+            notify(SESSION, "completed", "Run complete.")
+        assert sent == [("completed", "Run complete.")]
+
+    def test_a_different_message_still_gets_through(self, monkeypatch):
+        sent = self._capture(monkeypatch)
+        notify = make_notifier(FakeContactDB({"email": "r@wustl.edu"}))
+        notify(SESSION, "input", "Which solvent?")
+        notify(SESSION, "input", "Which temperature?")   # a real second question
+        notify(SESSION, "approval", "Which solvent?")    # same words, other gate
+        assert len(sent) == 3
+
+    def test_hourly_cap_stops_a_storm_of_distinct_messages(self, monkeypatch):
+        monkeypatch.setattr(notifications, "NOTIFY_MAX_PER_HOUR", 5)
+        sent = self._capture(monkeypatch)
+        notify = make_notifier(FakeContactDB({"email": "r@wustl.edu"}))
+        for i in range(200):
+            notify(SESSION, "input", f"question {i}")  # each one unique
+        assert len(sent) == 5
+
+    def test_the_cap_is_per_run(self, monkeypatch):
+        monkeypatch.setattr(notifications, "NOTIFY_MAX_PER_HOUR", 1)
+        sent = self._capture(monkeypatch)
+        notify = make_notifier(FakeContactDB({"email": "r@wustl.edu"}))
+        notify("run-a", "input", "Q")
+        notify("run-a", "input", "Q2")   # over run-a's cap
+        notify("run-b", "input", "Q")    # a different run is unaffected
+        assert len(sent) == 2
+
+    def test_suppression_is_logged_not_silent(self, monkeypatch, caplog):
+        self._capture(monkeypatch)
+        notify = make_notifier(FakeContactDB({"email": "r@wustl.edu"}))
+        notify(SESSION, "completed", "Run complete.")
+        with caplog.at_level("WARNING", logger="twain.runner.notify"):
+            notify(SESSION, "completed", "Run complete.")
+        assert "dropped 'completed'" in caplog.text
+
+    def test_rails_can_be_disabled_by_an_operator(self, monkeypatch):
+        monkeypatch.setattr(notifications, "NOTIFY_DEDUPE_SECONDS", 0)
+        monkeypatch.setattr(notifications, "NOTIFY_MAX_PER_HOUR", 0)
+        sent = self._capture(monkeypatch)
+        notify = make_notifier(FakeContactDB({"email": "r@wustl.edu"}))
+        for _ in range(20):
+            notify(SESSION, "completed", "Run complete.")
+        assert len(sent) == 20
+
+
 # ── log backend (default): names the recipient, never raises ──────────────────
 class TestLogBackend:
     def test_logs_owner_email(self, monkeypatch, caplog):
@@ -199,58 +270,78 @@ class TestLogBackend:
             )
         assert "owner@wustl.edu" in caplog.text
 
+    def test_falling_back_to_the_global_inbox_is_flagged(self, monkeypatch, caplog):
+        # users.email is nullable (and an Entra token with no email claim stores
+        # an empty one), so a run whose owner has no address on file quietly mails
+        # the *operator*, who could neither act on it nor switch it off. Now it
+        # sends nothing — and says which run it withheld, so the missing
+        # users.email can be found and fixed.
+        monkeypatch.delenv("TWAIN_NOTIFY_BACKEND", raising=False)
+        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "operator@wustl.edu")
+        with caplog.at_level("WARNING", logger="twain.runner.notify"):
+            assert notifications._recipient_email({"email": ""}, SESSION) is None
+        assert "no email on file" in caplog.text
+        assert SESSION in caplog.text
+        # The old fallback env var is not consulted at all any more.
+        assert "operator@wustl.edu" not in caplog.text
+
+    def test_owner_with_an_email_is_not_flagged(self, monkeypatch, caplog):
+        monkeypatch.delenv("TWAIN_NOTIFY_BACKEND", raising=False)
+        with caplog.at_level("WARNING", logger="twain.runner.notify"):
+            default_notifier(SESSION, "completed", "done", recipient={"email": "r@wustl.edu"})
+        assert "no email on file" not in caplog.text
+
     def test_no_recipient_is_not_fatal(self, monkeypatch, caplog):
         monkeypatch.delenv("TWAIN_NOTIFY_BACKEND", raising=False)
-        monkeypatch.delenv("TWAIN_NOTIFY_EMAIL", raising=False)
         with caplog.at_level("INFO", logger="twain.runner.notify"):
             default_notifier(SESSION, "input", "Q", recipient=None)
         assert "<no recipient>" in caplog.text
 
 
-# ── SES backend: email the owner, else the configured default ─────────────────
+# ── SES backend: the owner's address, or nothing ───────────────────────────────
 class TestSesBackend:
     def test_emails_the_run_owner(self, monkeypatch, fake_boto3):
         monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "ses")
-        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "default@wustl.edu")
         default_notifier(
             SESSION, "input", "Which solvent?",
             recipient={"email": "owner@wustl.edu"},
         )
         assert fake_boto3.emails[0]["Destination"]["ToAddresses"] == ["owner@wustl.edu"]
 
-    def test_falls_back_to_configured_email(self, monkeypatch, fake_boto3):
+    def test_owner_without_an_address_gets_no_email(self, monkeypatch, fake_boto3):
+        # Even with the old fallback address configured: no owner address, no send.
         monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "ses")
-        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "default@wustl.edu")
+        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "operator@wustl.edu")
         default_notifier(SESSION, "input", "Q", recipient={"email": None})
-        assert fake_boto3.emails[0]["Destination"]["ToAddresses"] == ["default@wustl.edu"]
+        assert fake_boto3.emails == []
 
-    def test_no_address_anywhere_is_swallowed(self, monkeypatch, fake_boto3):
+    def test_unknown_owner_gets_no_email(self, monkeypatch, fake_boto3):
+        # An owner lookup that failed (recipient=None) sends nothing, never raises.
         monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "ses")
-        monkeypatch.delenv("TWAIN_NOTIFY_EMAIL", raising=False)
-        # No owner email and no configured default: logged, not raised, no send.
         default_notifier(SESSION, "input", "Q", recipient=None)
         assert fake_boto3.emails == []
 
 
-# ── SNS backend: text the owner's phone, else publish to the topic ────────────
+# ── SNS backend: the owner's phone, or nothing ─────────────────────────────────
 class TestSnsBackend:
     def test_texts_the_owner_phone_directly(self, monkeypatch, fake_boto3):
         monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "sns")
-        monkeypatch.setenv("TWAIN_NOTIFY_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:1:t")
         default_notifier(
             SESSION, "approval", "Plan ready",
             recipient={"phone": "+13145550123"},
         )
-        # A known phone wins over the topic: publish directly to the number.
         assert fake_boto3.published[0]["PhoneNumber"] == "+13145550123"
         assert "TopicArn" not in fake_boto3.published[0]
 
-    def test_falls_back_to_topic_without_a_phone(self, monkeypatch, fake_boto3):
+    def test_owner_without_a_phone_gets_no_text(self, monkeypatch, fake_boto3, caplog):
+        # A shared topic is the same wrong-recipient problem as a shared inbox:
+        # the fan-out is gone, so an owner with no phone is simply not texted.
         monkeypatch.setenv("TWAIN_NOTIFY_BACKEND", "sns")
         monkeypatch.setenv("TWAIN_NOTIFY_SNS_TOPIC_ARN", "arn:aws:sns:us-east-1:1:t")
-        default_notifier(SESSION, "input", "Q", recipient={"phone": None})
-        assert fake_boto3.published[0]["TopicArn"] == "arn:aws:sns:us-east-1:1:t"
-        assert "PhoneNumber" not in fake_boto3.published[0]
+        with caplog.at_level("WARNING", logger="twain.runner.notify"):
+            default_notifier(SESSION, "input", "Q", recipient={"phone": None})
+        assert fake_boto3.published == []
+        assert "no phone on file" in caplog.text
 
 
 # ── SendGrid backend: POST to the owner via the SendGrid HTTP API ─────────────
@@ -293,30 +384,20 @@ class TestSendGridBackend:
         assert captured["body"]["from"]["email"] == "twain@twain.dev"
         assert "waiting for your approval" in captured["body"]["subject"]
 
-    def test_falls_back_to_configured_email(self, monkeypatch):
+    def test_owner_without_an_address_is_not_redirected(self, monkeypatch, caplog):
+        # The flood landed in the wrong inbox because a blank users.email fell
+        # back to the operator address. Nothing is sent now, whatever is
+        # configured, and the withheld run is named in the log.
         self._no_env_file(monkeypatch)
-        captured = {}
-
-        class FakeResp:
-            status = 202
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
         monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
         monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
-        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "default@wustl.edu")
-        monkeypatch.setattr(
-            notifications.urllib.request, "urlopen",
-            lambda request, timeout=None: captured.update(
-                body=json.loads(request.data.decode())
-            ) or FakeResp(),
-        )
-        notifications._notify_sendgrid(SESSION, "input", "Q", recipient={"email": None})
-        assert captured["body"]["personalizations"][0]["to"][0]["email"] == "default@wustl.edu"
+        monkeypatch.setenv("TWAIN_NOTIFY_EMAIL", "operator@wustl.edu")
+        posted = []
+        monkeypatch.setattr(notifications, "_sendgrid_post", lambda *a, **k: posted.append(a))
+        with caplog.at_level("WARNING", logger="twain.runner.notify"):
+            notifications._notify_sendgrid(SESSION, "input", "Q", recipient={"email": None})
+        assert posted == []
+        assert "no email on file" in caplog.text
 
     def test_dispatch_via_default_notifier(self, monkeypatch):
         """backend=sendgrid routes default_notifier to the SendGrid path, recipient included."""
@@ -362,6 +443,54 @@ class TestSendGridBackend:
         # No owner email and no configured default: skipped, not raised, no POST.
         notifications._notify_sendgrid(SESSION, "input", "Q", recipient=None)
         assert sent == []
+
+    def test_http_rejection_reports_sendgrids_own_explanation(self, monkeypatch):
+        # urlopen raises on 4xx, so the status check never sees a 403; without
+        # reading the body the log said only "Forbidden", which doesn't say
+        # whether the key or the sender identity is wrong.
+        self._no_env_file(monkeypatch)
+        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
+        monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
+
+        def forbidden(request, timeout=None):
+            raise notifications.urllib.error.HTTPError(
+                notifications.SENDGRID_API_URL, 403, "Forbidden", {},
+                io.BytesIO(b'{"errors":[{"message":"The from address does not match a '
+                           b'verified Sender Identity."}]}'),
+            )
+
+        monkeypatch.setattr(notifications.urllib.request, "urlopen", forbidden)
+        with pytest.raises(RuntimeError, match="verified Sender Identity"):
+            notifications._notify_sendgrid(
+                SESSION, "approval", "x", recipient={"email": "owner@wustl.edu"}
+            )
+
+    def test_network_failure_names_the_cause(self, monkeypatch):
+        self._no_env_file(monkeypatch)
+        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
+        monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
+
+        def unreachable(request, timeout=None):
+            raise notifications.urllib.error.URLError("name resolution failed")
+
+        monkeypatch.setattr(notifications.urllib.request, "urlopen", unreachable)
+        with pytest.raises(RuntimeError, match="unreachable"):
+            notifications._notify_sendgrid(
+                SESSION, "input", "x", recipient={"email": "owner@wustl.edu"}
+            )
+
+    def test_accepted_send_is_logged(self, monkeypatch, caplog):
+        """The one positive record that the email path actually worked."""
+        self._no_env_file(monkeypatch)
+        monkeypatch.setenv("TWAIN_SENDGRID_API_KEY", "SG.secret")
+        monkeypatch.setenv("TWAIN_NOTIFY_FROM", "twain@twain.dev")
+        monkeypatch.setattr(notifications, "_sendgrid_post", lambda *a, **k: None)
+        with caplog.at_level("INFO", logger="twain.runner.notify"):
+            notifications._notify_sendgrid(
+                SESSION, "completed", "done", recipient={"email": "owner@wustl.edu"}
+            )
+        assert "SendGrid accepted 'completed'" in caplog.text
+        assert "owner@wustl.edu" in caplog.text
 
     def test_notify_failure_never_propagates(self, monkeypatch):
         """A SendGrid outage must not fail (or unpause) the run."""
