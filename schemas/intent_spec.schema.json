@@ -11,6 +11,13 @@
       "type":"string",
       "enum": ["materials", "quantum"]
     },
+    "requested_libraries": {
+      "description": "Software the user EXPLICITLY named and asked to be used, e.g. 'compute it with GPAW', 'use pymatgen', 'run this in VASP'. Record the name exactly as the user wrote it, one entry per tool, ordered as they mentioned them. Include codes, packages, and calculators alike -- whether or not you believe they are installed; TWAIN checks availability itself and files an install request when something is missing. Emit an empty array (or omit) when the user named no software: never guess or fill in the tool you would pick yourself, since that would look like a user request.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "system_descriptors": {
       "type": "object",
       "description": "Identifies the physical system. Pick the representation that matches the system TYPE, then fill in that ONE sub-object: a discrete, finite molecule uses `molecule` (a SMILES string); a periodic solid -- a crystal, bulk metal / semiconductor / oxide, or a surface / slab of one -- uses `crystal`. SMILES cannot represent a periodic solid, so NEVER invent a SMILES for a crystal; describe it by formula + polymorph/phase (and a structure source when known) instead.",

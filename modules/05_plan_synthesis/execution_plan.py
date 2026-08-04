@@ -110,6 +110,13 @@ class ExecutionPlan:
     # hard-coded sample.
     target_system: Optional[dict] = None
     requested_property: Optional[str] = None
+    # Libraries this plan WANTED but could not use, because they are not in the
+    # preset install set -- each one recorded and filed as a 'LibraryAddition'
+    # GitHub issue (see method_discovery.library_requests). The plan itself always
+    # uses installed libraries only; this is the audit trail of what was asked for,
+    # mirrored into safety_notes for the researcher. Optional, so existing plans
+    # and tests are unaffected.
+    library_requests: List[dict] = field(default_factory=list)
     def __post_init__(self):
         if type(self.selected_method) is dict:
             self.selected_method = SelectedMethod(**self.selected_method)
@@ -150,6 +157,10 @@ class ExecutionPlan:
 
         if type(self.safety_notes) is not list or any(type(note) is not str for note in self.safety_notes):
             raise ValueError("safety_notes must be a list of str")
+
+        if type(self.library_requests) is not list or any(
+                type(req) is not dict for req in self.library_requests):
+            raise ValueError("library_requests must be a list of dict")
 
 
 if __name__ == "__main__":
