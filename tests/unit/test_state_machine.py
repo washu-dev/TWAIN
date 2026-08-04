@@ -1401,3 +1401,82 @@ class TestClusterEnvCandidates:
         names = SM._cluster_env_names()
         assert {"default", "psi4", "gpaw", "nwchem", "qe", "abinit", "cp2k",
                 "dftbplus"} <= names
+
+
+class TestRegistryInvariantsHoldForNewEngines:
+    """Drift guards, so 'generic' is enforced rather than currently-true.
+
+    Each of these encodes a rule that must hold for an engine nobody has added
+    yet. Without them, the session's fixes stay correct only for the engines that
+    happened to break: adding a sixth external engine and forgetting one field
+    would fail on the cluster, after a queue wait, with a message about something
+    else.
+    """
+
+    @staticmethod
+    def _external_binary(calc) -> bool:
+        """Whether this calculator is an external program driven through ASE.
+
+        The discriminator is derived, not curated: driven via ``ase.calculators.*``
+        AND backed by a conda-only package. That is exactly the combination whose
+        python side is pure bindings -- ``import ase.calculators.nwchem`` succeeds
+        wherever ASE is installed -- so an import check cannot prove the engine can
+        run. A pure-python calculator fails one of the two halves: GPAW and xTB are
+        imported directly rather than through ase.calculators, and EMT ships inside
+        ASE itself.
+        """
+        packages = [d.package.lower() for d in SM._depinf.import_names(calc.name)]
+        return (calc.import_name.startswith("ase.calculators.")
+                and any(p in SM._depinf.CONDA_ONLY_PACKAGES for p in packages))
+
+    def _calculators(self):
+        from method_discovery.calculator_registry import load_calculators
+        return load_calculators()
+
+    def test_every_external_engine_declares_its_binary(self):
+        missing = [c.name for c in self._calculators()
+                   if self._external_binary(c) and not c.executable]
+        assert not missing, (
+            f"external engines with no `executable`: {missing}. Their ASE bindings "
+            f"import wherever ASE is installed, so without it the smoke gate "
+            f"cannot tell an env that can RUN the engine from one that merely has "
+            f"the bindings -- how a run reached twain-envs/default and died "
+            f"mid-optimization with 'nwchem: command not found'")
+
+    def test_a_python_package_calculator_declares_no_binary(self):
+        """The inverse matters: a spurious executable is a gate nothing can pass."""
+        spurious = [(c.name, c.executable) for c in self._calculators()
+                    if not self._external_binary(c) and c.executable]
+        assert not spurious, (
+            f"pure-python calculators naming a binary: {spurious}; the import "
+            f"check already proves these can run")
+
+    def test_every_pseudo_library_is_resolvable_and_fetchable(self):
+        """A pseudo_library value needs a manifest reader AND a way to get the data."""
+        root = Path(__file__).resolve().parents[2]
+        helper = (root / "modules" / "06_code_configuration_builder"
+                  / "bundle_helpers" / "twain_pseudo.py").read_text()
+        fetch = (root / "scripts" / "ris" / "fetch_data.sh").read_text()
+        for calc in self._calculators():
+            library = calc.pseudo_library
+            if not library:
+                continue
+            assert f"fetch_{library}" in fetch, (
+                f"{calc.name} wants '{library}' but fetch_data.sh cannot fetch it")
+            # The resolver keys off the engine, so it must know this engine too.
+            engine = "espresso" if "espresso" in calc.import_name else "abinit"
+            assert engine in helper, (
+                f"{calc.name} wants '{library}' but twain_pseudo.py has no "
+                f"'{engine}' branch to read its manifest")
+
+    def test_every_engine_with_a_data_hook_has_a_spec(self):
+        """provision_envs.sh must not write a hook for an env nothing provisions."""
+        import re
+        root = Path(__file__).resolve().parents[2]
+        provision = (root / "scripts" / "ris" / "provision_envs.sh").read_text()
+        specs = {p.stem for p in (root / "scripts" / "ris" / "envs").glob("*.yml")}
+        # Each hook case is `    <name>)` inside write_data_hook.
+        block = provision.split("write_data_hook()", 1)[1].split("\nif ", 1)[0]
+        cases = re.findall(r"^\s{4}([a-z0-9_]+)\)", block, re.M)
+        orphans = sorted(set(cases) - specs)
+        assert not orphans, f"data-hook cases with no env spec: {orphans}"

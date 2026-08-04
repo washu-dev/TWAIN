@@ -57,12 +57,14 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 try:  # pragma: no cover - import shim (package alias vs. bare name)
     from code_gen.codegen_engine import (
         SIM_ENV, extract_valid_source, has_runnable_entrypoint,
-        pixi_env_python, strip_code_fences, _LEFTOVER_PLACEHOLDER,
+        pixi_env_python, strip_code_fences, wants_thermo_cycle,
+        _LEFTOVER_PLACEHOLDER,
     )
 except ImportError:  # pragma: no cover
     from codegen_engine import (
         SIM_ENV, extract_valid_source, has_runnable_entrypoint,
-        pixi_env_python, strip_code_fences, _LEFTOVER_PLACEHOLDER,
+        pixi_env_python, strip_code_fences, wants_thermo_cycle,
+        _LEFTOVER_PLACEHOLDER,
     )
 
 # Sentinel so ``sim_python=None`` ("explicitly no interpreter, skip smoke") is
@@ -888,7 +890,7 @@ def _uncorrelated_method_for_thermochemistry(source: str,
     orbital energy or a Hartree-Fock geometry is a perfectly reasonable thing to
     ask for, so the property, not the method, decides whether this is an error.
     """
-    if not _thermochemical_property(property_name):
+    if not wants_thermo_cycle(property_name):
         return []
     try:
         tree = ast.parse(source)
@@ -922,19 +924,6 @@ def _uncorrelated_method_for_thermochemistry(source: str,
                     and str(node.value.value).strip().lower() in _UNCORRELATED_METHODS):
                 lines.append(node.lineno)
     return sorted(set(lines))
-
-
-# Properties assembled from several species' energies, where a method's per-bond
-# error lands directly in the answer. Mirrors codegen_engine.wants_thermo_cycle;
-# kept as its own copy because the doctor sees only the brief, not the plan.
-_THERMOCHEMICAL_WORDS = ("formation", "atomization", "dissociation", "combustion",
-                         "reaction_enthalpy", "reaction enthalpy", "hydrogenation",
-                         "binding_energy", "binding energy", "cohesive")
-
-
-def _thermochemical_property(property_name: str) -> bool:
-    text = str(property_name or "").lower()
-    return any(word in text for word in _THERMOCHEMICAL_WORDS)
 
 
 def _ambiguous_spin_specification(source: str) -> List[int]:
