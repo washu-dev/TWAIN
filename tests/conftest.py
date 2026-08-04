@@ -42,6 +42,10 @@ _PACKAGE_ALIASES = {
 # Dirs whose modules import siblings by bare name (e.g. `from states import State`). Feel free to add more directories here.
 _BARE_IMPORT_DIRS = [
     MODULES / "16_agent_mesh_control_plane",
+    # Copied verbatim into run bundles, so they import each other by bare name and
+    # must never import from the repo -- which is exactly why they need to be on
+    # sys.path to be unit-testable at all.
+    MODULES / "06_code_configuration_builder" / "bundle_helpers",
 ]
 
 
@@ -65,3 +69,17 @@ def _bootstrap() -> None:
 
 
 _bootstrap()
+
+
+class FakeAtoms:
+    """Stands in for ``ase.Atoms`` where only the symbols matter.
+
+    The bundle helpers accept anything exposing ``get_chemical_symbols`` precisely
+    so they can be tested without ASE installed.
+    """
+
+    def __init__(self, symbols):
+        self._symbols = list(symbols)
+
+    def get_chemical_symbols(self):
+        return list(self._symbols)

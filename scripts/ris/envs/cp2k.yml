@@ -1,13 +1,10 @@
 # Shared cluster env: twain-envs/cp2k -- mixed Gaussian/plane-wave DFT, large
 # systems and ab-initio MD.
 #
-# This file is the source of truth for what the env contains; apply it with
-# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
-# manual drift is exactly what these specs exist to prevent).
+# Apply with scripts/ris/provision_envs.sh; never hand-edit the env in place.
 #
-# cp2k ships only through conda-forge, so without this spec planning vetoes CP2K
-# outright (statemachine's _cluster_cannot_run, which reads these files) and
-# reroutes to a pip-installable tool.
+# conda-forge only: with no spec here, _cluster_cannot_run vetoes this engine
+# at planning time and the run is silently rerouted to another tool.
 #
 # VERSION PIN, and it is load-bearing. conda-forge's current cp2k (2026.x) is
 # built against a newer glibc than RIS provides: its libcp2k.so needs GLIBC_2.38

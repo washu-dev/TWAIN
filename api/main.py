@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -419,17 +420,21 @@ def _extract_result(execution_result):
         return None
     decoder = json.JSONDecoder()
     result = None
-    offset = 0
-    for raw in stdout.splitlines(keepends=True):
-        if raw.lstrip().startswith("{"):
-            start = offset + (len(raw) - len(raw.lstrip()))
-            try:
-                parsed, _ = decoder.raw_decode(stdout, start)
-            except ValueError:
-                parsed = None
-            if isinstance(parsed, dict):
-                result = parsed
-        offset += len(raw)
+    consumed = 0
+    # Advance past each object decoded. Without that, a top-level object holding a
+    # LIST of dicts gets re-decoded once per element -- an EOS scan with 200 points
+    # cost 201 decodes -- and the last inner element wins over the outer object
+    # that actually carries "property".
+    for match in re.finditer(r"^[ \t]*\{", stdout, re.M):
+        start = match.end() - 1
+        if start < consumed:
+            continue
+        try:
+            parsed, consumed = decoder.raw_decode(stdout, start)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            result = parsed
     # json.loads accepts bare NaN; the response renderer does not.
     return _json_safe(result)
 

@@ -39,7 +39,6 @@ __all__ = [
     "PseudoLibraryError",
     "abinit_ecut",
     "abinit_pp_paths",
-    "abinit_pseudopotentials",
     "espresso_cutoffs",
     "espresso_pseudopotentials",
     "pseudo_dir",
@@ -186,12 +185,6 @@ def espresso_cutoffs(atoms_or_symbols) -> Tuple[float, float]:
             "the manifest publishes no cutoffs for these elements; do not guess "
             "-- run a convergence test and state the cutoff explicitly.")
     return max(wfc), max(rho)
-
-
-def abinit_pseudopotentials(atoms_or_symbols) -> List[str]:
-    """Absolute ``.psp8`` paths, in the element order ABINIT's input expects."""
-    directory, resolved = _resolve(atoms_or_symbols, "abinit")
-    return [str(Path(directory) / e["filename"]) for e in resolved.values()]
 
 
 def abinit_pp_paths(atoms_or_symbols=None) -> List[str]:

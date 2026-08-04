@@ -1,13 +1,11 @@
 # Shared cluster env: twain-envs/dftbplus -- semiempirical DFTB (fast screening).
 #
-# This file is the source of truth for what the env contains; apply it with
-# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
-# manual drift is exactly what these specs exist to prevent).
+# Apply with scripts/ris/provision_envs.sh; never hand-edit the env in place.
 #
-# dftbplus ships only through conda-forge, so without this spec planning vetoes
-# DFTB+ outright (statemachine's _cluster_cannot_run, which reads these files)
-# and silently reroutes to a full-DFT tool -- paying hours of SCF for a screening
-# question DFTB+ answers in seconds.
+# conda-forge only: with no spec here, _cluster_cannot_run vetoes this engine
+# at planning time and the run is silently rerouted to another tool.
+# For DFTB+ that means paying hours of SCF for a screening question it answers
+# in seconds.
 #
 # openmpi is explicit for the same reason as in gpaw.yml: DFTB+ has an MPI build
 # and the Slurm payload auto-detects the env's mpirun to run one rank per
@@ -31,10 +29,7 @@ dependencies:
   - dftbplus
   - openmpi
   - ase
-  # pymatgen + spglib for the periodic side, rdkit for SMILES -> 3D on the
-  # molecular side: DFTB+'s registry input_kinds covers both, and the job's
-  # smoke probe rejects an env missing ANY bundle import -- a missing companion
-  # is what sent an NWChem run to twain-envs/default (job 2573801, exit 127).
+  # Companion imports the smoke probe also requires -- see nwchem.yml.
   - pymatgen
   - spglib
   - rdkit

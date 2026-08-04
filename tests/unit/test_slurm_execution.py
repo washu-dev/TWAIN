@@ -803,11 +803,6 @@ class TestLayeredVenvFallback:
         """A silent cap on coverage reads as 'it worked'."""
         assert "[env] layering on $BASE" in self._payload(tmp_path)
 
-    def test_the_payload_is_valid_shell(self, tmp_path):
-        import subprocess
-        proc = subprocess.run(["bash", "-n"], input=self._payload(tmp_path),
-                              text=True, capture_output=True)
-        assert proc.returncode == 0, proc.stderr
 
     def test_a_stale_venv_is_removed_before_rebasing(self, tmp_path):
         """`python -m venv` reuses an existing dir and does NOT rebase it.

@@ -1,12 +1,9 @@
 # Shared cluster env: twain-envs/abinit -- ABINIT plane-wave DFT (solids).
 #
-# This file is the source of truth for what the env contains; apply it with
-# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
-# manual drift is exactly what these specs exist to prevent).
+# Apply with scripts/ris/provision_envs.sh; never hand-edit the env in place.
 #
-# abinit ships only through conda-forge, so without this spec planning vetoes
-# ABINIT outright (statemachine's _cluster_cannot_run, which reads these files)
-# and reroutes to a pip-installable tool.
+# conda-forge only: with no spec here, _cluster_cannot_run vetoes this engine
+# at planning time and the run is silently rerouted to another tool.
 #
 # MPI is explicit for the same reason as in gpaw.yml: abinit is MPI-parallel and
 # the Slurm payload auto-detects the env's mpirun to run one rank per allocated
@@ -24,8 +21,8 @@
 # search path as a CONSTRUCTOR argument -- ``AbinitProfile(command="abinit",
 # pp_paths=[...])``. Generated code must never spell pseudopotential filenames
 # itself; it resolves them at run time from what is actually on disk -- see the
-# bundle's twain_pseudo.py, emitted deterministically by
-# pseudo_helper_generator.py, so a hallucinated filename cannot reach a run.
+# bundle's twain_pseudo.py, a version-controlled module copied in verbatim, so a
+# hallucinated filename cannot reach a run.
 channels:
   - conda-forge
 dependencies:
@@ -33,10 +30,7 @@ dependencies:
   - abinit
   - mpich
   - ase
-  # pymatgen + spglib do the crystal-structure prep; rdkit rides along because the
-  # job's smoke probe rejects an env missing ANY bundle import, and a rejected env
-  # falls through to one without the engine -- how an NWChem run ended up in
-  # twain-envs/default (job 2573801, exit 127).
+  # Companion imports the smoke probe also requires -- see nwchem.yml.
   - pymatgen
   - spglib
   - rdkit

@@ -46,7 +46,8 @@ from method_discovery.calculator_registry import (
 )
 from method_discovery import llm_discovery
 from PromptCompiler import PromptGenerator
-from code_gen.codegen_engine import (SIM_ENV, CodegenEngine, canonical_tool_key,
+from code_gen.codegen_engine import (SIM_ENV, CodegenEngine, _first_metric_name,
+                                     canonical_tool_key,
                                      mp_lookup_requested, pixi_env_python)
 from code_gen import dependency_inferencer as _depinf
 
@@ -1968,7 +1969,15 @@ class StateMachine:
             "library_import": driver_import,
             "calculator": method.get("calculator"),
             "calculator_import": method.get("calculator_import"),
-            "property": plan.get("requested_property") or "the requested property",
+            # Same fallback codegen uses (_generate_with_calculator): a planner
+            # that leaves requested_property null still names the property in its
+            # acceptance metric. Without the fallback the doctor received the
+            # literal "the requested property", which no property-class check can
+            # recognise -- so the uncorrelated-thermochemistry guard could never
+            # fire on the very runs it was written for.
+            "property": (plan.get("requested_property")
+                         or _first_metric_name(plan)
+                         or "the requested property"),
             "material_desc": CodegenEngine._material_desc(material),
             "acceptance": plan.get("acceptance_metrics") or [],
             "output_file": "results.csv",

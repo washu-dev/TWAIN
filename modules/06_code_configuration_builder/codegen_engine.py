@@ -226,17 +226,20 @@ def _imported_modules(source: str) -> set:
     return modules
 
 
-def _imports_module(source: str, want: str) -> bool:
-    """Whether ``source`` imports ``want``, a parent of it, or a child of it.
+def _satisfies(modules, want: str) -> bool:
+    """Whether any module in ``modules`` covers ``want``, in either direction.
 
     ``import ase.calculators.nwchem`` satisfies a requirement on ``ase``, and
     ``import psi4`` satisfies one on ``psi4.driver`` -- either direction means the
     package has to be present.
     """
-    for module in _imported_modules(source):
-        if module == want or module.startswith(f"{want}.") or want.startswith(f"{module}."):
-            return True
-    return False
+    return any(m == want or m.startswith(f"{want}.") or want.startswith(f"{m}.")
+               for m in modules)
+
+
+def _imports_module(source: str, want: str) -> bool:
+    """Whether ``source`` imports ``want``, a parent of it, or a child of it."""
+    return _satisfies(_imported_modules(source), want)
 
 
 def _needed_imports(candidates, source: str) -> List[str]:
@@ -247,16 +250,14 @@ def _needed_imports(candidates, source: str) -> List[str]:
     nothing there would let it through silently. The synthesis backstop is what
     catches that case, not this filter.
     """
-    needed = [name for name in candidates if _imports_module(source, name)]
-    return needed or list(candidates)
+    candidates = list(candidates)
+    modules = _imported_modules(source)   # parse once, not once per candidate
+    return [name for name in candidates if _satisfies(modules, name)] or candidates
 
 
 _BUNDLE_HELPERS = Path(__file__).resolve().parent / "bundle_helpers"
 
 
-def _thermo_helper_source() -> str:
-    """Source of ``twain_thermo.py``, copied verbatim into a bundle."""
-    return (_BUNDLE_HELPERS / "twain_thermo.py").read_text(encoding="utf-8")
 
 
 # Property classes whose value is assembled from several species' energies, where
@@ -281,13 +282,15 @@ def wants_thermo_cycle(*fields) -> bool:
     return any(word in text for word in _THERMO_CYCLE_WORDS)
 
 
-def _pseudo_helper_source() -> str:
-    """Source of ``twain_pseudo.py``, copied verbatim into a bundle.
+def _bundle_helper_source(name: str) -> str:
+    """Source of a ``bundle_helpers`` module, copied verbatim into a bundle.
 
-    Read from disk rather than templated: it is a real module, imported directly
-    by its unit tests, so what a run executes is exactly what the tests cover.
+    Read from disk rather than templated: these are real modules, imported
+    directly by their unit tests, so what a run executes is exactly what the
+    tests cover. Deliberately uncached -- editing a helper should take effect
+    without restarting the process.
     """
-    return (_BUNDLE_HELPERS / "twain_pseudo.py").read_text(encoding="utf-8")
+    return (_BUNDLE_HELPERS / f"{name}.py").read_text(encoding="utf-8")
 
 
 def _first_metric_name(plan: dict) -> Optional[str]:
@@ -820,12 +823,11 @@ class RunBundle:
     # (Quantum ESPRESSO, ABINIT). Copied verbatim rather than generated, so the
     # element -> filename lookup that keeps a hallucinated pseudopotential out of
     # a run is version-controlled and unit-tested instead of re-derived per plan.
-    pseudo_helper_py: Optional[str] = None
-    # twain_thermo.py, present only when the property is assembled from several
-    # species' energies (a formation/atomization/reaction enthalpy). Keeps the
-    # cycle's algebra -- every species' H(T)-E_elec, including each free atom's
-    # 5/2 kT, and the stoichiometry -- out of generated code.
-    thermo_helper_py: Optional[str] = None
+    # Extra ``bundle_helpers`` modules copied verbatim alongside main.py, keyed by
+    # filename: twain_pseudo.py when the engine ships no pseudopotentials, and
+    # twain_thermo.py when the property is assembled from several species'
+    # energies. A mapping rather than a field per helper so the next one is free.
+    helpers: Dict[str, str] = dataclasses.field(default_factory=dict)
 
     def files(self) -> Dict[str, str]:
         """Map of filename -> contents for the bundle."""
@@ -835,10 +837,7 @@ class RunBundle:
             "requirements.txt": self.requirements_txt,
             "inline_tests.py": self.inline_tests_py,
         }
-        if self.pseudo_helper_py is not None:
-            files["twain_pseudo.py"] = self.pseudo_helper_py
-        if self.thermo_helper_py is not None:
-            files["twain_thermo.py"] = self.thermo_helper_py
+        files.update(self.helpers)
         return files
 
     def write(self, dest: Union[str, Path]) -> Path:
@@ -1186,6 +1185,11 @@ class CodegenEngine:
             # exits without computing, so no results file is owed.
             require_output=bool(brief.get("smoke_compute")),
         )
+        helpers = {}
+        if pseudo_library:
+            helpers["twain_pseudo.py"] = _bundle_helper_source("twain_pseudo")
+        if wants_cycle:
+            helpers["twain_thermo.py"] = _bundle_helper_source("twain_thermo")
         # A calculator run executes in the heavy sim env; a library-only run runs on
         # the default interpreter (where its library is installed) -- record that so
         # provenance and run guidance point at the right environment.
@@ -1201,8 +1205,7 @@ class CodegenEngine:
             inline_tests_py=inline_tests_py,
             tool_name=driver,
             template_name=template_name,
-            pseudo_helper_py=(_pseudo_helper_source() if pseudo_library else None),
-            thermo_helper_py=(_thermo_helper_source() if wants_cycle else None),
+            helpers=helpers,
         )
 
     def _render_generic_fallback(self, brief, generated_at, acceptance) -> str:
