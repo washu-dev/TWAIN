@@ -45,6 +45,7 @@ from method_discovery.calculator_registry import (
     find_calculator, load_calculators, planning_platform,
 )
 from method_discovery import llm_discovery
+from method_discovery import library_requests as _libreq
 from PromptCompiler import PromptGenerator
 from code_gen.codegen_engine import (SIM_ENV, CodegenEngine, canonical_tool_key,
                                      mp_lookup_requested, pixi_env_python)
@@ -527,8 +528,9 @@ class StateMachine:
                  execute_keep_artifacts: bool = True, execute_timeout=None,
                  execution_adapter=None, verify_codegen: bool = False,
                  script_doctor=None, library_available=None, sim_available=None,
-                 auto_approve=False, execute_slurm: bool = False,
-                 slurm_cluster: str = None, should_abort=None):
+                 library_request_tracker=None, auto_approve=False,
+                 execute_slurm: bool = False, slurm_cluster: str = None,
+                 should_abort=None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -595,6 +597,13 @@ class StateMachine:
         # (batched, one-subprocess) sim probe. Injectable so planning tests stay
         # hermetic (no sim subprocess).
         self._sim_available = sim_available
+        # Where "we wanted a library that isn't installed" goes. TWAIN still only
+        # ever plans with a preset, importable library; the ask is recorded in a
+        # deduplicated ledger, filed as a 'LibraryAddition' GitHub issue, and
+        # reported to the researcher on the plan. Built lazily on first use (so no
+        # env/git/network work happens for a run that needs nothing) and
+        # injectable so tests exercise the path offline.
+        self._library_request_tracker = library_request_tracker
         # Unattended mode: run to completion without pausing for human confirmation
         # at the heavy-calculation gate (the plan-approval gate is enforced by the
         # driver, e.g. the runner). Set by the orchestrator/runner for automatic runs.
@@ -1147,6 +1156,46 @@ class StateMachine:
             return None
         return _module_importable(deps[0].import_name)
 
+    def _library_tracker(self, intent: Optional[dict] = None):
+        """This run's :class:`LibraryRequestTracker` (built once, on first need).
+
+        Construction is deferred because a run that wants nothing unavailable
+        should do no env/git/network work at all. Injectable via
+        ``library_request_tracker`` so tests exercise the whole path offline.
+        """
+        if self._library_request_tracker is None:
+            objective = intent.get("objective") if isinstance(intent, dict) else None
+            self._library_request_tracker = _libreq.LibraryRequestTracker(
+                run_id=self.run_id, objective=objective)
+        return self._library_request_tracker
+
+    def _request_library(self, library, *, source, reason="", alternative=None,
+                         intent=None):
+        """Record an ask for an uninstalled ``library`` (ledger + GitHub issue).
+
+        The counterpart to the preset-library guarantee: the plan still uses only
+        installed tools, but the wish is no longer silently discarded. Swallows
+        every failure -- an install request must never be able to break planning.
+        """
+        if not library:
+            return None
+        try:
+            return self._library_tracker(intent).record(
+                library, source=source, reason=reason, alternative=alternative)
+        except Exception as exc:  # noqa: BLE001 - recording is strictly best-effort
+            logger.warning("Could not record library request '%s': %s", library, exc)
+            return None
+
+    @staticmethod
+    def _requested_libraries(intent: dict) -> list:
+        """Libraries the researcher named explicitly, from the IntentSpec."""
+        raw = (intent or {}).get("requested_libraries") or []
+        if isinstance(raw, str):  # a model that emitted a bare string
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        return [str(x).strip() for x in raw if str(x or "").strip()]
+
     def _installed_candidates(self, ranked):
         """Keep only ranked candidates whose library is installed here.
 
@@ -1154,23 +1203,70 @@ class StateMachine:
         installed": discovery never commits to a library the run can't import.
         Candidates whose availability is unknown (probe -> None) are kept. Ranks
         are renumbered 1..n over the survivors so the top pick is always rank 1.
-        Returns ``(kept, dropped_names)``; if the filter would drop *everything*
-        (e.g. probed in a bare environment) the original ranking is returned
-        unchanged so planning is never stranded.
+        Returns ``(kept, dropped_names, preempted_names)``, where *preempted* is
+        the subset of dropped candidates that out-scored every survivor -- i.e.
+        the tools discovery would have chosen had they been installed, which is
+        what makes them worth an install request rather than just a note. If the
+        filter would drop *everything* (e.g. probed in a bare environment) the
+        original ranking is returned unchanged so planning is never stranded.
         """
-        kept, dropped = [], []
+        kept, dropped, preempted = [], [], []
         for c in ranked:
             # Probe by id: ids are the clean canonical keys (``openbabel``),
             # whereas display names ("Open Babel") don't always map to an import.
             if self._library_importable(c.entry.id) is False:
                 dropped.append(c.entry.name)
+                if not kept:  # nothing installed has out-ranked it yet
+                    preempted.append(c.entry.name)
             else:
                 kept.append(c)
         if not kept:
-            return list(ranked), []
+            return list(ranked), [], []
         for i, c in enumerate(kept, start=1):
             c.rank = i
-        return kept, dropped
+        return kept, dropped, preempted
+
+    def _installed_libraries(self, ranked, names):
+        """Split library *names* into ``(installed, missing)``.
+
+        The name-level counterpart to :meth:`_installed_candidates`, for lists that
+        aren't scored candidates: the libraries an LLM named, or the ones the
+        researcher asked for. Each name is resolved to a known candidate first so
+        the probe sees the clean registry id; an unlisted name is probed as given.
+        Order is preserved, and "unknown" (probe -> None) counts as installed, in
+        line with the rest of the grounding.
+        """
+        installed, missing = [], []
+        for name in names or []:
+            cand = self._candidate_by_name(ranked, name)
+            key = cand.entry.id if cand else name
+            (missing if self._library_importable(key) is False else installed).append(name)
+        return installed, missing
+
+    @staticmethod
+    def _prefer_requested(ranked, requested):
+        """Move explicitly-requested (and installed) candidates to the front.
+
+        The researcher's own choice outranks the score: when they name a preset
+        library, discovery plans *with* it instead of merely acknowledging it.
+        Requested names that aren't in the ranking are ignored here -- those are
+        handled as install requests. Ranks are renumbered so the top pick is 1;
+        the sort is stable, so score order is preserved within each group.
+        """
+        if not requested:
+            return ranked
+        wanted = [w.lower() for w in requested]
+
+        def _priority(c):
+            for i, w in enumerate(wanted):
+                if c.entry.name.lower() == w or c.entry.id.lower() == w:
+                    return i
+            return len(wanted)
+
+        promoted = sorted(ranked, key=_priority)
+        for i, c in enumerate(promoted, start=1):
+            c.rank = i
+        return promoted
 
     def _sim_missing(self, import_names) -> set:
         """Which of ``import_names`` are NOT importable in the sim env.
@@ -1358,7 +1454,9 @@ class StateMachine:
 
         Scores every catalogued method against the derived discovery query and
         writes the top-ranked candidates (with a human-readable rationale) as the
-        ``discovery`` artifact for plan synthesis.
+        ``discovery`` artifact for plan synthesis. Candidates that out-ranked
+        everything installed are recorded as ``LibraryAddition`` install requests
+        and reported on the slate, so the filtering is visible rather than silent.
         """
         intent = self._load_artifact("intent_spec")
         if intent is None:
@@ -1368,13 +1466,27 @@ class StateMachine:
         ranked = rank_candidates(RegistryLoader().entries(), query, top_k=None)
         # Only surface candidates that are actually installed here, then take the
         # top 3 -- the slate the researcher sees is one they can really run.
-        ranked, _dropped = self._installed_candidates(ranked)
+        ranked, dropped, preempted = self._installed_candidates(ranked)
         ranked = ranked[:3]
+        # A dropped candidate that out-scored every installed one is a tool
+        # discovery genuinely wanted: ask for it to be installed.
+        requests = [
+            self._request_library(
+                name, source=_libreq.SOURCE_RANKING, intent=intent,
+                reason=(f"top-ranked for capability tags "
+                        f"{', '.join(query.capability_tags) or '(none)'}"),
+                alternative=(ranked[0].entry.name if ranked else None))
+            for name in preempted
+        ]
         artifact = {
             "query": {
                 "capability_tags": query.capability_tags,
                 "input_format": query.input_format,
             },
+            # What the ranking wanted but this environment can't run, so the slate
+            # is never mistaken for the whole field.
+            "unavailable_candidates": dropped,
+            "library_requests": [r.as_dict() for r in requests if r],
             "candidates": [
                 {
                     "rank": c.rank,
@@ -1404,6 +1516,13 @@ class StateMachine:
         deterministic, platform-aware registry ranking (:meth:`_select_toolset`).
         The plan carries the full toolset + target material + property; researcher
         approval (the PLAN->BUILD guard) is a separate gate this handler doesn't set.
+
+        Whatever gets filtered out for not being installed -- a tool the LLM named,
+        one that out-ranked every installed candidate, or one the researcher asked
+        for by name -- is recorded as a ``LibraryAddition`` install request and
+        reported in ``safety_notes``. The plan itself still uses installed
+        libraries only; the request is how the wish reaches whoever maintains the
+        environment.
         """
         intent = self._load_artifact("intent_spec")
         if intent is None:
@@ -1430,11 +1549,25 @@ class StateMachine:
         # Ground the toolset in what's installed: drop any candidate library that
         # isn't importable in the run interpreter, so both the deterministic pick
         # (ranked[0]) and the LLM's candidate slate are guaranteed runnable here.
-        ranked, dropped_uninstalled = self._installed_candidates(ranked)
+        ranked, dropped_uninstalled, preempted_uninstalled = self._installed_candidates(ranked)
         # Cluster-vetoed names get their own dedicated note below; keep them out
-        # of the generic "not installed" note so the reason stays truthful.
+        # of the generic "not installed" note so the reason stays truthful. They
+        # are kept out of the install requests for the same reason: the library is
+        # not missing from the preset set, it just has no provisioned cluster env,
+        # so a 'LibraryAddition' issue asking to install it would be wrong.
         dropped_uninstalled = [n for n in dropped_uninstalled
                                if n not in cluster_blocked]
+        preempted_uninstalled = [n for n in preempted_uninstalled
+                                 if n not in cluster_blocked]
+
+        # Software the researcher named explicitly. An installed one is honoured --
+        # promoted to the top of the ranking and offered to the LLM as a preference
+        # -- so a direct ask actually decides the toolset. One that isn't installed
+        # can't be used (the preset rule still wins for this run), so it becomes an
+        # install request below.
+        honoured_requests, missing_requests = self._installed_libraries(
+            ranked, self._requested_libraries(intent))
+        ranked = self._prefer_requested(ranked, honoured_requests)
 
         requested_property = self._requested_property(intent)
         domain = (intent.get("domain") or "").lower() or None
@@ -1446,19 +1579,42 @@ class StateMachine:
         host_platform = current_platform()
         platform = planning_platform(host_platform, docker=docker_available())
 
-        recommendation = self._llm_recommend(intent, ranked, requested_property, domain, platform)
+        # Libraries TWAIN wanted but can't import. Collected here and recorded once
+        # the toolset is final, so every request can name the installed library that
+        # was used instead (and so one library asked for twice is one request).
+        pending_requests = [
+            (name, _libreq.SOURCE_USER, "named explicitly by the researcher")
+            for name in missing_requests
+        ] + [
+            (name, _libreq.SOURCE_RANKING,
+             f"out-ranked every installed candidate for capability tags "
+             f"{', '.join(query.capability_tags) or '(none)'}")
+            for name in preempted_uninstalled
+        ]
+
+        recommendation = self._llm_recommend(intent, ranked, requested_property, domain,
+                                             platform, requested_libraries=honoured_requests)
         if recommendation is not None:
-            # Resolve the model's primary library to a known candidate so we probe
-            # by its clean id; an unlisted/invented name falls through as-is.
+            # Ground every library the model named -- not just the primary, since an
+            # uninstalled supporting library would fail the bundle just as surely.
+            installed_named, missing_named = self._installed_libraries(
+                ranked, recommendation.libraries)
+            why = "selected by discovery for this task" + (
+                f": {recommendation.reasoning}" if recommendation.reasoning else "")
+            pending_requests += [(n, _libreq.SOURCE_LLM, why) for n in missing_named]
+            driver = (recommendation.calculator_library or "").lower()
+            # Resolve the model's primary library to a known candidate so the
+            # cluster veto is reported under its clean registry name; an
+            # unlisted/invented name falls through as-is.
             picked = self._candidate_by_name(ranked, recommendation.libraries[0])
             primary_key = picked.entry.id if picked else recommendation.libraries[0]
             rec_calc = find_calculator(recommendation.calculator)
-            if self._library_importable(primary_key) is False:
-                # The model named a library that isn't installed here -- don't
-                # plan around something the run can't import; fall back to the
-                # deterministic, installed pick. When the block was the CLUSTER
-                # veto (not a local install gap), that's the model's best-fit
-                # engine being passed over: note it for the researcher.
+            if not installed_named or installed_named[0].lower() != recommendation.libraries[0].lower():
+                # The model's *primary* isn't installed here -- don't plan around
+                # something the run can't import; fall back to the deterministic,
+                # installed pick. When the block was the CLUSTER veto (not a local
+                # install gap), that's the model's best-fit engine being passed
+                # over: note it for the researcher.
                 if self.execute_slurm and _cluster_cannot_run(primary_key):
                     cluster_blocked.append(
                         picked.entry.name if picked else recommendation.libraries[0])
@@ -1470,6 +1626,13 @@ class StateMachine:
                 # deterministic pick, which filters those out.
                 cluster_blocked.append(rec_calc.name)
                 recommendation = None
+            elif driver and driver in {n.lower() for n in missing_named}:
+                # The calculator can't be driven without its driver library, so the
+                # whole recommendation is unrunnable, not just trimmable.
+                recommendation = None
+            else:
+                # Primary (and driver) are fine; carry on without the missing extras.
+                recommendation.libraries = installed_named
         if recommendation is not None:
             libraries = recommendation.libraries
             primary = self._candidate_by_name(ranked, libraries[0]) or ranked[0]
@@ -1507,10 +1670,16 @@ class StateMachine:
         execution_plan.selected_method.libraries = libraries
         if selection_note:
             execution_plan.safety_notes.append(selection_note)
-        if dropped_uninstalled:
+        # Candidates filtered for not being installed. Any of them that TWAIN
+        # actually wanted gets its own, fuller note below (with its install
+        # request), so it is left out here rather than mentioned twice.
+        asked_for = {_libreq.canonical_name(n) for n, _s, _r in pending_requests}
+        merely_skipped = [n for n in dropped_uninstalled
+                          if _libreq.canonical_name(n) not in asked_for]
+        if merely_skipped:
             execution_plan.safety_notes.append(
                 "Discovery skipped candidate(s) not installed in the run "
-                "environment: " + ", ".join(dropped_uninstalled))
+                "environment: " + ", ".join(merely_skipped))
         if cluster_blocked:
             blocked = list(dict.fromkeys(cluster_blocked))
             picked_desc = calc_entry.name if calc_entry is not None else libraries[0]
@@ -1527,6 +1696,25 @@ class StateMachine:
             execution_plan.safety_notes.append(
                 f"Dropped from the toolset (no build in the '{SIM_ENV}' environment "
                 f"where the calculator runs): {', '.join(dropped_unrunnable)}")
+
+        # The toolset is settled, so every library TWAIN wanted but couldn't use can
+        # now be recorded against the installed library that replaced it. Each ask
+        # is ledgered, filed as a 'LibraryAddition' GitHub issue (deduplicated, so a
+        # recurring wish is one issue), and reported to the researcher right here on
+        # the plan -- the run itself stays on the preset libraries.
+        library_requests, seen_requests = [], set()
+        for name, source, reason in pending_requests:
+            key = _libreq.canonical_name(name)
+            if key in seen_requests:
+                continue
+            seen_requests.add(key)
+            req = self._request_library(name, source=source, reason=reason,
+                                        alternative=libraries[0], intent=intent)
+            if req is not None:
+                library_requests.append(req)
+        if library_requests:
+            execution_plan.library_requests = [r.as_dict() for r in library_requests]
+            execution_plan.safety_notes.extend(r.note() for r in library_requests)
 
         if calc_entry is not None:
             execution_plan.selected_method.calculator = calc_entry.name
@@ -1675,7 +1863,8 @@ class StateMachine:
                 return c
         return None
 
-    def _llm_recommend(self, intent, ranked, requested_property, domain, platform):
+    def _llm_recommend(self, intent, ranked, requested_property, domain, platform,
+                       requested_libraries=None):
         """Ask the LLM to pick a toolset, grounded by platform availability.
 
         Returns a ToolRecommendation, or None (no agent wired, or the pick
@@ -1706,6 +1895,7 @@ class StateMachine:
                 objective=intent.get("objective", ""), material=material, domain=domain,
                 requested_property=requested_property, platform=platform,
                 libraries=library_candidates, calculators=calc_candidates,
+                requested_libraries=requested_libraries,
                 agent=self._agent_text,
             )
         except Exception:  # noqa: BLE001 - any failure -> deterministic fallback

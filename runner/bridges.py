@@ -315,7 +315,18 @@ def _plan_summary(
         "slurm_request": plan.get("slurm_request"),
         "slurm_rationale": plan.get("slurm_rationale"),
         "acceptance_metrics": plan.get("acceptance_metrics"),
+        # The researcher approves the *toolset*, so every substitution planning had
+        # to make has to be legible at the gate — which engine it fell back to, and
+        # which libraries it wanted but isn't allowed to use because they aren't
+        # installed. safety_notes already carries the prose for both.
         "safety_notes": plan.get("safety_notes"),
+        # The install requests behind those notes, trimmed to what the researcher
+        # can act on (the ledger keeps the rest). See
+        # method_discovery.library_requests.
+        "library_requests": [
+            {k: req.get(k) for k in ("library", "source", "status", "issue_url")}
+            for req in (plan.get("library_requests") or [])
+        ] or None,
     }
     # The card offers editable resource fields whichever way the run is routed,
     # so it needs the ceilings either way -- and they must be the ceilings of the

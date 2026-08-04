@@ -105,6 +105,12 @@ class IntentSpec:
     system_descriptors: Union[dict, SystemDescriptors]
     acceptance_criteria: List[Union[AcceptanceCriterion,dict]]
     metadata:Union[IntentSpecMetadata,dict]
+    # Software the user explicitly named ("use GPAW", "run it in VASP"), verbatim
+    # and in the order mentioned. Discovery honours a request it can import and,
+    # when it can't, records a 'LibraryAddition' install request and plans with a
+    # preset library instead (method_discovery.library_requests). Optional, so
+    # every existing spec, artifact, and test stays valid.
+    requested_libraries: List[str] = field(default_factory=list)
     def __post_init__(self):
         if not self.objective or type(self.objective) is not str:
             raise ValueError("Objective must be of type str")
@@ -129,6 +135,12 @@ class IntentSpec:
                 raise ValueError("Invalid criterion type, must be a dict or AcceptanceCriterion object")
 
         self.acceptance_criteria = validated_acceptance_criteria
+
+        if self.requested_libraries is None:
+            self.requested_libraries = []
+        if type(self.requested_libraries) is not list or any(
+                type(lib) is not str for lib in self.requested_libraries):
+            raise ValueError("requested_libraries must be a list of str")
 
         if type(self.metadata) is dict:
             self.metadata = IntentSpecMetadata(**self.metadata)

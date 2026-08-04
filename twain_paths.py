@@ -49,6 +49,12 @@ DB_PATH = LOGS_ROOT / "sessions.db"
 # Event-bus schema-validation log.
 EVENT_BUS_LOG = LOGS_ROOT / "event_bus.log"
 
+# Deduplicated ledger of libraries TWAIN wanted but could not use because they
+# are not in the preset install set (see
+# modules/04_method_discovery/library_requests.py). Shared across runs on purpose:
+# it is what keeps one recurring wish from filing a new GitHub issue every run.
+LIBRARY_REQUESTS_PATH = LOGS_ROOT / "library_requests.json"
+
 
 def ensure_dirs() -> None:
     """Create the log directories if they don't exist (idempotent)."""

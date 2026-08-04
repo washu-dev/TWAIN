@@ -408,6 +408,32 @@ class TestApprovalGate:
         assert summary["slurm_limits"].get("ram") != 900
         assert summary["slurm_limits"].get("cpu_count") != 64
 
+    def test_posted_plan_shows_substitutions_and_library_requests(self):
+        """The researcher approves a toolset, so what planning had to substitute
+        must be visible at the gate -- including a library TWAIN wanted but isn't
+        allowed to use because it isn't installed (a 'LibraryAddition' request)."""
+        db = FakeDB()
+        post_plan_for_approval(db, SESSION, {
+            "selected_method": {"tool_name": "ASE", "libraries": ["ASE"]},
+            "safety_notes": ["You asked for 'VASP', which is not installed ..."],
+            "library_requests": [{
+                "library": "VASP", "source": "user", "status": "issue_created",
+                "issue_url": "https://github.com/o/r/issues/7",
+                "run_id": "r1", "occurrences": 1,  # ledger detail, not for the gate
+            }],
+        })
+        posted = json.loads(db.messages[0]["content"])
+        assert "VASP" in posted["safety_notes"][0]
+        assert posted["library_requests"] == [{
+            "library": "VASP", "source": "user", "status": "issue_created",
+            "issue_url": "https://github.com/o/r/issues/7",
+        }]
+
+    def test_plan_without_library_requests_omits_them(self):
+        db = FakeDB()
+        post_plan_for_approval(db, SESSION, {"cost": 1.0})
+        assert json.loads(db.messages[0]["content"])["library_requests"] is None
+
 
 # ── process_job / the drive loop ──────────────────────────────────────────────
 class TestProcessJob:

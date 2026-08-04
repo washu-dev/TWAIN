@@ -97,6 +97,63 @@
         "type": "string"
       }
     },
+    "library_requests": {
+      "description": "Libraries this plan wanted but could not use because they are not in the preset install set. Each was recorded and filed as a 'LibraryAddition' GitHub issue; the plan itself only ever uses installed libraries. Mirrored into safety_notes for the researcher.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["library", "source", "status"],
+        "properties": {
+          "library": {
+            "description": "The library that was asked for, as named.",
+            "type": "string"
+          },
+          "canonical": {
+            "description": "Dedup key for the library name (lowercased, hyphenated).",
+            "type": "string"
+          },
+          "source": {
+            "description": "Who wanted it: the researcher, the discovery LLM, or the registry ranking.",
+            "type": "string",
+            "enum": ["user", "llm_discovery", "discovery_ranking"]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "alternative": {
+            "description": "The installed library used instead.",
+            "type": ["string", "null"]
+          },
+          "objective": {
+            "type": ["string", "null"]
+          },
+          "run_id": {
+            "type": ["string", "null"]
+          },
+          "status": {
+            "description": "Outcome of filing the GitHub issue. 'queued' means recorded locally only (no GitHub credentials configured).",
+            "type": "string",
+            "enum": ["issue_created", "issue_exists", "queued", "issue_failed"]
+          },
+          "issue_number": {
+            "type": ["integer", "null"]
+          },
+          "issue_url": {
+            "type": ["string", "null"]
+          },
+          "first_requested_at": {
+            "type": "string"
+          },
+          "last_requested_at": {
+            "type": "string"
+          },
+          "occurrences": {
+            "description": "How many times this library has been asked for across all runs.",
+            "type": "integer"
+          }
+        }
+      }
+    },
     "summary": {
       "description": "Plain-language description of what the run will do (property, system, toolset, approach).",
       "type": ["string", "null"]

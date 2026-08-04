@@ -9,6 +9,7 @@
       "SMILES": "CC(=O)O"
     }
   },
+  "requested_libraries": [],
   "acceptance_criteria": [
     {
       "metric_name": "Metric1",
