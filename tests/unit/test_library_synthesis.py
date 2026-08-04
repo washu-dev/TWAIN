@@ -8,13 +8,14 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "modules" / "06_code_configuration_builder"))
 sys.path.insert(0, str(REPO_ROOT / "modules" / "16_agent_mesh_control_plane"))
 
-from codegen_engine import CodegenEngine, _GENERIC  # noqa: E402
+from codegen_engine import CodegenEngine, SynthesisFailed, _GENERIC  # noqa: E402
 
 # A minimal, valid PySCF HOMO-LUMO script a stub "agent" returns.
 PYSCF_SCRIPT = '''\
@@ -87,10 +88,16 @@ def test_library_only_falls_back_when_synthesis_invalid():
     assert bundle.template_name == _GENERIC.filename
 
 
-def test_library_run_without_property_stays_generic():
-    # No requested_property -> nothing to compute -> template path, no synthesis.
-    bundle = CodegenEngine().generate(_plan(requested_property=None),
-                                      agent=lambda p: PYSCF_SCRIPT)
+def test_library_run_with_nothing_to_compute_stays_generic():
+    # Neither a requested_property NOR an acceptance metric: nothing names a
+    # quantity, so there is genuinely nothing to synthesize and the template
+    # stands. (A plan with a metric but no requested_property is a different
+    # case -- the metric names the quantity, so it gets real code. Treating the
+    # two alike is what scaffolded Slurm job 2571447; see
+    # TestNullRequestedPropertyStillGetsRealCode.)
+    bundle = CodegenEngine().generate(
+        _plan(requested_property=None, acceptance_metrics=[]),
+        agent=lambda p: PYSCF_SCRIPT)
     assert bundle.template_name == _GENERIC.filename
 
 
@@ -263,3 +270,216 @@ def test_crystal_polymorph_reaches_codegen_prompt():
     CodegenEngine().generate(plan, agent=agent)
     assert "anatase" in seen["prompt"].lower()
     assert "I41/amd" in seen["prompt"]
+
+
+# ── a run that will EXECUTE must not ship the placeholder scaffold ────────────
+
+# Compiles and references the library, but defines a function it never calls:
+# the fingerprint of a reply cut off at the token cap. Must name the plan's own
+# library (pyscf) or it is rejected earlier, for the wrong reason.
+PSI4_SCRIPT = """import psi4
+
+def main():
+    psi4.set_memory('500 MB')
+    mol = psi4.geometry('O=C=O')
+    print(psi4.energy('scf/cc-pvdz'))
+
+if __name__ == '__main__':
+    main()
+"""
+
+
+TRUNCATED_REPLY = (
+    "from pyscf import gto, scf\n\n"
+    "def compute_gap(mol):\n"
+    "    mf = scf.RHF(mol).run()\n"
+    "    return mf.mo_energy\n"
+)
+
+
+class TestRequireSynthesis:
+    """Slurm job 2569967 "completed successfully" in 5 seconds having computed
+    nothing: synthesis failed, BUILD silently substituted the generic scaffold,
+    and the scaffold loads the tool, writes a stub and exits 0 -- so the payload,
+    the scheduler and TWAIN all reported success.
+    """
+
+    def test_planning_only_still_falls_back(self):
+        """The bundle is a deliverable to read there, so the scaffold is fine."""
+        bundle = CodegenEngine().generate(
+            _plan(), agent=lambda p: TRUNCATED_REPLY, require_synthesis=False)
+        assert bundle.template_name == _GENERIC.filename
+
+    def test_a_run_that_will_execute_refuses_the_scaffold(self):
+        with pytest.raises(SynthesisFailed) as exc:
+            CodegenEngine().generate(
+                _plan(), agent=lambda p: TRUNCATED_REPLY, require_synthesis=True)
+        assert "computed nothing" in str(exc.value)
+
+    def test_the_failure_names_the_truncation(self):
+        """no_entrypoint is the fingerprint of hitting the token cap, and saying
+        so is the difference between a fixable report and a guess."""
+        with pytest.raises(SynthesisFailed) as exc:
+            CodegenEngine().generate(
+                _plan(), agent=lambda p: TRUNCATED_REPLY, require_synthesis=True)
+        assert "no_entrypoint" in str(exc.value)
+        assert "truncated" in str(exc.value)
+
+    def test_a_gateway_error_is_named_not_swallowed(self):
+        def broken(_prompt):
+            raise TimeoutError("gateway did not respond")
+
+        with pytest.raises(SynthesisFailed) as exc:
+            CodegenEngine().generate(_plan(), agent=broken, require_synthesis=True)
+        assert "agent_error: TimeoutError" in str(exc.value)
+        assert "gateway did not respond" in str(exc.value)
+
+    def test_it_retries_before_giving_up(self):
+        """One draw is flaky; the second often works. REPAIR already does this."""
+        calls = []
+
+        def flaky(prompt):
+            calls.append(prompt)
+            return TRUNCATED_REPLY if len(calls) == 1 else PYSCF_SCRIPT
+
+        bundle = CodegenEngine().generate(
+            _plan(), agent=flaky, require_synthesis=True)
+        assert len(calls) == 2
+        assert bundle.template_name == "llm_synthesized"
+
+    def test_every_attempt_is_recorded_on_failure(self):
+        engine = CodegenEngine()
+        with pytest.raises(SynthesisFailed):
+            engine.generate(_plan(), agent=lambda p: TRUNCATED_REPLY,
+                            require_synthesis=True)
+        report = engine.last_synthesis
+        assert report["ok"] is False
+        assert len(report["attempts"]) == CodegenEngine.SYNTHESIS_ATTEMPTS
+        assert all("no_entrypoint" in a["reason"] for a in report["attempts"])
+        assert all(a["reply_chars"] > 0 for a in report["attempts"])
+
+    def test_a_success_records_which_attempt_worked(self):
+        engine = CodegenEngine()
+        engine.generate(_plan(), agent=lambda p: PYSCF_SCRIPT, require_synthesis=True)
+        assert engine.last_synthesis == {
+            "ok": True, "attempts": [], "attempt": 1,
+            "reply_chars": len(PYSCF_SCRIPT),
+        }
+
+
+class TestBuildRefusesAScaffoldedExecution:
+    """BUILD is where the decision has consequences: a scaffolded bundle that
+    will be submitted to Slurm burns the allocation and reports success.
+
+    The state machine reaches codegen through the ``code_gen`` package alias, so
+    it raises THAT module's SynthesisFailed -- a different class object from the
+    bare ``codegen_engine`` import above, for the same file. Catching the wrong
+    one silently misses the exception, so these tests use the aliased class.
+    """
+
+    @staticmethod
+    def _error_class():
+        from code_gen.codegen_engine import SynthesisFailed as Aliased
+        return Aliased
+
+    def _machine(self, tmp_path, reply, **flags):
+        import statemachine as SM
+        from crash_recovery import DataStorage
+        with patch.object(DataStorage, "load", return_value=None):
+            m = SM.StateMachine(data_path=str(tmp_path / "s.json"), run_id="build",
+                                agent=lambda p: reply, **flags)
+        m.artifacts_dir = tmp_path
+        plan = _plan()
+        path = tmp_path / "execution_plan.json"
+        path.write_text(json.dumps(plan))
+        m.context.artifacts["execution_plan"] = str(path)
+        return m
+
+    def test_a_slurm_run_fails_build_instead_of_shipping_a_stub(self, tmp_path):
+        m = self._machine(tmp_path, TRUNCATED_REPLY, execute_slurm=True)
+        with pytest.raises(self._error_class()):
+            m.build()
+        assert "run_bundle" not in m.context.artifacts   # nothing to submit
+
+    def test_a_local_execution_run_also_refuses(self, tmp_path):
+        m = self._machine(tmp_path, TRUNCATED_REPLY, execute_locally=True)
+        with pytest.raises(self._error_class()):
+            m.build()
+
+    def test_a_planning_only_run_still_gets_its_bundle(self, tmp_path):
+        """Nothing will execute, so the scaffold remains a useful deliverable."""
+        m = self._machine(tmp_path, TRUNCATED_REPLY)
+        m.build()
+        assert Path(m.context.artifacts["run_bundle"]).is_dir()
+
+    def test_the_reasons_are_written_to_an_artifact(self, tmp_path):
+        """The gap that left a scaffolded RIS run unexplained."""
+        m = self._machine(tmp_path, TRUNCATED_REPLY, execute_slurm=True)
+        with pytest.raises(self._error_class()):
+            m.build()
+        report = json.loads(Path(m.context.artifacts["codegen_report"]).read_text())
+        assert report["ok"] is False
+        assert all("no_entrypoint" in a["reason"] for a in report["attempts"])
+
+    def test_a_successful_build_records_the_report_too(self, tmp_path):
+        m = self._machine(tmp_path, PYSCF_SCRIPT, execute_slurm=True)
+        m.build()
+        report = json.loads(Path(m.context.artifacts["codegen_report"]).read_text())
+        assert report["ok"] is True and report["attempt"] == 1
+
+
+class TestNullRequestedPropertyStillGetsRealCode:
+    """Regression for Slurm job 2571447, the run that scaffolded a *second* time
+    after the first guard went in.
+
+    Its plan named an acceptance metric but carried requested_property=None, and
+    the library-only branch gated synthesis on requested_property alone. So no
+    synthesis was attempted at all, _generate_standard rendered the placeholder,
+    and the guard -- which lived inside the synthesis path -- was never reached.
+    """
+
+    def _psi4_plan(self):
+        return {
+            "selected_method": {"tool_name": "Psi4", "libraries": ["Psi4"],
+                                "calculator": None, "calculator_import": None,
+                                "calculator_library": "Psi4"},
+            "requested_property": None,          # the null that caused this
+            "metadata": {"timestamp": "t", "goal_id": "g1", "candidate_rank": 1},
+            "acceptance_metrics": [{
+                "metric_name": "standard_heat_of_formation_kJ_per_mol",
+                "target_value": -393.5, "tolerance": 5.0}],
+            "compute_estimate": {"cpu_hours": 1.0},
+            "cost_estimate": {"min_cost": 0.1},
+            "slurm_request": {"cpu_count": 2, "gpu_count": 0, "max_time": 1.0, "ram": 8},
+            "safety_notes": [],
+            "target_system": {"molecule": {"name": "carbon dioxide", "SMILES": "O=C=O"}},
+        }
+
+    def test_synthesis_is_attempted_from_the_metric_name(self):
+        """The metric names what the run is for, so it is enough to ask for code."""
+        prompts = []
+        CodegenEngine().generate(
+            self._psi4_plan(), agent=lambda p: (prompts.append(p), PSI4_SCRIPT)[1])
+        assert prompts, "no synthesis was attempted"
+        assert "standard_heat_of_formation_kJ_per_mol" in prompts[0]
+
+    def test_a_synthesized_script_is_used(self):
+        bundle = CodegenEngine().generate(
+            self._psi4_plan(), agent=lambda p: PSI4_SCRIPT)
+        assert bundle.template_name == "llm_synthesized"
+
+    def test_an_executing_run_refuses_the_scaffold_on_this_path_too(self):
+        """The guard has to sit where the scaffold is CHOSEN, not only on the
+        synthesis route -- this plan reaches it by a different road."""
+        with pytest.raises(SynthesisFailed):
+            CodegenEngine().generate(
+                self._psi4_plan(), agent=lambda p: "print('nope')\n",
+                require_synthesis=True)
+
+    def test_it_refuses_even_with_no_agent_at_all(self):
+        with pytest.raises(SynthesisFailed):
+            CodegenEngine().generate(self._psi4_plan(), require_synthesis=True)
+
+    def test_planning_only_still_gets_the_scaffold(self):
+        bundle = CodegenEngine().generate(self._psi4_plan())
+        assert bundle.template_name == _GENERIC.filename

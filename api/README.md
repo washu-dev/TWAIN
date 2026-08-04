@@ -1,97 +1,76 @@
-# TWAIN API Module
+# TWAIN API
 
-FastAPI module for TWAIN backend with PostgreSQL database connection.
+FastAPI backend for the TWAIN web UI. It is a **light request-server**: it
+validates auth, does CRUD on Postgres, enqueues runs into the `jobs` table, and
+streams progress back to the browser. It never drives the pipeline itself — the
+**runner** service claims jobs and runs the engine (see
+[`../docs/architecture/web_ui_plan.md`](../docs/architecture/web_ui_plan.md)).
 
 ## Setup
 
-### 1. Install Dependencies
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt          # or use the repo pixi env
+cp .env.example .env                      # then edit DB + auth settings
 ```
 
-### 2. Configure Database Connection
-
-DB connection properties are read from **AWS Secrets Manager** under the
-`TWAIN/database/*` group (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`,
-`DB_PASSWORD`), managed by the Terraform in `../terraform`.
-
-**In AWS (ECS/Fargate):** the task role is `TWAIN-secrets-reader` (see
-`ecs-task-definition.json`), so the container reads + decrypts the secrets with
-its default credentials — no DB values in the task definition.
-
-**Locally:** set the reader role in `.env` so your IAM user assumes it:
-```
-AWS_REGION=us-east-1
-TWAIN_SECRET_PREFIX=TWAIN/database
-TWAIN_SECRETS_ROLE_ARN=arn:aws:iam::730335203321:role/TWAIN-secrets-reader
-```
-
-**Offline (no AWS):** set `TWAIN_DB_FROM_ENV=true` and provide the `DB_*` values
-directly in `.env` instead.
-
-To change a credential, edit `../terraform/secrets.json` and run
-`terraform apply` — do not put DB credentials in this service's env or code.
-
-### 3. Create Greetings Table (First Time Only)
-```bash
-psql -U postgres -h localhost -d twain_db
-```
-
-Then run this SQL:
-```sql
-CREATE TABLE IF NOT EXISTS greetings (
-    id SERIAL PRIMARY KEY,
-    message VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-INSERT INTO greetings (message) VALUES
-    ('Hello, TWAIN!'),
-    ('Welcome to the API'),
-    ('Greetings from FastAPI');
-```
-
-## Running the API
+The schema lives in [`migrations/`](migrations); apply every file to your
+database (the repo-root [`../dev.sh`](../dev.sh) does this automatically):
 
 ```bash
-python main.py
+for f in migrations/*.sql; do psql -d twaindb -f "$f"; done
 ```
 
-The API will start on `http://localhost:8000`
+## Configuration (env)
 
-- **API Documentation**: http://localhost:8000/docs
-- **Alternative Docs**: http://localhost:8000/redoc
+| Var | Effect |
+|---|---|
+| `DB_HOST/PORT/NAME/USER/PASSWORD` | Postgres connection |
+| `AWS_SECRET_ARN` | if set, DB password is resolved from Secrets Manager instead of `DB_PASSWORD` |
+| `AUTH_DISABLED` | `true` for local dev — every request is a dev admin (never in production) |
+| `INTERIM_JWT_SECRET` | enables interim email login (`POST /api/auth/login`); the HS256 signing key |
+| `INTERIM_ALLOWED_DOMAINS` / `INTERIM_ALLOWED_EMAILS` | who may sign in via interim auth (default domain `wustl.edu`) |
+| `ENTRA_TENANT_ID` / `ENTRA_API_AUDIENCE` | Entra (WashU SSO) JWT validation, once SSO is wired up |
+| `BOOTSTRAP_ADMIN_EMAILS` | seed admins promoted on first login |
+
+See [`.env.example`](.env.example) for the full list.
+
+## Running
+
+```bash
+python main.py           # dev server on http://localhost:8000 (reload on)
+# or: uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Interactive docs: <http://localhost:8000/docs>.
 
 ## Endpoints
 
-### Health Check
-```
-GET /api/health
-```
-Returns: `{"status": "ok"}`
+All endpoints require a valid bearer token except `/api/health` and
+`/api/auth/login`. Auth is either an interim session token (HS256) or an Entra
+access token (RS256) — both are accepted, routed by algorithm.
 
-### Get Greetings
-```
-GET /api/greetings
-```
-Returns:
-```json
-{
-  "data": [
-    {"message": "Hello, TWAIN!"},
-    {"message": "Welcome to the API"}
-  ],
-  "count": 2,
-  "message": "Greetings retrieved successfully"
-}
-```
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | liveness check |
+| POST | `/api/auth/login` | interim email sign-in → `{ token, user }` |
+| GET | `/api/me` | current user (id, email, name, role) |
+| GET | `/api/admin/users` · PATCH `/api/admin/users/{id}/role` | admin: list / set roles |
+| POST | `/api/conversations` | start a run from a prompt → enqueues a `start` job |
+| GET | `/api/conversations` · `/api/conversations/{id}` | list mine · one with transcript |
+| POST | `/api/conversations/{id}/messages` | add a chat / clarification reply |
+| POST | `/api/conversations/{id}/approval` | answer the plan-approval gate |
+| GET | `/api/conversations/{id}/stream` | **SSE** of pipeline progress (`run_events`) |
+| GET | `/api/conversations/{id}/report` | run summary + artifact list |
+| GET | `/api/conversations/{id}/artifacts` · `/artifacts/{name}` | list · fetch one artifact |
 
 ### Report an issue about a run
 
 A researcher can report a problem from the run window without leaving TWAIN; the
 run's own data is attached server-side, so a maintainer never has to ask what was
-being run. See `github_issues.py` (labels + issue body) and `run_issues.py` (the
-snapshot + the local record).
+being run. See `run_issue_github.py` (labels + issue body) and `run_issues.py`
+(the snapshot + the local record). This is distinct from `POST /api/issues`
+(`github_issues.py`), which files a plain title+body issue — that is what the
+one-tap "provision this engine" request on the approval card uses.
 
 ```
 GET  /api/conversations/{id}/issue-context   # exactly what would be attached, + whether GitHub is configured
@@ -113,53 +92,40 @@ The response `status` is:
 | `queued` | no GitHub credentials in this deployment — the report is saved against the run, nothing was filed |
 | `failed` | GitHub refused or was unreachable; `error` says why. The report is still saved |
 
-Configuration (all optional — without them the endpoints work and record
-locally):
+Credentials are resolved by `github_issues.py`, which is the single GitHub
+identity for the whole API — so configuring the PAT once enables both this and
+`POST /api/issues`:
 
 | Env var | Effect |
 |---|---|
-| `TWAIN_GITHUB_TOKEN` | PAT used to file issues (falls back to `GITHUB_TOKEN`). Needs read+write on Issues for the repo |
-| `TWAIN_GITHUB_REPO` | `owner/repo` the issues go to. Required — there is no git remote inside the container |
-| `TWAIN_RUN_ISSUES=0` | force off, so a staging deployment can't post to the tracker |
+| `GITHUB_ISSUE_TOKEN` | the PAT. Needs read+write on Issues for the repo. When unset, read from Secrets Manager at `TWAIN_GITHUB_SECRET_ID` (default `TWAIN/github/GITHUB_ISSUE_TOKEN`) |
+| `GITHUB_ISSUE_REPO` | `owner/repo` the issues go to (default `washu-dev/TWAIN`). There is no git remote inside the container, so this is configuration-only |
+| `TWAIN_RUN_ISSUES=0` | force run reports off, so a staging deployment can't post to the tracker |
 
-To enable it on ECS, put the PAT in Secrets Manager and add it to
-`ecs-task-definition.json` (`TWAIN_GITHUB_REPO` is already in `environment`):
+Without a PAT the run-report endpoints still work: a report is recorded against
+the run with status `queued`. `POST /api/issues` instead returns 502, since there
+the user explicitly asked to file an issue.
 
-```json
-"secrets": [
-  {
-    "name": "TWAIN_GITHUB_TOKEN",
-    "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/github/TWAIN_GITHUB_TOKEN"
-  }
-]
-```
-
-The secret must exist before deploying — ECS fails the task if a referenced
-secret is missing, which is why the entry is documented here rather than
-committed.
-
-## Running Tests
+## Tests
 
 ```bash
-pytest test_api.py -v
+pytest -q            # unit tests (fakes for DB; no Postgres needed)
+ruff check .
 ```
 
-Run specific test:
-```bash
-pytest test_api.py::TestGreetingsEndpoint::test_greetings_endpoint_returns_200 -v
-```
-
-## Project Structure
+## Project structure
 
 ```
 api/
-├── __init__.py           # Package init
-├── main.py               # FastAPI app and endpoints
-├── database.py           # Database connection logic
-├── github_issues.py      # Filing run reports as GitHub issues (labels, body)
+├── main.py               # FastAPI app + routes
+├── auth.py               # bearer-token auth: interim (HS256) + Entra (RS256)
+├── conversations.py      # conversation/message/artifact/event data access
+├── database.py           # Postgres connection + user CRUD (Secrets Manager aware)
+├── github_issues.py      # GitHub identity + plain title+body issues (POST /api/issues)
+├── run_issue_github.py   # Run reports as GitHub issues: labels + issue body
 ├── run_issues.py         # The run snapshot attached to a report + its local record
-├── .env                  # Database credentials (not in git)
-├── requirements.txt      # Python dependencies
-├── test_api.py           # Test suite
-└── README.md             # This file
+├── migrate.py            # Applies migrations/ on startup (advisory-locked, idempotent)
+├── migrations/           # idempotent SQL schema
+├── requirements.txt
+└── test_*.py             # test suite
 ```

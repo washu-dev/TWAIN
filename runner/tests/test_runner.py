@@ -1,20 +1,28 @@
 """Unit tests for the async runner — fakes stand in for the DB and the engine, so
 no Postgres or pixi environment is needed. These exercise the suspend/resume
 model: a run advances until it needs the user, then *releases* the process (it
-never blocks polling), and a ``resume`` job picks it back up.
+never blocks polling), and a ``resume`` job picks it back up. They also cover the
+``rerun`` path (rewind to an earlier stage) and the per-run budget heads-up.
 """
 import json
 import threading
 import types
+from pathlib import Path
 
 import pytest
 
 from runner import runner
-from runner.artifacts import capture_artifacts, rehydrate_artifacts
+from runner.artifacts import (
+    capture_artifacts,
+    rehydrate_artifacts,
+    rematerialize_inputs,
+)
 from runner.bridges import (
     DbAsk,
     PgEventSink,
+    awaiting_reject_feedback,
     consume_approval,
+    consume_reject_feedback,
     post_plan_for_approval,
 )
 from runner.pg_store import PgStore
@@ -35,8 +43,10 @@ class FakeDB:
         self._jobs = list(jobs or [])
         self.sessions = {}
         self.artifacts = []
+        self.owner = None  # {"email", "name", "phone"} that owner_contact returns
         self._reap_batches = []  # each run_loop reap() call pops one batch of dead jobs
         self._next_id = 1
+        self.terminate = False  # flip True to simulate the user pressing Terminate
 
     # -- message helpers --------------------------------------------------------
     def _add(self, role, content, kind, state=None):
@@ -53,18 +63,36 @@ class FakeDB:
     def add_user(self, content, kind="chat"):  # test-only helper
         return self._add("user", content, kind)
 
+    def preload_approval(self, decision="approve"):  # test-only helper
+        """Seed an already-recorded approval decision (as if the user replied)."""
+        self.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        self.add_user(decision, kind="approval_response")
+
     def max_message_id(self, sid):
         return self.messages[-1]["id"] if self.messages else 0
 
     def last_question_id(self, sid, kinds=("clarification",)):
-        ids = [m["id"] for m in self.messages if m["role"] == "assistant" and m["kind"] in kinds]
+        # Mirrors the real query: questions retired by a re-run are skipped.
+        ids = [m["id"] for m in self.messages
+               if m["role"] == "assistant" and m["kind"] in kinds
+               and m.get("state") != "consumed"]
         return max(ids) if ids else None
+
+    def retire_questions(self, sid):  # test-only: what a re-run does in SQL
+        for m in self.messages:
+            if m["role"] == "assistant" and m["kind"] in ("clarification", "approval_request"):
+                m["state"] = "consumed"
 
     def user_replies_after(self, sid, after_id, kind=None):
         return [
             m for m in self.messages
             if m["role"] == "user" and m["id"] > after_id and (kind is None or m["kind"] == kind)
         ]
+
+    def mark_reply_consumed(self, message_id):
+        for m in self.messages:
+            if m["id"] == message_id:
+                m["state"] = "consumed"
 
     # -- status / state / events ------------------------------------------------
     def set_conversation_status(self, sid, status):
@@ -73,14 +101,33 @@ class FakeDB:
     def set_conversation_state(self, sid, state):
         self.state = state
 
+    def owner_contact(self, sid):
+        return self.owner
+
+    def run_title(self, sid):
+        return "Predict the band gap of silicon"
+
+    def terminate_requested(self, sid):
+        return self.terminate
+
     def insert_run_event(self, sid, event_type, payload, seq=None):
         self.events.append({"event_type": event_type, "payload": payload})
 
     def upsert_artifact(self, sid, name, content, kind):
+        self.artifacts = [a for a in self.artifacts if a["name"] != name]
         self.artifacts.append({"name": name, "content": content, "kind": kind})
+
+    def delete_artifact(self, sid, name):
+        self.artifacts = [a for a in self.artifacts if a["name"] != name]
 
     def get_artifacts(self, sid):
         return [{"name": a["name"], "content": a["content"]} for a in self.artifacts]
+
+    def get_artifact(self, sid, name):
+        for a in self.artifacts:
+            if a["name"] == name:
+                return a
+        return None
 
     # -- jobs -------------------------------------------------------------------
     def claim_job(self):
@@ -128,19 +175,24 @@ class FakeOrchestrator:
     Drives INTAKE → (CLARIFY) → pause at BUILD on leg 1, then → (EXECUTE heavy) →
     TERMINATE on leg 2. Calls the injected ``ask`` at CLARIFY / heavy-calc; if it
     raises :class:`SuspendRun` we stay in the current state and return "paused"
-    (exactly what ``Orchestrator.run`` does).
+    (exactly what ``Orchestrator.run`` does). ``run_budget`` mirrors the real
+    orchestrator's per-run cap so the pre-flight budget warning has something to
+    compare the plan estimate against.
     """
 
-    def __init__(self, ask, sink, *, clarifies=False, heavy=False):
+    def __init__(self, ask, sink, *, clarifies=False, heavy=False, max_cost=1.0,
+                 declines=False):
         self.ask = ask
         self.sink = sink
         self.sm = types.SimpleNamespace(
             context=types.SimpleNamespace(artifacts={}),
             current_state=types.SimpleNamespace(name="INTAKE"),
         )
+        self.run_budget = types.SimpleNamespace(max_cost=max_cost)
         self._clarified = not clarifies
         self._heavy = heavy
         self._heavy_done = False
+        self._declines = declines
 
     def _set(self, name):
         self.sm.current_state = types.SimpleNamespace(name=name)
@@ -153,6 +205,12 @@ class FakeOrchestrator:
             return "paused"
 
     def _run(self, until):
+        # An off-topic decline ends the run at INTAKE, before clarification or
+        # the approval gate -- leg 1 completes immediately instead of pausing.
+        if self._declines:
+            self._set("TERMINATE")
+            self.sink.publish(_event("run.completed", {"state": "TERMINATE"}))
+            return "completed"
         if not self._clarified:
             self._set("CLARIFY")
             self.ask("What temperature?")  # may raise SuspendRun (suspend) or return
@@ -173,19 +231,72 @@ class FakeOrchestrator:
 class FakeEngine:
     STATE_BUILD = "BUILD"
 
-    def __init__(self, plan=None, clarifies=False, heavy=False):
+    def __init__(self, plan=None, clarifies=False, heavy=False,
+                 compute_target="local", slurm_cluster="compute2", decline=None):
         self._plan = plan or {"selected_method": {"name": "demo-tool"}, "cost": 0.1}
         self._clarifies = clarifies
         self._heavy = heavy
+        self._decline = decline     # off-topic decline message, or None
+        self._compute_target = compute_target
+        self._slurm_cluster = slurm_cluster
+        self.built_with = None       # records build_orchestrator kwargs for assertions
+        self.applied_overrides = []  # slurm overrides applied on approve
+        self.rewound_to = None       # records the rewind target for rerun assertions
+        self.approved = False        # set when approve_plan() is called
+        self.replanned_with = []     # rejection feedback passed to replan_with_feedback
 
-    def build_orchestrator(self, *, session_id, researcher_id, request, ask, sink, store):
-        return FakeOrchestrator(ask, sink, clarifies=self._clarifies, heavy=self._heavy)
+    def build_orchestrator(
+        self, *, session_id, researcher_id, request, ask, sink, store,
+        cancel=None, max_cost=None,
+    ):
+        self.built_with = {
+            "session_id": session_id, "researcher_id": researcher_id,
+            "request": request, "max_cost": max_cost,
+        }
+        return FakeOrchestrator(
+            ask, sink, clarifies=self._clarifies, heavy=self._heavy,
+            max_cost=max_cost if max_cost is not None else 1.0,
+            declines=self._decline is not None,
+        )
 
     def current_state_name(self, orch):
         return orch.sm.current_state.name
 
+    def compute_target_of(self, orch):
+        return self._compute_target
+
+    def slurm_cluster_of(self, orch):
+        return self._slurm_cluster
+
+    def apply_slurm_overrides(self, orch, overrides):
+        self.applied_overrides.append(overrides)
+
+    def rewind(self, orch, target_state):
+        # A real rewind resets the run to `target_state`; the fake just records it
+        # (the fresh FakeOrchestrator already starts at leg 0, i.e. the top).
+        self.rewound_to = target_state
+
+    def replan_with_feedback(self, orch, feedback):
+        # The real engine folds the feedback into the intent and rewinds to
+        # DISCOVER; the fake records both so tests can assert the round-trip.
+        self.replanned_with.append(feedback)
+        self.rewound_to = "DISCOVER"
+
+    def approve_plan(self, orch):
+        # A real approve_plan flips the plan_approved guard flag; the fake records
+        # that it happened so a test can assert the run was actually approved.
+        self.approved = True
+
+    def plan_is_approved(self, orch):
+        # Mirrors the real engine reading context.plan_approved: once approved,
+        # a later BUILD re-entry (a correction pass) is not the approval gate.
+        return self.approved
+
     def read_execution_plan(self, orch):
         return self._plan
+
+    def decline_reason(self, orch):
+        return self._decline
 
     def final_summary(self, orch):
         return "Run complete."
@@ -253,9 +364,9 @@ class TestApprovalGate:
         assert db.status == "awaiting_approval"
         assert db.kinds() == ["approval_request"]
         assert notifier.calls and notifier.calls[0][1] == "approval"
-        assert consume_approval(db, SESSION) is None  # no decision yet
+        assert consume_approval(db, SESSION) == (None, None)  # no decision yet
         db.add_user("approve", kind="approval_response")
-        assert consume_approval(db, SESSION) == "approve"
+        assert consume_approval(db, SESSION) == ("approve", None)
 
     def test_post_is_idempotent(self):
         db = FakeDB()
@@ -267,7 +378,35 @@ class TestApprovalGate:
         db = FakeDB()
         post_plan_for_approval(db, SESSION, {"cost": 1.0})
         db.add_user("APPROVE", kind="approval_response")
-        assert consume_approval(db, SESSION) == "approve"
+        assert consume_approval(db, SESSION) == ("approve", None)
+
+    def test_slurm_card_carries_node_ceilings(self):
+        # A Slurm-routed plan's approval card includes the cluster's per-node
+        # maxima (from configs/clusters/compute2.json) so the editable resource
+        # fields can show and enforce how far a request can go.
+        from runner.bridges import _plan_summary
+        summary = _plan_summary(
+            {"metadata": {}}, compute_target="slurm", slurm_cluster="compute2")
+        limits = summary["slurm_limits"]
+        assert limits["cpu_count"] == 64
+        assert limits["gpu_count"] == 4
+        assert limits["ram"] == 900
+        assert limits["max_time"] == 360.0  # longest partition wall, in hours
+
+    def test_a_local_card_shows_this_machine_not_the_cluster(self):
+        """The card offers editable resource fields either way, so it needs the
+        ceilings either way -- but they must belong to whatever will actually run
+        it. Handing a laptop the cluster's 900 GB is worse than showing nothing.
+        """
+        from runner.bridges import _local_limits, _plan_summary
+        summary = _plan_summary({"metadata": {}}, compute_target="local")
+
+        assert summary["limits_source"] == "this machine"
+        assert summary["slurm_limits"] == _local_limits()
+        assert "slurm_cluster" not in summary
+        # never the cluster profile's figures
+        assert summary["slurm_limits"].get("ram") != 900
+        assert summary["slurm_limits"].get("cpu_count") != 64
 
     def test_posted_plan_shows_substitutions_and_library_requests(self):
         """The researcher approves a toolset, so what planning had to substitute
@@ -298,8 +437,8 @@ class TestApprovalGate:
 
 # ── process_job / the drive loop ──────────────────────────────────────────────
 class TestProcessJob:
-    def _job(self, kind="start"):
-        return {"session_id": SESSION, "kind": kind, "params": {}}
+    def _job(self, kind="start", **params):
+        return {"session_id": SESSION, "kind": kind, "params": params}
 
     def test_clarify_suspends_and_releases(self):
         db = FakeDB()
@@ -316,45 +455,280 @@ class TestProcessJob:
         assert db.status == "awaiting_approval"
         assert not any(e["event_type"] == "run.completed" for e in db.events)
 
+    def test_off_topic_run_declines_before_the_gate(self):
+        # Intake refused the request (e.g. "explain bitcoin"): the decline
+        # message is the final chat post, the conversation is marked rejected
+        # (nothing planned or executed), and no approval card ever appears.
+        db = FakeDB()
+        msg = "This doesn't look like a computational chemistry request."
+        runner.process_job(self._job(), db, FakeEngine(decline=msg))
+        assert db.status == "rejected"
+        assert db.messages[-1]["content"] == msg
+        assert db.messages[-1]["kind"] == "chat"
+        assert "approval_request" not in db.kinds()
+        assert "clarification" not in db.kinds()
+
     def test_approved_run_completes(self):
         # Decision already recorded (e.g. arrived before the runner reached BUILD,
         # or this is the resume that carries it): the run crosses the gate + finishes.
         db = FakeDB()
-        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
-        db.add_user("approve", kind="approval_response")
-        runner.process_job(self._job(), db, FakeEngine())
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        assert engine.approved is True          # plan_approved guard flag was set
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
         assert db.messages[-1]["content"] == "Run complete."
 
-    def test_rejected_run_stops_before_build(self):
+    def test_reject_asks_what_to_change_instead_of_stopping(self):
+        # A rejection no longer ends the run: the gate asks for revision
+        # feedback and waits, with nothing built or executed.
         db = FakeDB()
-        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
-        db.add_user("reject", kind="approval_response")
-        runner.process_job(self._job(), db, FakeEngine())
-        assert db.status == "rejected"
+        db.preload_approval("reject")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        assert db.status == "awaiting_input"
+        assert engine.approved is False         # never approved -> guard stays closed
         assert not any(e["event_type"] == "run.completed" for e in db.events)
-        assert "rejected" in db.messages[-1]["content"].lower()
+        assert db.messages[-1]["kind"] == "revision_request"
+        assert "what should change" in db.messages[-1]["content"].lower()
 
     def test_auto_run_skips_approval_gate(self, monkeypatch):
         monkeypatch.setenv("TWAIN_AUTO_RUN", "1")
         db = FakeDB()
-        runner.process_job(self._job(), db, FakeEngine())
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
         assert "approval_request" not in db.kinds()
+        assert engine.approved is True          # auto-approve still sets the guard
         assert db.status == "completed"
         assert any(e["event_type"] == "run.completed" for e in db.events)
 
     def test_resume_kind_is_supported(self):
         db = FakeDB()
-        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
-        db.add_user("approve", kind="approval_response")
+        db.preload_approval("approve")
         runner.process_job(self._job(kind="resume"), db, FakeEngine())
         assert db.status == "completed"
 
     def test_unsupported_kind_raises(self):
         db = FakeDB()
         with pytest.raises(NotImplementedError):
+            runner.process_job(self._job(kind="frobnicate"), db, FakeEngine())
+
+    def test_rerun_rewinds_then_drives_the_run(self):
+        # A 'rerun' job rewinds the run to the requested stage, posts a marker
+        # message, and drives it forward again through the approval gate.
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        runner.process_job(
+            self._job(kind="rerun", target_state="CLARIFY", researcher_id="u", request="r"),
+            db, engine,
+        )
+        assert engine.rewound_to == "CLARIFY"
+        assert any("CLARIFY" in m["content"] for m in db.messages)  # marker message
+        assert "approval_request" in [m["kind"] for m in db.messages]
+        assert db.status == "completed"
+
+    def test_rerun_requires_target_state(self):
+        db = FakeDB()
+        with pytest.raises(ValueError):
             runner.process_job(self._job(kind="rerun"), db, FakeEngine())
+
+    def test_rerun_with_feedback_folds_it_in_before_replanning(self):
+        # The mid-session revision path: a 'rerun' job carrying the researcher's
+        # "here's what to change" folds it into the intent (replan_with_feedback,
+        # same machinery as a plan rejection) and re-drives to a fresh approval
+        # card, all within the same conversation.
+        db = FakeDB()
+        engine = FakeEngine()
+        runner.process_job(
+            self._job(kind="rerun", target_state="DISCOVER",
+                      feedback="use xtb instead of DFT",
+                      researcher_id="u", request="r"),
+            db, engine,
+        )
+        assert engine.replanned_with == ["use xtb instead of DFT"]
+        assert engine.rewound_to == "DISCOVER"
+        assert any("Revising" in m["content"] for m in db.messages)  # marker
+        # The run re-drove to the gate and posted a fresh plan for approval.
+        assert "approval_request" in [m["kind"] for m in db.messages]
+        assert db.status == "awaiting_approval"
+
+    def test_feedback_reply_triggers_replan_and_a_fresh_card(self):
+        # Reject → the gate asks what to change → the reply is folded into the
+        # run (replan_with_feedback) and a NEW approval card is posted.
+        db = FakeDB()
+        db.preload_approval("reject")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)          # asks what to change
+        db.add_user("use xtb instead of GPAW")               # the revision feedback
+        runner.process_job(self._job(kind="resume"), db, engine)
+        assert engine.replanned_with == ["use xtb instead of GPAW"]
+        assert engine.rewound_to == "DISCOVER"
+        requests = [m for m in db.messages if m["kind"] == "approval_request"]
+        assert len(requests) == 2          # a fresh card for the revised plan
+        assert db.status == "awaiting_approval"
+
+    def test_approving_the_revised_plan_completes_the_run(self):
+        # Full round-trip: reject, give feedback, approve the revised plan.
+        db = FakeDB()
+        db.preload_approval("reject")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        db.add_user("skip the geometry optimization")
+        runner.process_job(self._job(kind="resume"), db, engine)
+        db.add_user("approve", kind="approval_response")     # approve the new card
+        runner.process_job(self._job(kind="resume"), db, engine)
+        assert engine.approved is True
+        assert db.status == "completed"
+
+    def test_redundant_resume_while_awaiting_feedback_does_not_repost(self):
+        # A resume that arrives before the user answers the what-should-change
+        # question must not post a second question or a second plan card.
+        db = FakeDB()
+        db.preload_approval("reject")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        runner.process_job(self._job(kind="resume"), db, engine)
+        assert db.kinds().count("revision_request") == 1
+        assert db.kinds().count("approval_request") == 1
+        assert db.status == "awaiting_input"
+
+    def test_rerun_after_completion_posts_a_fresh_approval_card(self):
+        # The regression behind "Re-run from … does nothing": the first run's
+        # decision was replayed forever, so a re-run reaching BUILD crossed the
+        # gate on the old answer instead of asking again. Now the consumed
+        # decision is one-shot and the re-run posts a NEW approval request.
+        db = FakeDB()
+        db.preload_approval("approve")
+        runner.process_job(self._job(), db, FakeEngine())
+        assert db.status == "completed"
+
+        engine = FakeEngine()
+        runner.process_job(
+            self._job(kind="rerun", target_state="PLAN", researcher_id="u", request="r"),
+            db, engine,
+        )
+        requests = [m for m in db.messages if m["kind"] == "approval_request"]
+        assert len(requests) == 2          # a fresh card, not the old one reused
+        assert db.status == "awaiting_approval"
+        assert engine.approved is False    # old 'approve' was not replayed as-is
+
+    def test_max_cost_forwarded_from_params(self):
+        # A per-run budget in the job params must reach build_orchestrator so the
+        # orchestrator caps this run's spend (rather than the deployment default).
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        runner.process_job(self._job(request="r", researcher_id="u", max_cost=2.5), db, engine)
+        assert engine.built_with["max_cost"] == 2.5
+
+    def test_no_max_cost_forwards_none(self):
+        # Absent from params => None, so the engine applies the deployment default.
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        runner.process_job(self._job(), db, engine)
+        assert engine.built_with["max_cost"] is None
+
+    def test_pre_flight_warns_when_estimate_over_budget(self):
+        # Plan estimate ($5) above the run budget ($1) => a warn-only heads-up
+        # posted alongside the plan at the approval gate (the run is not blocked).
+        db = FakeDB()
+        engine = FakeEngine(plan={"cost_estimate": {"min_cost": 5.0}})
+        runner.process_job(self._job(max_cost=1.0), db, engine)
+        assert any("budget" in m["content"].lower() for m in db.messages)
+        assert db.status == "awaiting_approval"  # warned, plan posted, released
+
+    def test_pre_flight_silent_when_estimate_within_budget(self):
+        db = FakeDB()
+        engine = FakeEngine(plan={"cost_estimate": {"min_cost": 0.5}})
+        runner.process_job(self._job(max_cost=1.0), db, engine)
+        assert not any("heads up" in m["content"].lower() for m in db.messages)
+        assert db.status == "awaiting_approval"
+
+    def test_completion_fires_a_notification(self):
+        # A run that reaches TERMINATE notifies the owner it finished (not just a
+        # suspend). Drive _drive_run directly so we can inject a recording notifier.
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine()
+        orch = engine.build_orchestrator(
+            session_id=SESSION, researcher_id="", request="r",
+            ask=DbAsk(db, SESSION), sink=PgEventSink(db, SESSION), store=None,
+        )
+        notes = RecordingNotifier()
+        runner._drive_run(db, SESSION, orch, engine, notifier=notes)
+        assert "completed" in [reason for _sid, reason, _msg in notes.calls]
+
+    def test_failure_fires_a_notification(self):
+        db = FakeDB()
+        notes = RecordingNotifier()
+
+        class FailOrch:
+            def __init__(self):
+                self.sm = types.SimpleNamespace(
+                    context=types.SimpleNamespace(artifacts={}),
+                    current_state=types.SimpleNamespace(name="INTAKE"),
+                )
+
+            def run(self, until=None):
+                self.sm.current_state = types.SimpleNamespace(name="DISCOVER")
+                return "error"
+
+        runner._drive_run(db, SESSION, FailOrch(), FakeEngine(), notifier=notes)
+        assert "failed" in [reason for _sid, reason, _msg in notes.calls]
+
+    # ── Slurm / compute target ────────────────────────────────────────────────
+    def test_slurm_target_announced_on_start(self):
+        # A fresh start announces where it will execute (RIS vs local) up front.
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(self._job(), db, engine)
+        assert any("RIS cluster" in m["content"] for m in db.messages)
+
+    def test_slurm_overrides_applied_on_approve(self):
+        # The approval reply carries edited Slurm resources; the gate applies them
+        # (engine.apply_slurm_overrides) and says so in chat.
+        overrides = {"cpu_count": 16, "ram": 32, "max_time": 1.0, "gpu_count": 0}
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        db.add_user(
+            json.dumps({"decision": "approve", "slurm_request": overrides}),
+            kind="approval_response",
+        )
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(self._job(), db, engine)
+        assert engine.applied_overrides == [overrides]
+        assert any("updated Slurm settings" in m["content"] for m in db.messages)
+
+    # ── Terminate ─────────────────────────────────────────────────────────────
+    def test_terminate_during_run_settles_cancelled_not_error(self):
+        # Terminate pressed: the orchestrator aborts a stage by raising; because
+        # the cancel flag is set, process_job records a cancellation (not a failure)
+        # and the conversation settles as 'cancelled'.
+        class RaisingOrch:
+            def __init__(self):
+                self.sm = types.SimpleNamespace(
+                    context=types.SimpleNamespace(artifacts={}),
+                    current_state=types.SimpleNamespace(name="INTAKE"),
+                )
+
+            def run(self, until=None):
+                raise RuntimeError("aborted between stages")
+
+        class CancellingEngine(FakeEngine):
+            def build_orchestrator(self, **kwargs):
+                super().build_orchestrator(**kwargs)  # record compute_target etc.
+                return RaisingOrch()
+
+        db = FakeDB()
+        db.terminate = True
+        runner.process_job(self._job(), db, CancellingEngine())
+        assert db.status == "cancelled"
+        assert "terminated by user" in db.messages[-1]["content"].lower()
+        assert not any(e["event_type"] == "run.completed" for e in db.events)
 
 
 # ── run_loop ──────────────────────────────────────────────────────────────────
@@ -371,8 +745,7 @@ class TestRunLoop:
 
     def test_resume_job_is_processed(self):
         db = FakeDB(jobs=[{"id": 8, "session_id": SESSION, "kind": "resume", "params": {}}])
-        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
-        db.add_user("approve", kind="approval_response")
+        db.preload_approval("approve")
         runner.run_loop(once=True, db=db, engine_factory=FakeEngine, sleep=lambda _s: None)
         assert (8, "done") in db.jobs_done
 
@@ -595,3 +968,119 @@ class TestRehydrateArtifacts:
         orch = self._orch({"execution_plan": str(plan)})
         assert rehydrate_artifacts(FakeDB(), "s1", orch) == 0
         assert not plan.exists()
+
+
+class TestRematerializeInputs:
+    def test_restores_surviving_upstream_specs_to_disk(self, tmp_path):
+        # A re-run runs in a fresh process: the original artifact files are gone,
+        # so the surviving upstream specs must be rewritten to disk from the DB and
+        # context.artifacts repointed at the fresh paths.
+        db = FakeDB()
+        db.upsert_artifact("s1", "intent_spec", '{"objective": "x"}', "json")
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                artifacts_dir=str(tmp_path),
+                context=types.SimpleNamespace(
+                    artifacts={"intent_spec": "/gone/intent_spec.json"}
+                ),
+            )
+        )
+        restored = rematerialize_inputs(db, "s1", orch)
+        assert restored == 1
+        new_path = orch.sm.context.artifacts["intent_spec"]
+        assert Path(new_path).is_file()
+        assert "objective" in Path(new_path).read_text(encoding="utf-8")
+
+    def test_skips_specs_absent_from_db(self, tmp_path):
+        # A spec that was trimmed (or never captured) is left untouched.
+        db = FakeDB()  # no artifacts stored
+        orch = types.SimpleNamespace(
+            sm=types.SimpleNamespace(
+                artifacts_dir=str(tmp_path),
+                context=types.SimpleNamespace(artifacts={"intent_spec": "/gone.json"}),
+            )
+        )
+        assert rematerialize_inputs(db, "s1", orch) == 0
+        assert orch.sm.context.artifacts["intent_spec"] == "/gone.json"  # unchanged
+
+
+class TestAbandonedQuestionsDoNotSilenceTheNextOne:
+    """A question the researcher walked away from must not make the next gate
+    think it has already asked.
+
+    Reported: re-running from CLARIFY left the run waiting for an answer with no
+    question posted. The accept-or-rerun gate had asked at VALIDATE; choosing
+    "re-run from a step" instead of answering left that clarification looking
+    outstanding, so the next gate suspended without posting anything.
+    """
+
+    def _stale_gate_question(self):
+        db = FakeDB()
+        db.add_assistant_message(
+            SESSION,
+            "Validation says rejected: ...\nAccept this result, or rerun to try "
+            "improving it? [accept/rerun]: ",
+            kind="validation_gate", state="VALIDATE",
+        )
+        return db
+
+    def test_another_gates_abandoned_question_does_not_suppress_this_one(self):
+        """The defect: CLARIFY went silent because the validation gate's
+        abandoned question looked outstanding, so the researcher waited on a
+        question that was never posted. Each gate now matches its own kind.
+        """
+        db = self._stale_gate_question()
+        with pytest.raises(SuspendRun):
+            DbAsk(db, SESSION)("Which polymorph of silicon did you mean?")
+
+        assert len(db.messages) == 2
+        assert db.messages[-1]["kind"] == "clarification"
+        assert "polymorph" in db.messages[-1]["content"]
+        assert db.status == "awaiting_input"
+
+    def test_a_gates_own_outstanding_question_is_still_not_reposted(self):
+        """The protection that sharing a kind was providing must survive: a
+        redundant resume should not ask the same thing twice."""
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "Which polymorph?",
+                                 kind="clarification", state="CLARIFY")
+        with pytest.raises(SuspendRun):
+            DbAsk(db, SESSION)("Which polymorph?")
+        assert len(db.messages) == 1          # not asked again
+        assert db.status == "awaiting_input"
+
+    def test_retiring_questions_also_clears_a_same_gate_one(self):
+        """A re-run retires the abandoned pass's questions, so a rewind back
+        through the same gate asks afresh rather than looking already-asked."""
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "Which polymorph?",
+                                 kind="clarification", state="CLARIFY")
+        db.retire_questions(SESSION)
+
+        with pytest.raises(SuspendRun):
+            DbAsk(db, SESSION)("Which polymorph?")
+        assert len(db.messages) == 2
+
+    def test_a_stale_question_is_not_read_as_plan_revision_feedback(self):
+        """It was also mistaken for the BUILD gate's own "what should change?",
+        so the next thing the researcher typed was consumed as feedback and
+        silently drove a re-plan the researcher never asked for.
+
+        Now that each gate posts its own kind this is unreachable by
+        construction, not merely handled: the validation gate's question is not
+        a revision request, so it cannot be read as one whether or not it was
+        ever answered.
+        """
+        db = self._stale_gate_question()
+        assert awaiting_reject_feedback(db, SESSION) is False
+
+        db.add_user("continue")
+        assert consume_reject_feedback(db, SESSION) is None
+
+        # ... and the gate that DID ask still gets its answer
+        db2 = FakeDB()
+        db2.add_assistant_message(SESSION, "What should change?",
+                                  kind="revision_request", state="BUILD")
+        assert awaiting_reject_feedback(db2, SESSION) is True
+        db2.add_user("use xtb instead")
+        assert consume_reject_feedback(db2, SESSION) == "use xtb instead"

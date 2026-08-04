@@ -174,6 +174,40 @@ class RunnerDB:
             (state, session_id),
         )
 
+    def owner_contact(self, session_id: str) -> dict | None:
+        """Contact details of the researcher who owns this run, or None.
+
+        Joins the run's conversation to its owning user (``conversations.id`` is the
+        session_id; ``conversations.user_id`` → ``users``). Returns
+        ``{"email", "name", "phone", "notify_prefs"}`` so the notifier can reach
+        the *specific* researcher who left the session — by email (SES/SendGrid)
+        or SMS (SNS to their ``phone``) — and honor their notification
+        preferences. Any field may be None (e.g. no phone on file); returns None
+        outright when the session or user is unknown, so the caller can fall
+        back to the configured default.
+        """
+        row = self._query_one(
+            "SELECT u.email, u.name, u.phone, u.notify_prefs FROM conversations c "
+            "JOIN users u ON u.id = c.user_id "
+            "WHERE c.id = %s;",
+            (session_id,),
+        )
+        if not row:
+            return None
+        return {"email": row.get("email"), "name": row.get("name"),
+                "phone": row.get("phone"), "notify_prefs": row.get("notify_prefs")}
+
+    def run_title(self, session_id: str) -> str | None:
+        """The run's title (its originating request), or None if unknown.
+
+        Used by the notifier to put the prompt in the subject line so a researcher
+        with several runs can tell the emails apart.
+        """
+        row = self._query_one(
+            "SELECT title FROM conversations WHERE id = %s;", (session_id,)
+        )
+        return (row or {}).get("title") if row else None
+
     # ---- messages -------------------------------------------------------------
     def add_assistant_message(
         self, session_id: str, content: str, *, kind: str = "chat", state: str | None = None
@@ -205,32 +239,65 @@ class RunnerDB:
     def last_question_id(
         self, session_id: str, kinds: tuple[str, ...] = ("clarification",)
     ) -> int | None:
-        """Id of the most recent assistant *question* of the given kind(s).
+        """Id of the most recent *live* assistant question of the given kind(s).
 
         Used by the bridges to pair an answer with its question: the user's reply
         to a question is a later user message; if none exists yet the run is still
         awaiting input. Returns None when no such question has been asked.
+
+        Questions marked ``state='consumed'`` are retired and skipped. A re-run
+        retires the questions of the pass it rewinds past (see
+        ``conversations.rerun_conversation``): choosing to re-run *is* the answer,
+        and an abandoned question left looking outstanding makes the next gate
+        believe it has already asked -- so it suspends the run without posting
+        anything and the researcher waits on a question that never arrives.
         """
         placeholders = ", ".join(["%s"] * len(kinds))
         row = self._query_one(
             "SELECT MAX(id) AS m FROM messages "
             "WHERE conversation_id = %s AND role = 'assistant' "
-            f"AND kind IN ({placeholders});",
+            f"AND kind IN ({placeholders}) "
+            "AND (state IS NULL OR state <> 'consumed');",
             (session_id, *kinds),
         )
         return row["m"] if row and row["m"] is not None else None
 
     def user_replies_after(self, session_id: str, after_id: int, kind: str | None = None) -> list:
         sql = (
-            "SELECT id, content, kind FROM messages "
+            "SELECT id, content, kind, state FROM messages "
             "WHERE conversation_id = %s AND id > %s AND role = 'user'"
         )
         params = [session_id, after_id]
         if kind is not None:
             sql += " AND kind = %s"
             params.append(kind)
+        else:
+            # A terminate request is a control signal, never a chat/clarify answer.
+            sql += " AND kind <> 'terminate'"
         sql += " ORDER BY id;"
         return self._query_all(sql, tuple(params))
+
+    def mark_reply_consumed(self, message_id: int) -> None:
+        """Record that a gate acted on this user reply (see bridges.consume_approval).
+
+        Reuses the messages.state column, which is NULL on user rows: once a
+        reply is 'consumed', a later visit to the same gate (e.g. a re-run
+        reaching BUILD again) must not re-apply it and instead asks afresh.
+        """
+        self._execute(
+            "UPDATE messages SET state = 'consumed' WHERE id = %s;",
+            (message_id,),
+        )
+
+    def terminate_requested(self, session_id: str) -> bool:
+        """True once the user asked to terminate this run (kind='terminate')."""
+        row = self._query_one(
+            "SELECT 1 AS t FROM messages "
+            "WHERE conversation_id = %s AND role = 'user' AND kind = 'terminate' "
+            "LIMIT 1;",
+            (session_id,),
+        )
+        return row is not None
 
     # ---- run events -----------------------------------------------------------
     def insert_run_event(
@@ -256,6 +323,19 @@ class RunnerDB:
             (session_id, name, kind, content),
         )
 
+    def delete_artifact(self, session_id: str, name: str) -> None:
+        """Drop one stored artifact.
+
+        Needed because a stage can *un-produce* an artifact: a correction pass
+        whose rerun was skipped clears its normalized result, and an upsert-only
+        store would keep serving the previous pass's number to the report as
+        though this run had produced it.
+        """
+        self._execute(
+            "DELETE FROM artifacts WHERE session_id = %s AND name = %s;",
+            (session_id, name),
+        )
+
     def get_artifacts(self, session_id: str) -> list:
         """Every stored artifact (name + content) for a session.
 
@@ -266,6 +346,13 @@ class RunnerDB:
         """
         return self._query_all(
             "SELECT name, content FROM artifacts WHERE session_id = %s;", (session_id,)
+        )
+
+    def get_artifact(self, session_id: str, name: str) -> dict | None:
+        """Fetch one persisted artifact's content by name (for a rerun's inputs)."""
+        return self._query_one(
+            "SELECT name, kind, content FROM artifacts WHERE session_id = %s AND name = %s;",
+            (session_id, name),
         )
 
     # ---- sessions (backing store for the engine) ------------------------------

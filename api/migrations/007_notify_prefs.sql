@@ -1,0 +1,14 @@
+-- Per-user email notification preferences.
+-- Idempotent: safe to run repeatedly.
+--
+-- The runner emails a run's owner on lifecycle events (runner/notifications.py:
+-- input, approval, completed, failed, terminated). Until now that was
+-- all-or-nothing per deployment; this lets each user turn email off entirely or
+-- opt out of individual kinds from the Settings page.
+--
+-- Shape (all keys optional; a missing key means "default = send"):
+--   {"enabled": bool, "kinds": {"input": bool, "approval": bool,
+--                               "completed": bool, "failed": bool,
+--                               "terminated": bool}}
+-- '{}' therefore means "all emails on" -- existing users keep current behavior.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_prefs JSONB NOT NULL DEFAULT '{}'::jsonb;

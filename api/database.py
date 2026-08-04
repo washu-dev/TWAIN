@@ -14,13 +14,13 @@ Access model:
 """
 
 import os
-from functools import lru_cache
+from functools import cache, lru_cache
 
 import boto3
 import psycopg2
 from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 
 load_dotenv()
 
@@ -60,6 +60,18 @@ def _secrets_client():
     return boto3.client("secretsmanager", region_name=AWS_REGION)
 
 
+@cache
+def get_secret(secret_id: str) -> str:
+    """Read a single ``SecretString`` from Secrets Manager (cached per id).
+
+    Used for config identifiers stored outside the DB group — e.g. the public
+    Entra tenant/app ids under ``TWAIN/sso/*`` that ``auth.py`` needs — using the
+    same task-role / assume-role credentials as the DB secrets. Raises on failure
+    so callers can decide whether a missing secret is fatal.
+    """
+    return _secrets_client().get_secret_value(SecretId=secret_id)["SecretString"]
+
+
 @lru_cache(maxsize=1)
 def _load_db_config() -> dict:
     """Resolve DB connection properties once and cache them for the process."""
@@ -83,22 +95,23 @@ def _load_db_config() -> dict:
         ) from e
 
 
+def read_secret(secret_id: str) -> str:
+    """Read a single Secrets Manager secret string by its full id.
+
+    For features that store one opaque value (e.g. the GitHub issue PAT) rather
+    than the grouped DB connection properties. Thin wrapper over the cached
+    :func:`get_secret` that raises a friendly ``RuntimeError`` on failure instead
+    of the raw boto exception.
+    """
+    try:
+        return get_secret(secret_id)
+    except (ClientError, BotoCoreError) as e:
+        raise RuntimeError(f"Failed to load secret '{secret_id}': {e}") from e
+
+
 def get_connection():
     """Create and return a database connection using the resolved credentials."""
     return psycopg2.connect(**_load_db_config())
-
-
-def query_greetings():
-    try:
-        conn = get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT message FROM greetings;")
-        results = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return results
-    except Exception as e:
-        raise Exception(f"Database query failed: {e}") from e
 
 
 ALLOWED_ROLES = ("user", "admin")
@@ -122,7 +135,8 @@ def upsert_user(subject: str, email: str, name: str, *, bootstrap_admin: bool = 
               SET email = EXCLUDED.email,
                   name = EXCLUDED.name,
                   last_login_at = now()
-            RETURNING id, subject, email, name, role, created_at, last_login_at;
+            RETURNING id, subject, email, name, role, created_at, last_login_at,
+                      notify_prefs;
             """,
             (subject, email, name, role),
         )
@@ -150,6 +164,30 @@ def list_users() -> list:
         return results
     except Exception as e:
         raise Exception(f"Failed to list users: {e}") from e
+
+
+def set_notify_prefs(user_id: str, prefs: dict) -> dict | None:
+    """Store a user's notification preferences; return them, or None if no user.
+
+    ``prefs`` is the whole preferences object (the Settings page sends its full
+    state): ``{"enabled": bool, "kinds": {kind: bool, ...}}``. The runner treats
+    any missing key as "send", so '{}' means all notifications on.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "UPDATE users SET notify_prefs = %s WHERE id = %s "
+            "RETURNING notify_prefs;",
+            (Json(prefs), user_id),
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return row["notify_prefs"] if row else None
+    except Exception as e:
+        raise Exception(f"Failed to set notification preferences: {e}") from e
 
 
 def set_user_role(user_id: str, role: str) -> dict | None:

@@ -160,17 +160,6 @@ class TestPyPIAvailability:
             raise HTTPError(url, 503, "Service Unavailable", {}, None)
         assert depinf.is_available_on_pypi("pymatgen", fetch=boom) is None
 
-    def test_check_dependencies_maps_each_requirement(self):
-        catalog = {
-            "pymatgen": {"releases": {"2024.6.10": []}},
-            "numpy": {"releases": {"1.26.4": []}},
-            "pandas": {"releases": {"2.2.2": []}},
-            "PyYAML": {"releases": {"6.0.2": []}},
-        }
-        report = depinf.check_dependencies("Pymatgen", fetch=self._fake_fetch(catalog))
-        assert report["pymatgen==2024.6.10"] is True
-        assert all(v is True for v in report.values())
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Template library

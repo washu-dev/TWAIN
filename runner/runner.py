@@ -6,7 +6,8 @@ plan-approval gate — at which point it is checkpointed to the shared session
 store and the process is **released** (the job is done). Nothing blocks waiting
 on a human. When the user replies, the API enqueues a ``resume`` job and a runner
 picks the run back up from its checkpoint. A ``start`` job runs the first slice;
-each ``resume`` runs the next.
+each ``resume`` runs the next. A ``rerun`` job rewinds a finished run to an
+earlier stage and drives it forward again.
 
 Because no process is pinned to a waiting run, one runner serves many runs, and
 any idle runner can resume any run — no work is wasted spinning on ``sleep``.
@@ -18,6 +19,11 @@ store, and stage artifacts (intent_spec, the run bundle, …) are made durable t
 run. So any runner can resume any run, even on a fresh box or after ``logs/`` was
 cleaned; no shared ``logs/`` volume is required.
 
+Terminate: pressing Terminate posts a ``kind='terminate'`` message; the
+orchestrator checks it between stages (raising RunCancelled) and the Slurm poll
+loop scancels the job. process_job treats a run that ends while terminate is set
+as *cancelled* (not failed).
+
 Usage::
 
     pixi run python -m runner.runner            # loop forever (LISTEN/NOTIFY)
@@ -28,11 +34,23 @@ import os
 import threading
 import time
 
-from runner.artifacts import capture_artifacts, rehydrate_artifacts
-from runner.bridges import DbAsk, PgEventSink, consume_approval, post_plan_for_approval
+from runner.artifacts import (
+    capture_artifacts,
+    rehydrate_artifacts,
+    rematerialize_inputs,
+)
+from runner.bridges import (
+    DbAsk,
+    PgEventSink,
+    awaiting_reject_feedback,
+    consume_approval,
+    consume_reject_feedback,
+    post_plan_for_approval,
+    post_reject_feedback_question,
+)
 from runner.db import JobNotifyWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
-from runner.notifications import default_notifier
+from runner.notifications import default_notifier, make_notifier
 from runner.pg_store import PgStore
 
 # Safety-net poll cadence for the loop. With LISTEN/NOTIFY the runner wakes the
@@ -60,12 +78,70 @@ DEFAULT_LEASE_SECONDS = _env_int("TWAIN_JOB_LEASE_SECONDS", 600)
 DEFAULT_HEARTBEAT_SECONDS = _env_int("TWAIN_JOB_HEARTBEAT_SECONDS", 60)
 DEFAULT_MAX_ATTEMPTS = _env_int("TWAIN_JOB_MAX_ATTEMPTS", 3)
 
-SUPPORTED_JOB_KINDS = ("start", "resume")
+SUPPORTED_JOB_KINDS = ("start", "resume", "rerun")
 
 
 def _state_name(state_obj) -> str:
     """Normalize a State enum (real engine) or bare string (tests) to its name."""
     return getattr(state_obj, "name", state_obj)
+
+
+def _budget_warning(plan: dict | None, run_budget) -> str | None:
+    """A warn-only heads-up when a plan's estimated cost exceeds the run budget.
+
+    The budget caps *actual* LLM spend at runtime; the plan's ``cost_estimate``
+    is a pre-run figure, so this only flags the risk — it never blocks the run.
+    Returns the message to post, or ``None`` when there's nothing to warn about.
+    """
+    if not plan or run_budget is None:
+        return None
+    max_cost = getattr(run_budget, "max_cost", None)
+    if not max_cost:
+        return None
+    estimate = (plan.get("cost_estimate") or {}).get("min_cost")
+    if not isinstance(estimate, (int, float)) or estimate <= max_cost:
+        return None
+    return (
+        f"⚠️ Heads up: the estimated cost (~${estimate:.2f}) is above this "
+        f"run's budget of ${max_cost:.2f}. You can still approve it, but the run "
+        f"will stop automatically if actual LLM spend reaches the budget."
+    )
+
+
+def _cancel_check(db: RunnerDB, session_id: str):
+    """Zero-arg callable: True once the user pressed Terminate for this run."""
+    return lambda: db.terminate_requested(session_id)
+
+
+def _finalize_cancelled(db: RunnerDB, session_id: str, notifier=None) -> None:
+    db.set_conversation_status(session_id, "cancelled")
+    db.add_assistant_message(
+        session_id,
+        "Run terminated by user. Nothing further will be built or executed.",
+        kind="chat",
+    )
+    # The user asked to stop, but the actual teardown (scancel, settling) can
+    # land minutes after the click -- confirm by email like every other
+    # terminal outcome (opt-out via the Settings page's 'terminated' kind).
+    if notifier is not None:
+        notifier(session_id, "terminated",
+                 "The run was stopped at your request.")
+
+
+def _announce_compute_target(db: RunnerDB, session_id: str, engine, orch) -> None:
+    """Announce the backend early so the chat shows RIS vs local before planning."""
+    if engine.compute_target_of(orch) == "slurm":
+        cluster = engine.slurm_cluster_of(orch) or "compute2"
+        db.add_assistant_message(
+            session_id,
+            f"Compute target: RIS cluster via Slurm ({cluster}). "
+            "The run will be submitted to the HPC queue after you approve the plan.",
+            kind="chat",
+        )
+    else:
+        db.add_assistant_message(
+            session_id, "Compute target: this server (local / Docker).", kind="chat",
+        )
 
 
 def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_notifier) -> None:
@@ -76,6 +152,8 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
     ``resume`` job — enqueued by the API when the user responds — continues it.
     The loop lets a single resume cross the approval gate straight into execution
     (e.g. an already-approved plan, or unattended mode) without a second job.
+    A terminate request surfaces as RunCancelled from ``orch.run`` and propagates
+    to ``process_job``, which records the cancellation.
     """
     build_state = _state_name(engine.STATE_BUILD)
     while True:
@@ -83,9 +161,15 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
 
         # ---- plan-approval gate (driver-level, at BUILD) ---------------------
         if state == build_state:
-            if not _cross_approval_gate(db, session_id, orch, engine, notifier):
-                return  # awaiting the user's decision (or rejected); released
-            status = orch.run()  # leg 2: build → execute → … → terminate
+            outcome = _cross_approval_gate(db, session_id, orch, engine, notifier)
+            if outcome == "released":
+                return  # awaiting the user's decision or revision feedback
+            if outcome == "replanned":
+                # Rejection feedback was folded in and the run rewound: drive
+                # leg 1 again so a fresh plan reaches the gate and is posted.
+                status = orch.run(until=engine.STATE_BUILD)
+            else:  # "proceed"
+                status = orch.run()  # leg 2: build → execute → … → terminate
         else:
             status = orch.run(until=engine.STATE_BUILD)  # leg 1 / continue to gate
 
@@ -95,56 +179,141 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
         if status == "paused":
             return  # suspended for user input (clarify / heavy-calc); released
         if status == "completed":
-            db.add_assistant_message(
-                session_id, engine.final_summary(orch), kind="chat", state="TERMINATE"
-            )
+            # Off-topic decline: intake refused the request before planning
+            # anything. Post the explanation and mark the run rejected (nothing
+            # executed) instead of the misleading "run complete" summary; no
+            # email -- the decline lands seconds after submission, while the
+            # researcher is still looking at the screen.
+            decline = engine.decline_reason(orch)
+            if decline:
+                db.add_assistant_message(session_id, decline, kind="chat", state="TERMINATE")
+                db.set_conversation_status(session_id, "rejected")
+                return
+            summary = engine.final_summary(orch)
+            db.add_assistant_message(session_id, summary, kind="chat", state="TERMINATE")
+            notifier(session_id, "completed", summary)
             return
         if status == "error":
-            db.add_assistant_message(
-                session_id, "The run failed — see the run log for details.", kind="chat"
-            )
+            fail_msg = "The run failed — see the run log for details."
+            db.add_assistant_message(session_id, fail_msg, kind="chat")
+            notifier(session_id, "failed", fail_msg)
             return
         # Reached a terminal state without pausing (e.g. empty discovery).
-        db.add_assistant_message(session_id, engine.final_summary(orch), kind="chat")
+        summary = engine.final_summary(orch)
+        db.add_assistant_message(session_id, summary, kind="chat")
+        notifier(session_id, "completed", summary)
         return
 
 
-def _cross_approval_gate(db, session_id, orch, engine, notifier) -> bool:
-    """Handle the BUILD approval gate. True to proceed into execution, else release.
+def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
+    """Handle the BUILD approval gate.
+
+    Returns ``'proceed'`` (approved → build and execute), ``'replanned'`` (the
+    user's rejection feedback was folded into the run, which rewound for a fresh
+    plan — keep driving), or ``'released'`` (waiting on the user: plan posted,
+    or the what-should-change question asked).
 
     Unattended mode (TWAIN_AUTO_RUN) approves automatically. Otherwise: consume
-    the user's decision if it's in; if not, post the plan and release; a 'reject'
-    stops the run.
+    the user's decision if it's in; if not, post the plan (with the compute target
+    + any budget heads-up) and release. A 'reject' does NOT end the run: the gate
+    asks what should change, and the reply drives a re-plan (rewind to DISCOVER
+    with the feedback folded into the intent) ending in a fresh approval card.
+    Crossing the gate records a real plan approval (``engine.approve_plan``) so
+    the BUILD→REPAIR / REPAIR→EXECUTE guards let the run proceed, and applies any
+    Slurm resource overrides the user edited on the approval card.
     """
+    # BUILD is not only the approval gate. A correction pass (VALIDATE →
+    # needs_review → CORRECT → BUILD) comes back through it carrying the plan the
+    # researcher already approved, and if that pass lands in a new job slice the
+    # driver arrives here with nothing to consume -- posting a second card for a
+    # plan that was already decided, and stalling the run behind an answer it
+    # does not need. An approval on the books means this is not the gate.
+    if engine.plan_is_approved(orch):
+        return "proceed"
+
     if _env_flag("TWAIN_AUTO_RUN"):
+        engine.approve_plan(orch)
         db.add_assistant_message(
             session_id, "Plan auto-approved (unattended mode). Building and executing…",
             kind="chat", state="BUILD",
         )
-        return True
+        return "proceed"
 
-    decision = consume_approval(db, session_id)
-    if decision is None:
-        # No decision yet: show the plan (idempotently), mark awaiting, release.
-        post_plan_for_approval(db, session_id, engine.read_execution_plan(orch), notifier=notifier)
-        return False
-    if decision != "approve":
-        db.set_conversation_status(session_id, "rejected")
+    # ---- rejection-feedback round (takes precedence over a fresh decision) --
+    feedback = consume_reject_feedback(db, session_id)
+    if feedback is not None:
+        db.set_conversation_status(session_id, "running")
         db.add_assistant_message(
             session_id,
-            "Plan rejected — nothing was built or executed. "
-            "Start a new run, or (soon) rerun from an earlier step with changes.",
-            kind="chat",
+            "Revising the plan with your feedback — a new plan will be posted "
+            "for your approval shortly.",
+            kind="chat", state="PLAN",
         )
-        return False
-    db.add_assistant_message(
-        session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
+        engine.replan_with_feedback(orch, feedback)
+        return "replanned"
+    if awaiting_reject_feedback(db, session_id):
+        # The question is posted and unanswered (a redundant resume): stay
+        # suspended without re-posting it.
+        db.set_conversation_status(session_id, "awaiting_input")
+        return "released"
+
+    decision, slurm_overrides = consume_approval(db, session_id)
+    if decision is None:
+        # No decision yet: show the plan (idempotently) with any budget warning,
+        # mark awaiting, release.
+        plan = engine.read_execution_plan(orch)
+        warning = _budget_warning(plan, getattr(orch, "run_budget", None))
+        if warning:
+            db.add_assistant_message(session_id, warning, kind="chat", state="PLAN")
+        post_plan_for_approval(
+            db, session_id, plan, notifier=notifier,
+            compute_target=engine.compute_target_of(orch),
+            slurm_cluster=engine.slurm_cluster_of(orch),
+        )
+        return "released"
+    if decision != "approve":
+        # Rejected: ask what should change instead of ending the run.
+        post_reject_feedback_question(db, session_id, notifier=notifier)
+        return "released"
+    engine.approve_plan(orch)
+    if slurm_overrides:
+        engine.apply_slurm_overrides(orch, slurm_overrides)
+        db.add_assistant_message(
+            session_id, "Plan approved with updated Slurm settings. Building and executing…",
+            kind="chat", state="BUILD",
+        )
+    else:
+        db.add_assistant_message(
+            session_id, "Plan approved. Building and executing…", kind="chat", state="BUILD"
+        )
+    return "proceed"
+
+
+def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier, cancel):
+    """Wire an orchestrator for this session with the chat/event/store bridges."""
+    return engine.build_orchestrator(
+        session_id=session_id,
+        researcher_id=params.get("researcher_id", ""),
+        request=params.get("request"),
+        ask=DbAsk(db, session_id, notifier=notifier),
+        sink=PgEventSink(db, session_id),
+        store=PgStore(db),
+        # Terminate button: checked between stages (raises RunCancelled).
+        cancel=cancel,
+        # Per-run budget override (falls back to the deployment default in engine).
+        max_cost=params.get("max_cost"),
     )
-    return True
 
 
 def process_job(job: dict, db: RunnerDB, engine=None) -> None:
-    """Drive one slice of a run (start or resume), then capture its artifacts."""
+    """Drive one slice of a run, then capture its artifacts.
+
+    ``start`` runs the first slice of a fresh pipeline; ``resume`` continues a
+    checkpointed run after the user responds. ``rerun`` resumes an existing run,
+    rewinds it to the requested pipeline stage (discarding that stage's and every
+    later stage's output while keeping the earlier work), restores the upstream
+    inputs to disk, and drives it forward again through the same approval gate.
+    """
     engine = engine or default_engine()
     session_id = job["session_id"]
     kind = job.get("kind", "start")
@@ -152,24 +321,66 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         raise NotImplementedError(f"job kind '{kind}' is not supported yet")
 
     params = job.get("params") or {}
-    # On resume the orchestrator rebuilds its state + context from the session
+    # Owner-targeted notifications (Phase 2): resolve the run's owner via the DB so
+    # a suspend pings the specific researcher who left it. Terminate seam: a
+    # zero-arg callable that's True once the user pressed Terminate for this run.
+    notifier = make_notifier(db)
+    cancel = _cancel_check(db, session_id)
+    # On resume/rerun the orchestrator rebuilds its state + context from the session
     # store; request/researcher_id are only needed to *start* a run.
-    orch = engine.build_orchestrator(
-        session_id=session_id,
-        researcher_id=params.get("researcher_id", ""),
-        request=params.get("request"),
-        ask=DbAsk(db, session_id),
-        sink=PgEventSink(db, session_id),
-        store=PgStore(db),
-    )
-    # Resume-safety: the orchestrator restored state + context (artifact *paths*)
-    # from Postgres, but the files themselves may be absent on this box (fresh
-    # runner, or logs/ was cleaned). Restore them from the DB before driving so
-    # _load_artifact and EXECUTE find their inputs. No-op on a start (nothing
-    # stored yet) and on a same-box resume (files already present).
-    rehydrate_artifacts(db, session_id, orch)
+    orch = _build_orchestrator(engine, db, session_id, params, notifier, cancel)
+
+    if kind == "rerun":
+        target = params.get("target_state")
+        if not target:
+            raise ValueError("a 'rerun' job requires a 'target_state' param")
+        # Rewind the restored run to `target`, then restore just the surviving
+        # upstream specs to disk so the re-run's stages find their inputs (a fresh
+        # process has none of the original run's artifact files on disk).
+        engine.rewind(orch, target)
+        rematerialize_inputs(db, session_id, orch)
+        feedback = (params.get("feedback") or "").strip()
+        if feedback:
+            # Mid-session revision: fold the researcher's "here's what to
+            # change" into the run's intent (same machinery as a plan
+            # rejection) so discovery/plan/codegen all see it. Must run after
+            # rematerialize -- it edits the intent artifact on disk.
+            engine.replan_with_feedback(orch, feedback)
+            db.add_assistant_message(
+                session_id,
+                "↩︎ Revising the run with your feedback — a new plan will be "
+                "posted for your approval.",
+                kind="chat", state=target,
+            )
+        else:
+            db.add_assistant_message(
+                session_id, f"↩︎ Re-running from {target}…", kind="chat", state=target,
+            )
+    else:
+        # A fresh start announces where it will execute (RIS vs local) up front.
+        if kind == "start":
+            _announce_compute_target(db, session_id, engine, orch)
+        # Resume-safety: the orchestrator restored state + context (artifact *paths*)
+        # from Postgres, but the files themselves may be absent on this box (fresh
+        # runner, or logs/ was cleaned). Restore them from the DB before driving so
+        # _load_artifact and EXECUTE find their inputs. No-op on a start (nothing
+        # stored yet) and on a same-box resume (files already present).
+        rehydrate_artifacts(db, session_id, orch)
+
     try:
-        _drive_run(db, session_id, orch, engine)
+        _drive_run(db, session_id, orch, engine, notifier=notifier)
+        if cancel():
+            # Terminate arrived too late to interrupt anything; still record it.
+            _finalize_cancelled(db, session_id, notifier)
+    except Exception as exc:  # noqa: BLE001 -- cancelled runs end via exceptions
+        # A terminate request aborts stages by raising RunCancelled from the
+        # orchestrator. Whatever the exception type, if the user asked to stop,
+        # this is a cancellation -- not a run failure -- so don't let the loop
+        # dead-letter it.
+        if not cancel():
+            raise
+        print(f"[runner] run {session_id} terminated by user ({exc})")
+        _finalize_cancelled(db, session_id, notifier)
     finally:
         # Best-effort: persist the specs + generated code so the report can show
         # them (also on a suspend, so partial artifacts are visible while waiting).
@@ -274,11 +485,14 @@ def run_loop(
     ``max_attempts`` times, then the conversation is failed.
     """
     db = db or RunnerDB()
-    last_reap = 0.0
+    # None forces a reap on the first iteration. (time.monotonic() is seconds
+    # since an arbitrary epoch -- boot on Linux -- so seeding with 0.0 skips
+    # the first reap on a freshly booted machine, e.g. a CI VM.)
+    last_reap = None
     reap_interval = max(heartbeat_seconds, 1.0)
     while True:
         now = time.monotonic()
-        if now - last_reap >= reap_interval:
+        if last_reap is None or now - last_reap >= reap_interval:
             _reap_orphans(db, lease_seconds, max_attempts)
             last_reap = now
 

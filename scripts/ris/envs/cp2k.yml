@@ -1,0 +1,56 @@
+# Shared cluster env: twain-envs/cp2k -- mixed Gaussian/plane-wave DFT, large
+# systems and ab-initio MD.
+#
+# This file is the source of truth for what the env contains; apply it with
+# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
+# manual drift is exactly what these specs exist to prevent).
+#
+# cp2k ships only through conda-forge, so without this spec planning vetoes CP2K
+# outright (statemachine's _cluster_cannot_run, which reads these files) and
+# reroutes to a pip-installable tool.
+#
+# VERSION PIN, and it is load-bearing. conda-forge's current cp2k (2026.x) is
+# built against a newer glibc than RIS provides: its libcp2k.so needs GLIBC_2.38
+# and libmvec GLIBC_2.35, while the login node has 2.34, so every binary dies at
+# startup with "version `GLIBC_2.38' not found". micromamba does not catch this --
+# it correctly sees __glibc=2.34 but the package under-declares its requirement --
+# so the env installs cleanly and only fails when something tries to run it.
+# 2024.2 is the newest release whose build works on 2.34; revisit when RIS updates.
+#
+# Consequence of that pin: 2024.2 ships only the `nompi` build (`cp2k.ssmp` --
+# serial, OpenMP-threaded), so CP2K here parallelizes over threads rather than MPI
+# ranks. Hence NO openmpi in this spec, unlike every other engine: were mpirun
+# present, the Slurm payload would auto-detect it and launch N ranks of a
+# non-MPI binary, which is N independent copies of the same calculation.
+#
+# NOTE: unlike the other external engines here, CP2K's data (BASIS_SET,
+# GTH_POTENTIALS, and the rest of share/cp2k/data) ships INSIDE the conda
+# package -- there is nothing to download. It still has to be *found*:
+# provision_envs.sh writes an activate.d hook exporting CP2K_DATA_DIR so the
+# Slurm payload's twain_use_env() sets it, the same mechanism that makes NWChem
+# find its basis library.
+#
+# NOTE: ASE drives CP2K through a persistent shell subprocess rather than a
+# one-shot input file, and ASE 3.29 defaults that to `cp2k.psmp -s` (see
+# ase.calculators.cp2k, which reads ASE_CP2K_COMMAND). Neither that default nor
+# the widely-documented `cp2k_shell` exists here: the 2024.2 nompi build ships
+# exactly one binary, `cp2k.ssmp`. So provision_envs.sh pins
+# ASE_CP2K_COMMAND="cp2k.ssmp -s" in the env's activate.d hook, and the registry's
+# `executable` names cp2k.ssmp -- which is what the bundle's smoke gate checks, so
+# a mismatch here is caught at the gate instead of as a hung shell subprocess.
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - cp2k=2024.2
+  - ase
+  # pymatgen + spglib for bulk/surface prep, rdkit for SMILES -> 3D: CP2K's
+  # registry input_kinds covers bulk_crystal, molecule AND surface, and the job's
+  # smoke probe rejects an env missing ANY bundle import -- a missing companion
+  # is what sent an NWChem run to twain-envs/default (job 2573801, exit 127).
+  - pymatgen
+  - spglib
+  - rdkit
+  - numpy
+  - pandas
+  - pyyaml

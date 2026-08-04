@@ -3,4 +3,5 @@ export { Footer } from './Footer';
 export { TileButton } from './TileButton';
 export { WashUShield } from './WashUShield';
 export { MessageModal } from './MessageModal';
+export { IssueModal } from './IssueModal';
 export { ReportIssueModal } from './ReportIssueModal';

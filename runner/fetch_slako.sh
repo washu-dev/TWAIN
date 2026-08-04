@@ -24,7 +24,10 @@ TIORG_VERSION="v0.1.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEST="$REPO_ROOT/slako"
+# SLAKO_DEST lets the cluster fetcher (scripts/ris/fetch_data.sh) put the same
+# pinned sets on shared team storage instead of in a per-checkout slako/ dir, so
+# the pinned versions above stay the single source of truth for both.
+DEST="${SLAKO_DEST:-$REPO_ROOT/slako}"
 FORCE="${1:-}"
 
 # Idempotent: skip if a representative file from each set is already there.

@@ -317,6 +317,26 @@ class ScriptDoctor:
         return HealReport(source, _final_status(fixes, last_smoke), rounds, fixes,
                           self.static_diagnostics(source))
 
+    def repair_runtime(self, source: str, failure: str) -> Optional[str]:
+        """Repair ``source`` against a failure from the REAL run (post-EXECUTE).
+
+        This is the general net behind the per-incident static checks: those
+        catch the failure modes we've already seen, while ANY novel API misuse
+        the script commits surfaces as a runtime traceback -- the ground truth
+        -- which one repair round here turns into a fixed script the caller
+        can re-execute. The result must still pass the static checks and (when
+        a sim env exists) smoke clean, so a "fix" can never regress the bundle.
+        Returns the healed script, or ``None`` when nothing better could be
+        produced (no agent, unchanged output, or the fix failed verification).
+        """
+        if self.agent is None or not (source or "").strip() or not (failure or "").strip():
+            return None
+        fixed = self._repair(
+            source, [Diagnostic("runtime-failure", "error", failure)])
+        if not fixed or fixed == source or _has_errors(self.static_diagnostics(fixed)):
+            return None
+        return self._smoke_repair(fixed)
+
     def _smoke_repair(self, source: str) -> Optional[str]:
         """Smoke ``source`` and repair a runtime break, bounded by ``max_rounds``.
 
@@ -372,7 +392,153 @@ class ScriptDoctor:
             diags.append(Diagnostic(
                 "placeholder", "warning",
                 f"unfilled template placeholder {token} left in the script."))
+        for name, line in _stale_ase_filter_imports(source):
+            diags.append(Diagnostic(
+                "ase-filters", "error",
+                f"imports {name} from `ase.constraints`, but in ASE >= 3.23 cell "
+                f"filters live in `ase.filters` (use `from ase.filters import "
+                f"{name}`); the old path raises ImportError at runtime.", line))
+        for line in _fixed_occupations_without_numbers(source):
+            diags.append(Diagnostic(
+                "gpaw-occupations", "error",
+                'uses occupations={"name": "fixed"} without a `numbers` array: '
+                'GPAW\'s "fixed" mode requires explicit per-band occupation '
+                'numbers and raises TypeError at calculator init. For a '
+                'frozen-occupations band-structure pass use '
+                '{"name": "fixed-uniform"} instead.', line))
+        for line in _uncorrelated_method_for_thermochemistry(
+                source, self.brief.get("property")):
+            diags.append(Diagnostic(
+                "uncorrelated-thermochemistry", "error",
+                "selects a bare Hartree-Fock method (scf/hf) for a property "
+                "assembled from bond energies. Correlation is most of a bond's "
+                "energy, so HF underestimates every bond by a large systematic "
+                "amount and the run reports a clean, confident, badly wrong "
+                "number -- for CO2 an atomization of ~1012 kJ/mol against ~1628, "
+                "putting the heat of formation at +245.7 where the answer is "
+                "-393.5, i.e. the wrong SIGN. Use at least a hybrid functional "
+                "(B3LYP, PBE0, wB97X-D) or a correlated wavefunction method "
+                "(MP2, CCSD(T)).", line))
+        for line in _ambiguous_spin_specification(source):
+            diags.append(Diagnostic(
+                "ambiguous-spin-state", "error",
+                "states an open-shell spin state as an explicit count "
+                "(multiplicity / mult / uhf) without reconciling the other "
+                "channel, the Atoms object's initial magnetic moments. ASE "
+                "calculators read one or the other -- GPAW, Quantum ESPRESSO, "
+                "ABINIT and DFTB+ take the magnetic moments; Psi4, CP2K, NWChem "
+                "and xTB take the count -- and when both are present the loser is "
+                "discarded SILENTLY, converging the WRONG SPIN STATE with no "
+                "warning and plausible-looking forces. ASE's Psi4 even overwrites "
+                "reference with 'uhf' and multiplicity with None when the atoms "
+                "carry moments, and ase.build.molecule sets moments on exactly the "
+                "open-shell species that need a multiplicity: that combination put "
+                "a CO2 heat of formation at -1072 vs a -393.5 kJ/mol target. Fix: "
+                "state the spin ONCE for each species. If the calculator reads the "
+                "count, clear the moments first with "
+                "`atoms.set_initial_magnetic_moments([0.0] * len(atoms))`; if it "
+                "reads the moments, set them explicitly and drop the count "
+                "keyword. Either way make it explicit in the source.", line))
+        for line in _signature_probe_calls(source):
+            diags.append(Diagnostic(
+                "signature-probe", "error",
+                "gates behavior on inspect.signature(): ASE-style calculators "
+                "(e.g. xtb-python's XTB) take **kwargs and route options "
+                "through default_parameters, so the probe falsely reports "
+                "keywords like 'solvent' as unsupported and aborts a runnable "
+                "job. Pass the documented keywords directly and let a real "
+                "TypeError surface.", line))
+        for line in _hardcoded_bandpath_calls(source):
+            diags.append(Diagnostic(
+                "bandpath-literal", "error",
+                "hardcodes a band-path string in `.bandpath(...)`: the special "
+                "points available depend on the lattice ASE detects in the "
+                "ACTUAL cell, and after a relaxation the (noisy) cell is often "
+                "no longer recognized as the ideal lattice -- a hardcoded "
+                "letter then raises KeyError after the ground state was "
+                "already computed. Call `atoms.cell.bandpath(npoints=..., "
+                "pbc=atoms.pbc)` with NO path string so ASE picks the standard "
+                "path for the detected lattice, or build the string only from "
+                "letters in `atoms.cell.bandpath().special_points`.", line))
+        for line in _scf_grid_bandgap_calls(source):
+            diags.append(Diagnostic(
+                "bandgap-on-scf-grid", "error",
+                "reads the fundamental band gap straight off the SCF k-grid "
+                "(`bandgap(calc)` after the ground state): band extrema "
+                "generally lie BETWEEN grid points (silicon's CBM is at ~0.85 "
+                "of Gamma->X, which no uniform grid samples), so the gap comes "
+                "out too large -- the script runs cleanly and the number is "
+                "silently wrong. Converge the density on the SCF grid, then "
+                "run a NON-self-consistent fixed-density pass along the "
+                "standard path and take extrema from THAT: `bs_calc = "
+                "calc.fixed_density(kpts=atoms.cell.bandpath(npoints=200, "
+                "pbc=atoms.pbc), symmetry='off')` then "
+                "`bandgap(bs_calc, direct=False)`.", line))
+        diags.extend(self._primitive_cell_diagnostics(source))
+        diags.extend(self._dft_budget_diagnostics(source))
         return diags
+
+    def _dft_budget_diagnostics(self, source: str) -> List[Diagnostic]:
+        """Flag numerical settings far beyond the default-accuracy budget.
+
+        The wall-clock killer behind Slurm job 2472788: nobody asked for high
+        accuracy, but the script ran PW(600) with a 12x12x12 grid (182
+        irreducible k-points on 6-atom CaPt2 -- ~10 minutes per SCF
+        iteration), so the FIRST of its 18 EOS points consumed the whole
+        4-hour wall time. Prompt guidance alone keeps losing to the model's
+        conservatism, so the budget is mechanical; it stands down when the
+        researcher's own request asks for accuracy/convergence.
+        """
+        asked = " ".join(
+            str(self.brief.get(k) or "")
+            for k in ("objective", "property", "material_desc")
+        ).lower()
+        if any(word in asked for word in _ACCURACY_WORDS):
+            return []
+        return [
+            Diagnostic(
+                "dft-budget", "error",
+                f"uses {desc}: far beyond the default cost budget, and the "
+                "researcher did not ask for high accuracy. Default protocol: "
+                "plane-wave cutoff <= 450 eV (350-400 eV is fine for metals "
+                "with PAW), k-grid <= 8x8x8 for a primitive cell, and ONE "
+                "equation-of-state scan of 5-7 points (about +-5% volume) -- "
+                "that resolves bulk properties to a few percent in minutes "
+                "instead of blowing the job's wall clock.", line)
+            for desc, line in _extravagant_dft_settings(source)
+        ]
+
+    def _primitive_cell_diagnostics(self, source: str) -> List[Diagnostic]:
+        """Flag conventional-cell builds the researcher never asked for.
+
+        Plane-wave DFT cost grows ~cubically with the atom count, so a
+        ``crystal(...)`` call with ``primitive_cell=False`` (or omitted -- ASE
+        defaults to the conventional cell) turns a minutes-long bulk-property
+        run into hours (a 24-atom conventional CaPt2 EOS vs the 6-atom
+        primitive cell). The codegen prompt already demands the primitive
+        cell; this makes the rule mechanical. It stands down whenever the
+        researcher's own request/material mentions the conventional cell or a
+        genuinely bigger system (supercell, surface, defect, ...): an explicit
+        instruction always beats the fast default.
+        """
+        asked = " ".join(
+            str(self.brief.get(k) or "")
+            for k in ("objective", "property", "material_desc")
+        ).lower()
+        if any(word in asked for word in _EXPLICIT_CELL_WORDS):
+            return []
+        return [
+            Diagnostic(
+                "primitive-cell", "error",
+                "builds the CONVENTIONAL cell: this `crystal(...)` call must pass "
+                "`primitive_cell=True` for a bulk property (the researcher did not "
+                "ask for a conventional cell or supercell). Run the calculation on "
+                "the primitive cell and convert any conventional-cell quantity "
+                "(e.g. a cubic lattice parameter) from the primitive result in "
+                "code; update any atom-count self-checks/assertions to the "
+                "primitive count.", line)
+            for line in _conventional_cell_calls(source)
+        ]
 
     def smoke(self, source: str) -> SmokeOutcome:
         """Run ``source`` with ``--smoke`` in the sim env and classify the result.
@@ -569,6 +735,407 @@ def _loads_array(text: str):
         except (ValueError, TypeError):
             return None
     return None
+
+
+# Words in the researcher's own request/material that mean the conventional
+# cell (or a bigger system) was asked for deliberately -- the primitive-cell
+# gate must stand down. Substring-matched, lowercase.
+_EXPLICIT_CELL_WORDS = (
+    "conventional", "supercell", "super-cell", "super cell",
+    "surface", "slab", "interface", "grain",
+    "defect", "vacancy", "interstitial", "dopant", "doped", "adsor",
+)
+
+# Words meaning the researcher deliberately asked for expensive, tightly
+# converged settings -- the DFT cost-budget gate must stand down.
+_ACCURACY_WORDS = (
+    "high accuracy", "high-accuracy", "accurate", "converged", "convergence",
+    "publication", "benchmark", "tight", "precise", "precision",
+)
+
+
+def _static_int_elements(node) -> List[int]:
+    """Constant ints of a tuple/list literal (or a ``{"size": (...)}`` dict)."""
+    if isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and key.value == "size":
+                node = value
+                break
+    if isinstance(node, (ast.Tuple, ast.List)):
+        vals = [e.value for e in node.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, int)]
+        return vals if len(vals) == len(node.elts) else []
+    return []
+
+
+def _extravagant_dft_settings(source: str) -> List[Tuple[str, int]]:
+    """(description, line) pairs for numerical settings beyond the default budget.
+
+    Two statically checkable cost drivers: a plane-wave cutoff above 500 eV
+    (``PW(600)``) and a k-point grid denser than 10 per axis
+    (``kpts=(12, 12, 12)`` or ``kpts={"size": (12, 12, 12)}``). Either one
+    multiplies every SCF by a large factor; together they took a 6-atom CaPt2
+    EOS from minutes to ~10 minutes PER SCF ITERATION.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    found: List[Tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name == "PW" and node.args:
+            arg = node.args[0]
+            if (isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, (int, float))
+                    and arg.value > 500):
+                found.append((f"a PW({arg.value:g}) cutoff", node.lineno))
+        for kw in node.keywords:
+            if kw.arg == "kpts":
+                dims = _static_int_elements(kw.value)
+                if dims and max(dims) > 10:
+                    found.append(
+                        (f"a kpts={tuple(dims)} grid", kw.value.lineno))
+    return found
+
+
+# Cell filters that moved from ase.constraints to ase.filters in ASE 3.23.
+# Importing them from the old path raises ImportError on the cluster env --
+# and typically from INSIDE a function the smoke run never calls, so only a
+# static check catches it before the expensive run.
+_MOVED_ASE_FILTERS = frozenset({
+    "ExpCellFilter", "FrechetCellFilter", "UnitCellFilter", "StrainFilter",
+})
+
+
+def _stale_ase_filter_imports(source: str) -> List[Tuple[str, int]]:
+    """(name, line) pairs importing a moved cell filter from ``ase.constraints``."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    found: List[Tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "ase.constraints":
+            for alias in node.names:
+                if alias.name in _MOVED_ASE_FILTERS:
+                    found.append((alias.name, node.lineno))
+    return found
+
+
+def _fixed_occupations_without_numbers(source: str) -> List[int]:
+    """Lines passing GPAW ``occupations={"name": "fixed"}`` with no ``numbers``.
+
+    GPAW's ``"fixed"`` mode means explicit per-band occupation numbers and
+    requires a ``numbers`` array; the frozen-occupations band-structure mode
+    the scripts actually want is ``"fixed-uniform"``. The wrong name raises
+    TypeError only when the calculator initializes -- after the ground-state
+    SCF was already paid for.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+        vals = {k.value: v for k, v in zip(node.keys, node.values)
+                if isinstance(k, ast.Constant)}
+        name = vals.get("name")
+        if (isinstance(name, ast.Constant) and name.value == "fixed"
+                and "numbers" not in keys):
+            lines.append(node.lineno)
+    return lines
+
+
+# Keywords that state the spin state as an explicit COUNT, i.e. that duplicate
+# what initial magnetic moments encode: a multiplicity (Psi4, CP2K), NWChem's
+# ``mult``, or a count of unpaired electrons (xTB's ``uhf``, ``nopen``). The value
+# meaning "closed shell" differs, hence the pair.
+_SPIN_COUNT_KEYS = {
+    "multiplicity": 1, "spin_multiplicity": 1, "mult": 1,   # 2S+1
+    "uhf": 0, "nopen": 0,                                   # unpaired electrons
+}
+# Deliberately NOT included: ``spinpol``, ``nspin``, ``uks``, ``unrestricted``,
+# ``reference``. Those switch spin polarization on and are the CORRECT companion
+# to magnetic moments rather than a competing statement of the spin count, so
+# flagging them would punish the idiomatic GPAW/QE/ABINIT spelling.
+
+
+# Uncorrelated methods, by the spelling each engine uses. Bare Hartree-Fock
+# recovers no electron correlation at all, which is most of a bond's energy.
+_UNCORRELATED_METHODS = frozenset({"scf", "hf", "rhf", "uhf", "rohf",
+                                   "hfexch", "hartree-fock"})
+
+
+def _uncorrelated_method_for_thermochemistry(source: str,
+                                             property_name: str) -> List[int]:
+    """Lines selecting bare Hartree-Fock for a property built from bond energies.
+
+    Correlation IS the bulk of a bond's energy, so an uncorrelated method
+    underestimates every bond energy by a large, systematic amount: for CO2 it
+    puts the atomization at ~1012 kJ/mol against ~1628, i.e. a standard heat of
+    formation of +245.7 where the answer is -393.5. The run converges cleanly and
+    reports a confident number of the wrong sign.
+
+    Only raised for a property assembled from several species' energies -- an SCF
+    orbital energy or a Hartree-Fock geometry is a perfectly reasonable thing to
+    ask for, so the property, not the method, decides whether this is an error.
+    """
+    if not _thermochemical_property(property_name):
+        return []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        # Keyword form: energy(method='scf'), NWChem(theory='scf'), dft(xc='hf').
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg in ("method", "theory", "xc", "functional") and (
+                        isinstance(kw.value, ast.Constant)
+                        and str(kw.value.value).strip().lower()
+                        in _UNCORRELATED_METHODS):
+                    lines.append(node.lineno)
+                    break
+        # Mapping form, and plain assignment: method = "scf".
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (isinstance(key, ast.Constant)
+                        and str(key.value).lower() in ("method", "theory", "xc",
+                                                       "functional")
+                        and isinstance(value, ast.Constant)
+                        and str(value.value).strip().lower() in _UNCORRELATED_METHODS):
+                    lines.append(node.lineno)
+                    break
+        elif isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if (any(t in ("method", "theory", "xc", "functional") for t in targets)
+                    and isinstance(node.value, ast.Constant)
+                    and str(node.value.value).strip().lower() in _UNCORRELATED_METHODS):
+                lines.append(node.lineno)
+    return sorted(set(lines))
+
+
+# Properties assembled from several species' energies, where a method's per-bond
+# error lands directly in the answer. Mirrors codegen_engine.wants_thermo_cycle;
+# kept as its own copy because the doctor sees only the brief, not the plan.
+_THERMOCHEMICAL_WORDS = ("formation", "atomization", "dissociation", "combustion",
+                         "reaction_enthalpy", "reaction enthalpy", "hydrogenation",
+                         "binding_energy", "binding energy", "cohesive")
+
+
+def _thermochemical_property(property_name: str) -> bool:
+    text = str(property_name or "").lower()
+    return any(word in text for word in _THERMOCHEMICAL_WORDS)
+
+
+def _ambiguous_spin_specification(source: str) -> List[int]:
+    """Lines stating an open-shell spin state twice, in two rival channels.
+
+    ASE calculators take the spin state one of two ways, and which one they read
+    is engine-specific:
+
+    * from the Atoms object -- ``atoms.set_initial_magnetic_moments(...)``, used
+      by GPAW, Quantum ESPRESSO (``starting_magnetization`` is derived from the
+      magmoms), ABINIT and DFTB+;
+    * from an explicit count keyword -- Psi4's and CP2K's ``multiplicity``,
+      NWChem's ``mult``, xTB's ``uhf``.
+
+    When a script states it BOTH ways, one statement is silently discarded, and
+    there is no general rule for which: ASE's Psi4 goes as far as overwriting
+    ``reference`` with ``'uhf'`` and ``multiplicity`` with ``None`` whenever the
+    atoms carry magmoms (``Psi4.calculate``), so the SCF then converges to a
+    multiplicity-1 state while the script says 3. Nothing warns, nothing raises,
+    and the geometry and forces all look reasonable.
+
+    That is not hypothetical and it is not cheap. A CO2 heat-of-formation run
+    computed its C and O atomic references as singlets this way and reported
+    dHf = -1072 kJ/mol against a -393.5 target (run 103d9c1b); measured at
+    b3lyp/sto-3g the discarded multiplicity is worth +313 kJ/mol on an O atom and
+    +226 on a C atom, and ``ase.build.molecule`` assigns magmoms to precisely the
+    open-shell species that need a multiplicity.
+
+    So: flagged when an open-shell spin COUNT is specified and the script never
+    reconciles the magnetic-moment channel. Deliberately conservative about which
+    engine is in play -- naming engines here would only catch the ones already
+    known to bite, and the remedy (state the spin once, explicitly) is a single
+    line that is a harmless no-op when the moments were already zero.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    # Touching the magmom channel at all counts as reconciling it: the author has
+    # made a deliberate choice between the two mechanisms, which is the ask.
+    if "set_initial_magnetic_moments" in source or "initial_magmoms" in source:
+        return []
+
+    def open_shell(key: str, value) -> bool:
+        """Whether ``value`` states an open shell for spin keyword ``key``."""
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, int):
+            # A computed value (e.g. multiplicity=mult) could be either; treat it
+            # as open-shell, since the ambiguity is exactly what is being flagged.
+            return not isinstance(value, ast.Constant)
+        return value.value != _SPIN_COUNT_KEYS[key]
+
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        # Keyword form: Psi4(multiplicity=3), static_job(spin_multiplicity=3).
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg in _SPIN_COUNT_KEYS and open_shell(kw.arg, kw.value):
+                    lines.append(node.lineno)
+                    break
+        # Mapping form: NWChem's nested input dict, {"mult": 2}.
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (isinstance(key, ast.Constant) and key.value in _SPIN_COUNT_KEYS
+                        and open_shell(key.value, value)):
+                    lines.append(node.lineno)
+                    break
+    return sorted(set(lines))
+
+
+def _signature_probe_calls(source: str) -> List[int]:
+    """Lines probing API capabilities with ``inspect.signature(...)``.
+
+    Synthesized scripts use it defensively ("does this calculator accept a
+    ``solvent`` kwarg?") -- but ASE-style calculators (xtb-python's ``XTB``
+    among them) declare ``__init__(self, atoms=None, **kwargs)`` and route
+    every real option through ``default_parameters``, so the probe reports a
+    false "unsupported" and the script aborts a run that would have worked.
+    Pass the documented keywords directly; a genuinely wrong keyword raises
+    its own clear error.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    bare_signature_imported = any(
+        isinstance(node, ast.ImportFrom) and node.module == "inspect"
+        and any(alias.name == "signature" for alias in node.names)
+        for node in ast.walk(tree))
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Attribute) and func.attr == "signature"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "inspect"):
+            lines.append(node.lineno)
+        elif (isinstance(func, ast.Name) and func.id == "signature"
+                and bare_signature_imported):
+            lines.append(node.lineno)
+    return lines
+
+
+def _hardcoded_bandpath_calls(source: str) -> List[int]:
+    """Lines calling ``.bandpath(...)`` with a literal special-point string.
+
+    The killer behind Slurm job 2487027: the script relaxed the cell (adding
+    numerical noise), then asked for ``bandpath("GXWKGL")``. ASE derives the
+    available special points from the lattice it detects in the *actual* cell
+    -- after relaxation the FCC cell is no longer recognized as FCC, the
+    detected lattice has no 'W', and the whole DFT run dies on KeyError after
+    the ground state was already paid for. Calling ``bandpath(npoints=...)``
+    with no path string always works: ASE picks the standard path for whatever
+    lattice it detected.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "bandpath"):
+            continue
+        literal = (node.args and isinstance(node.args[0], ast.Constant)
+                   and isinstance(node.args[0].value, str))
+        literal = literal or any(
+            kw.arg == "path" and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+            for kw in node.keywords)
+        if literal:
+            lines.append(node.lineno)
+    return lines
+
+
+def _scf_grid_bandgap_calls(source: str) -> List[int]:
+    """Lines reading the fundamental gap straight off the SCF k-grid.
+
+    The silent-wrong-answer behind the "silicon gap = 0.81 eV" run: calling
+    ``ase.dft.bandgap.bandgap(calc)`` right after the ground state searches for
+    band extrema only among the SCF grid's k-points -- but extrema generally
+    lie BETWEEN grid points (silicon's CBM sits at ~0.85 of Gamma->X, which no
+    8x8x8 Monkhorst-Pack grid samples), so the reported gap is the minimum over
+    sampled points and comes out too large (0.81 eV vs the true ~0.6 eV PBE
+    value). The script runs cleanly, so only this gate catches it.
+
+    Flags every ``bandgap(...)`` call when the script has no non-SCF band-path
+    machinery at all -- no ``fixed_density`` (GPAW's fixed-density second pass)
+    and no ``bandpath`` call anywhere. Presence of either is taken as the
+    two-step method being used; which calc object each call reads is beyond a
+    static check.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    has_path_machinery = any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("fixed_density", "bandpath")
+        for node in ast.walk(tree))
+    if has_path_machinery:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name == "bandgap":
+            lines.append(node.lineno)
+    return lines
+
+
+def _conventional_cell_calls(source: str) -> List[int]:
+    """Line numbers of ``crystal(...)`` calls that build the conventional cell.
+
+    A call counts when ``primitive_cell`` is ``False`` or omitted (ASE's
+    default is the conventional cell). Only bare ``crystal(...)`` /
+    ``*.crystal(...)`` calls are considered -- the ``ase.spacegroup`` builder
+    the synthesized scripts use.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name != "crystal":
+            continue
+        kw = next((k for k in node.keywords if k.arg == "primitive_cell"), None)
+        if kw is None or (isinstance(kw.value, ast.Constant) and kw.value.value is False):
+            lines.append(node.lineno)
+    return lines
 
 
 def _undefined_names(source: str) -> List[Tuple[str, int]]:

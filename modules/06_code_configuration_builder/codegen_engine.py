@@ -168,29 +168,122 @@ def has_runnable_entrypoint(source: str) -> bool:
     return False
 
 
-def extract_valid_source(raw, calculator_import: Optional[str] = None) -> Optional[str]:
-    """Fenced-or-raw agent reply -> a usable script, or ``None``.
+def validate_source(raw, calculator_import: Optional[str] = None):
+    """``(source, None)`` for a usable script, else ``(None, reason)``.
 
-    Returns ``None`` when the reply is non-string/empty, doesn't compile, has no
-    runnable entrypoint, or (when ``calculator_import`` is given) never references
-    that import. The entrypoint check catches a truncated reply: a script cut off
-    mid-body often still *compiles* (its last partial line is a valid statement)
-    and mentions the calculator, but defines functions it never calls -- so
-    running it does nothing. Rejecting it lets the caller repair or fall back
-    instead of shipping a script that silently no-ops.
+    The reason matters: a rejected reply used to vanish into a bare ``None``, so
+    a silent fall back to the do-nothing scaffold was indistinguishable from a
+    gateway outage -- and the run went to the cluster either way (observed on
+    Slurm job 2569967, which "succeeded" in 5 seconds having computed nothing).
+
+    The entrypoint check catches a truncated reply: a script cut off mid-body
+    often still *compiles* (its last partial line is a valid statement) and
+    mentions the calculator, but defines functions it never calls -- so running
+    it does nothing. ``no_entrypoint`` is therefore the fingerprint of hitting
+    the token cap, which is why it is reported separately.
     """
     if not isinstance(raw, str) or not raw.strip():
-        return None
+        return None, "empty_reply"
     source = strip_code_fences(raw)
     try:
         compile(source, "main.py", "exec")
-    except SyntaxError:
-        return None
+    except SyntaxError as exc:
+        return None, f"syntax_error: {exc.msg} (line {exc.lineno})"
     if calculator_import and calculator_import.lower() not in source.lower():
-        return None
+        return None, f"never_references_{calculator_import}"
     if not has_runnable_entrypoint(source):
-        return None
-    return source
+        # Compiles but calls nothing -- almost always a reply cut off at the cap.
+        return None, "no_entrypoint (reply likely truncated at the token cap)"
+    return source, None
+
+
+def extract_valid_source(raw, calculator_import: Optional[str] = None) -> Optional[str]:
+    """Fenced-or-raw agent reply -> a usable script, or ``None``.
+
+    Thin wrapper over :func:`validate_source` for callers that only need the
+    script (the REPAIR stage); BUILD wants the reason too.
+    """
+    return validate_source(raw, calculator_import)[0]
+
+
+_BUNDLE_HELPERS = Path(__file__).resolve().parent / "bundle_helpers"
+
+
+def _thermo_helper_source() -> str:
+    """Source of ``twain_thermo.py``, copied verbatim into a bundle."""
+    return (_BUNDLE_HELPERS / "twain_thermo.py").read_text(encoding="utf-8")
+
+
+# Property classes whose value is assembled from several species' energies, where
+# a dropped term or a wrong stoichiometric coefficient yields a plausible number
+# rather than a crash. Keyed on the QUANTITY, not on any engine or molecule.
+_THERMO_CYCLE_WORDS = (
+    "formation", "atomization", "dissociation", "reaction_enthalpy",
+    "reaction enthalpy", "combustion", "hydrogenation", "binding_energy",
+    "binding energy", "cohesive",
+)
+
+
+def wants_thermo_cycle(*fields) -> bool:
+    """Whether any field names a property built from a multi-species cycle.
+
+    >>> wants_thermo_cycle("standard_heat_of_formation_kJ_per_mol")
+    True
+    >>> wants_thermo_cycle("band_gap", None)
+    False
+    """
+    text = " ".join(str(f).lower() for f in fields if f)
+    return any(word in text for word in _THERMO_CYCLE_WORDS)
+
+
+def _pseudo_helper_source() -> str:
+    """Source of ``twain_pseudo.py``, copied verbatim into a bundle.
+
+    Read from disk rather than templated: it is a real module, imported directly
+    by its unit tests, so what a run executes is exactly what the tests cover.
+    """
+    return (_BUNDLE_HELPERS / "twain_pseudo.py").read_text(encoding="utf-8")
+
+
+def _first_metric_name(plan: dict) -> Optional[str]:
+    """The first acceptance metric's name, or None.
+
+    Stands in for a plan whose ``requested_property`` the planner left unset: the
+    metric names what the run is for, so it is enough to decide that real code is
+    wanted rather than a scaffold.
+    """
+    for metric in plan.get("acceptance_metrics") or []:
+        if isinstance(metric, dict) and metric.get("metric_name"):
+            return str(metric["metric_name"])
+    return None
+
+
+class SynthesisFailed(RuntimeError):
+    """Code synthesis produced nothing usable and the caller needs a real script.
+
+    Raised only when ``generate(require_synthesis=True)``: the run is about to
+    execute, and the generic scaffold would burn the allocation computing nothing
+    while reporting success. Carries the per-attempt reasons so the failure names
+    a cause -- a gateway error, a reply that never mentioned the calculator, or a
+    reply truncated at the token cap -- instead of leaving it to be guessed at.
+    """
+
+    def __init__(self, tool_name, calculator, agent_missing, synthesis):
+        self.synthesis = synthesis or {}
+        self.attempts = self.synthesis.get("attempts") or []
+        target = calculator or tool_name
+        if agent_missing:
+            detail = "no LLM agent was available to write it"
+        elif self.attempts:
+            detail = "; ".join(
+                f"attempt {a.get('attempt')}: {a.get('reason')}" for a in self.attempts)
+        else:
+            detail = "no attempt was recorded"
+        super().__init__(
+            f"could not generate a runnable {target} script, and this run is set "
+            f"to execute -- refusing to submit the placeholder scaffold, which "
+            f"would exit 0 having computed nothing. Reason(s): {detail}"
+        )
 
 
 @dataclass(frozen=True)
@@ -274,9 +367,64 @@ _SMOKE_LOAD_ONLY = (
 )
 
 
+# Spliced into BOTH synthesis prompts, unconditionally. Not gated on the toolset:
+# the two rival spin channels are an ASE-wide design split, so any engine list
+# here would protect only the engines already known to have bitten us -- and the
+# ground-state multiplicity of an open-shell reference is a correctness issue for
+# every electronic-structure run, not a per-engine quirk.
+_SPIN_GUIDANCE = (
+    "- OPEN-SHELL SPECIES -- get the spin state right, and state it exactly ONCE. "
+    "Atoms and radicals are usually NOT closed-shell singlets: an O atom and a C "
+    "atom are 3P triplets (multiplicity 3), O2 is a 3Sigma-g- triplet (3), an N "
+    "atom is 4S (4). A singlet stands in silently for any of these and corrupts "
+    "every energy difference built on it.\n"
+    "- ASE has two rival ways to convey that spin state and each calculator reads "
+    "only one: GPAW, Quantum ESPRESSO, ABINIT and DFTB+ read the Atoms object's "
+    "initial magnetic moments, while Psi4, CP2K, NWChem and xTB read an explicit "
+    "count keyword (`multiplicity`, `mult`, `uhf`). If BOTH are set the loser is "
+    "discarded with no warning -- ASE's Psi4 goes further and overwrites your "
+    "`reference` with 'uhf' and your `multiplicity` with None whenever the atoms "
+    "carry moments, and `ase.build.molecule` puts moments on exactly the "
+    "open-shell species that need a multiplicity. That pairing turned a CO2 heat "
+    "of formation of -393.5 into -1072 kJ/mol. So pick the channel your "
+    "calculator actually reads and neutralize the other: passing a count, first "
+    "call `atoms.set_initial_magnetic_moments([0.0] * len(atoms))` (a no-op when "
+    "they were already zero) and pass `reference=`/unrestricted explicitly; "
+    "relying on moments, set them yourself and pass no count keyword. Never let "
+    "the two disagree, and never leave which one wins to the calculator.\n"
+)
+
+
 # LLM code-synthesis prompt. The builder asks the gateway for a self-contained
 # main.py tailored to the selected library + calculator + material + property;
 # a deterministic template is the fallback when synthesis is unavailable/invalid.
+# Objective phrasings that ask to RETRIEVE a stored value from the Materials
+# Project instead of computing it. A lookup is a genuinely different route from
+# a calculation -- it needs the mp-api client and an MP_API_KEY at run time --
+# so codegen must be told about it explicitly (property + material alone give
+# the model no way to know; the CaPt2 run failed exactly this way).
+_MP_LOOKUP_NEEDLES = ("materials project", "materialsproject", "mprester", "mp-api")
+_MP_LOOKUP_VERBS = ("retriev", "look up", "lookup", "precomputed", "database",
+                    "stored", "query", "fetch")
+
+
+def mp_lookup_requested(objective) -> bool:
+    """Whether the researcher's objective asks for a Materials Project retrieval.
+
+    Requires BOTH a Materials Project mention and a retrieval verb, so "compare
+    against the Materials Project value" or "the mp-1023 structure" alone do not
+    reroute a compute task into a lookup.
+
+    >>> mp_lookup_requested("retrieve the precomputed bulk modulus from the Materials Project")
+    True
+    >>> mp_lookup_requested("compute the band gap of Si")
+    False
+    """
+    text = (objective or "").lower()
+    return (any(n in text for n in _MP_LOOKUP_NEEDLES)
+            and any(v in text for v in _MP_LOOKUP_VERBS))
+
+
 # The requirements are deliberately domain-agnostic -- they describe *how* to write
 # a reliable script (discover identifiers, don't hardcode constants, exercise the
 # tool in --smoke), never *what* property or material to expect.
@@ -306,7 +454,28 @@ would come out wrong, the fix is to CORRECT the structure-building code so it pr
 right cell -- never to bolt on a validator that halts execution. You may print the \
 composition, cell, and minimum interatomic distance for visibility, but a mismatch must \
 never stop the computation.
-{structure_note}
+- Keep the space-group ORIGIN SETTING and the Wyckoff coordinates consistent: origin \
+choice 1 and origin choice 2 place the same site at DIFFERENT fractional coordinates, and \
+a mismatch silently builds the wrong occupancy/stoichiometry (in Fd-3m origin choice 2, \
+8a is (1/8,1/8,1/8) and 16d is (1/2,1/2,1/2); (0,0,0) is the 16c site there, whereas 8a \
+is (0,0,0) only in origin choice 1). Because this is easy to get wrong from memory, \
+SELF-CHECK it at runtime: after building, derive the element counts from the structure, \
+and if their reduced ratio does not match the target formula, REBUILD with the same \
+Wyckoff coordinates under the other `setting=` value and use whichever cell matches. \
+This rebuild-on-mismatch is required; aborting on mismatch is forbidden.
+- Import from the CURRENT module layout of the pinned library versions -- do not use \
+import paths that only worked in older releases, and NEVER invent a module path that \
+merely sounds plausible. In ASE >= 3.23, cell-relaxation filters live in `ase.filters` \
+(`from ase.filters import FrechetCellFilter`), NOT `ase.constraints`. The band-gap \
+helper is `from ase.dft.bandgap import bandgap` (pass it the attached calculator); \
+there is NO `gpaw.bandgap` module. In GPAW, occupations={{"name": "fixed"}} requires an \
+explicit per-band `numbers` array -- for a frozen-occupations band-structure pass use \
+{{"name": "fixed-uniform"}}.
+- NEVER gate behavior on `inspect.signature()` capability probes: ASE-style calculators \
+(e.g. xtb-python's `XTB`) declare `__init__(self, atoms=None, **kwargs)` and route real \
+options (`method`, `accuracy`, `solvent`, ...) through `default_parameters`, so the probe \
+falsely reports them unsupported. Pass the documented keywords directly \
+(`XTB(method="GFN2-xTB", solvent="water")`) and let a genuinely wrong keyword raise.
 - Attach the {calculator} calculator (`{calculator_import}`) and compute {property}. \
 Do NOT invent model, dataset, or parameter-set identifiers -- a name you guess may \
 not exist. If the calculator loads a named pretrained model, discover the valid \
@@ -318,14 +487,57 @@ or averaging scheme (e.g. an elastic-tensor-derived modulus and its averaging \
 convention, a specific gap type, a named ensemble), compute THAT quantity by its proper \
 method -- do not report a cheaper proxy under the requested name -- and add a comment \
 stating how the number you print maps to {property}.
-- If {property} is only defined for an equilibrium structure, RELAX the geometry first \
-(atomic positions, and the cell when the property depends on it) to converged \
-forces/stress, and compute from the relaxed structure -- not from an arbitrary \
-unrelaxed guess.
+- Default to the FASTEST protocol that answers the question. Unless the researcher \
+explicitly asked for a relaxed/optimized structure, do NOT run any geometry or cell \
+optimization: evaluate the property directly at the standard reference structure \
+(experimental lattice parameters) -- a band gap, band structure, DOS, or single-point \
+energy needs no relaxation step. Relax first ONLY when {property} is undefined without \
+equilibrium (e.g. an equation-of-state minimum, elastic response, adsorption geometry), \
+and then relax only the degrees of freedom the property depends on, to converged \
+forces/stress -- never from an arbitrary unrelaxed guess.
+- The same default-speed rule caps the NUMERICAL settings. Unless the researcher \
+explicitly asked for high accuracy or tight convergence: plane-wave cutoff <= 450 eV \
+(350-400 eV is fine for metals with PAW), k-point grids no denser than 8x8x8 for a \
+primitive cell, and an equation of state is ONE scan of 5-7 volume points spanning \
+about +-5% -- never a wide scan followed by a refinement scan. This resolves bulk \
+properties (lattice constant, bulk modulus, band gap) to a few percent, which is the \
+expected default; a 600 eV cutoff with a 12x12x12 grid and 18 EOS points costs ~50x \
+more and gets the job killed at its wall-clock limit with zero results.
 - In the real (non-smoke) run, use numerical settings converged well enough for \
-{property} (adequate k-point density, plane-wave/basis cutoff, SCF tolerance, sampling); \
-use the library's documented production defaults when unsure, and do not carry any \
-reduced settings from the --smoke check into the full run.
+{property} (adequate k-point density, plane-wave/basis cutoff, SCF tolerance, sampling) \
+within the budget above; use the library's documented production defaults when unsure, \
+and do not carry any reduced settings from the --smoke check into the full run.
+- Do NOT pay for atoms the property does not need: for a bulk crystal property \
+(lattice parameter, bulk modulus, cohesive/formation energy, band property) run the \
+calculation on the PRIMITIVE cell, converting any conventional-cell quantity (like a \
+cubic lattice parameter) from the primitive-cell result at the end. This must happen \
+IN CODE, not in a comment: with `ase.spacegroup.crystal` actually pass \
+`primitive_cell=True` in the call, and SELF-CHECK by printing the atom count (diamond \
+Si primitive = 2 atoms, not the 8-atom conventional cube; C15 CaPt2 primitive = 6 \
+atoms, not 24). Plane-wave DFT cost grows roughly with the CUBE of the atom count, so \
+a conventional cell wastes an order of magnitude or more. Use the full conventional \
+cell only when the property genuinely requires it (e.g. a defect or surface supercell).
+- Keep sampling scans minimal-but-sufficient: an equation-of-state fit needs 5-7 \
+volume points around the reference cell -- only widen or rescan if the minimum is not \
+bracketed.
+- For a band structure / band path, NEVER hardcode special-point letters: which \
+letters exist (W, L, M, R, ...) depends on the Bravais lattice ASE detects from the \
+actual cell, and a wrong guess raises KeyError after the whole SCF has already been \
+paid for. Use the cell's own default path (e.g. \
+`atoms.cell.bandpath(npoints=..., pbc=atoms.pbc)` with no path string), or build the \
+path only from letters present in `atoms.cell.bandpath().special_points`.
+- For a fundamental band gap, NEVER read it off the SCF k-grid (`bandgap(calc)` \
+right after the ground state): band extrema generally lie BETWEEN grid points \
+(silicon's CBM sits at ~0.85 of Gamma->X, which no uniform grid samples), so the \
+gap comes out too large while the script runs cleanly. Two-step method: converge \
+the density on the SCF grid, then run a non-self-consistent fixed-density pass \
+along the standard path and take the extrema from THAT calculation -- e.g. \
+`bs_calc = calc.fixed_density(kpts=atoms.cell.bandpath(npoints=200, \
+pbc=atoms.pbc), symmetry='off')` then `bandgap(bs_calc, direct=False)`.
+- Make output MPI-safe: when the calculator can run under MPI, every rank executes the \
+script, so write files and print through rank-0-only helpers (e.g. \
+`ase.parallel.parprint` and `ase.parallel.paropen`, or an explicit \
+`world.rank == 0` guard). These are no-ops in serial runs, so use them unconditionally.
 - Print every metric WITH its physical unit, and for any fitted or derived value also \
 print a fit-quality / convergence diagnostic (e.g. fit residual, R^2, number of sample \
 points) so the result's reliability is visible.
@@ -335,7 +547,7 @@ so the module still imports where they are not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{smoke_instruction}
+{spin_note}{thermo_note}{pseudo_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "calculator", "property", and "output_file". Write the same \
 metrics as one CSV row to --output.
@@ -380,9 +592,12 @@ file. For a molecule, build from its formula/SMILES with the library's own tools
 crystal, build the EXACT phase/polymorph named -- if a space group is given, construct \
 THAT structure and never substitute a different or more common polymorph; its standard \
 reference lattice parameters are structural INPUTS, not the {property} you compute. \
-Optimize the geometry first if the property needs a relaxed structure, using numerical \
-settings converged well enough for {property} in the real run. Do NOT hardcode the \
-{property} value or any other result you are meant to calculate.
+Default to the FASTEST protocol that answers the question: unless the researcher \
+explicitly asked for a relaxed/optimized structure, compute directly at the standard \
+reference geometry with NO optimization step; optimize first only when {property} is \
+undefined without equilibrium, using numerical settings converged well enough for \
+{property} in the real run. Do NOT hardcode the {property} value or any other result \
+you are meant to calculate.
 - Build the structure CORRECTLY rather than defensively: use the standard reference cell \
 for the named polymorph (correct lattice parameters, Wyckoff positions, and stoichiometric \
 ratio for the formula). Do NOT write runtime guards that raise or exit when the \
@@ -398,13 +613,17 @@ printed number maps to {property}. Do NOT invent method, basis-set, functional, 
 parameter identifiers -- a name you guess may not exist. Use documented defaults or \
 discover valid identifiers at runtime, and call every API with the argument types it \
 documents.
+- Do NOT pay for atoms the property does not need: compute bulk crystal properties on \
+the PRIMITIVE cell (converting conventional-cell quantities from it at the end), and \
+keep sampling scans minimal-but-sufficient (an equation-of-state fit needs 5-7 volume \
+points; widen only if the minimum is not bracketed).
 - Keep the heavy import (`{library_import}`) INSIDE functions so the module still \
 imports where it is not installed.
 - First thing in the `if __name__ == "__main__":` block, anchor the working \
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{smoke_instruction}
+{spin_note}{thermo_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "property", and "output_file"; print each metric WITH its \
 physical unit, and for any fitted or derived value also print a fit-quality / \
@@ -552,18 +771,33 @@ class RunBundle:
     tool_name: str
     template_name: str
     entrypoint: str = "main.py"
+    # twain_pseudo.py, present only for an engine that ships no pseudopotentials
+    # (Quantum ESPRESSO, ABINIT). Copied verbatim rather than generated, so the
+    # element -> filename lookup that keeps a hallucinated pseudopotential out of
+    # a run is version-controlled and unit-tested instead of re-derived per plan.
+    pseudo_helper_py: Optional[str] = None
+    # twain_thermo.py, present only when the property is assembled from several
+    # species' energies (a formation/atomization/reaction enthalpy). Keeps the
+    # cycle's algebra -- every species' H(T)-E_elec, including each free atom's
+    # 5/2 kT, and the stoichiometry -- out of generated code.
+    thermo_helper_py: Optional[str] = None
 
     def files(self) -> Dict[str, str]:
         """Map of filename -> contents for the bundle."""
-        return {
+        files = {
             "main.py": self.main_py,
             "config.yaml": self.config_yaml,
             "requirements.txt": self.requirements_txt,
             "inline_tests.py": self.inline_tests_py,
         }
+        if self.pseudo_helper_py is not None:
+            files["twain_pseudo.py"] = self.pseudo_helper_py
+        if self.thermo_helper_py is not None:
+            files["twain_thermo.py"] = self.thermo_helper_py
+        return files
 
     def write(self, dest: Union[str, Path]) -> Path:
-        """Write all four files into ``dest`` (created if needed); return it."""
+        """Write every bundle file into ``dest`` (created if needed); return it."""
         dest = Path(dest)
         dest.mkdir(parents=True, exist_ok=True)
         for name, content in self.files().items():
@@ -588,11 +822,20 @@ class CodegenEngine:
     generated code and stays offline/deterministic for unit tests.
     """
 
+    # Samples to draw before giving up on synthesis. One draw is flaky -- the same
+    # prompt that fails extraction often succeeds on a retry -- and the REPAIR
+    # stage already takes two for exactly this reason.
+    SYNTHESIS_ATTEMPTS = 2
+
     def __init__(self, templates_dir: Optional[Union[str, Path]] = None):
         self.templates_dir = (
             Path(templates_dir) if templates_dir
             else Path(__file__).resolve().parent / "templates"
         )
+        # What the last synthesis attempt did, for the caller to record. Without
+        # it a rejected reply and an unreachable gateway were indistinguishable:
+        # both fell back to the do-nothing scaffold, silently.
+        self.last_synthesis: Optional[dict] = None
 
     # -- template selection --------------------------------------------------
     def select_template(self, tool_name: str, *, hint: str = "") -> TemplateSpec:
@@ -662,7 +905,10 @@ class CodegenEngine:
 
     # -- main entry ----------------------------------------------------------
     def generate(self, plan, *, intent: Optional[dict] = None, agent=None,
-                 smoke_compute: bool = False) -> RunBundle:
+                 smoke_compute: bool = False,
+                 require_synthesis: bool = False,
+                 calculator_executable: Optional[str] = None,
+                 pseudo_library: Optional[str] = None) -> RunBundle:
         """Build a :class:`RunBundle` from an ExecutionPlan.
 
         ``plan`` may be an ``ExecutionPlan`` dataclass, a plain dict, or a path
@@ -674,6 +920,13 @@ class CodegenEngine:
         gap). Any synthesis failure falls back to a deterministic template so
         codegen never depends on the network to succeed; offline (``agent=None``)
         always renders a template.
+
+        ``require_synthesis`` refuses that fallback. The generic scaffold loads
+        the tool and writes a stub -- a fine deliverable to read, but running it
+        computes nothing while exiting 0, so the payload, Slurm and TWAIN all
+        report success (observed on job 2569967: "completed successfully" in five
+        seconds, no chemistry done). A caller about to EXECUTE passes True and
+        gets a loud failure carrying the synthesis reasons instead.
         """
         plan = self._plan_to_dict(plan)
         method = plan.get("selected_method", {}) or {}
@@ -687,6 +940,9 @@ class CodegenEngine:
             return self._generate_with_calculator(
                 plan, libraries, calculator, calculator_import, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
+                require_synthesis=require_synthesis,
+                calculator_executable=calculator_executable,
+                pseudo_library=pseudo_library,
             )
         # Library-only run. Prefer a dedicated, tested template when one fits the
         # tool (Pymatgen/ASE/RDKit). Otherwise, if the plan asks for a real property
@@ -703,12 +959,28 @@ class CodegenEngine:
         # REPAIR rather than aborting the run. When a real structure IS present it
         # is baked into the template below, so we keep the deterministic path.
         needs_structure = spec.requires_structure and not self._structure_for(plan, intent)
-        if (spec is _GENERIC or needs_structure) and plan.get("requested_property") and agent is not None:
+        # What to compute: the plan's requested_property, or the acceptance
+        # metric's name when the planner left it unset. Gating on
+        # requested_property alone meant a plan carrying
+        # standard_heat_of_formation_kJ_per_mol but a null requested_property
+        # skipped synthesis and rendered the placeholder scaffold instead --
+        # which then ran on the cluster and "succeeded" (job 2571447).
+        wants_property = plan.get("requested_property") or _first_metric_name(plan)
+        if (spec is _GENERIC or needs_structure) and wants_property and agent is not None:
             return self._generate_with_calculator(
                 plan, libraries, None, None, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
+                require_synthesis=require_synthesis,
             )
-        return self._generate_standard(plan, tool_name, intent=intent)
+        bundle = self._generate_standard(plan, tool_name, intent=intent)
+        # (b) The backstop. Any route to the placeholder scaffold is refused when
+        # the run is going to execute, not just the synthesis route -- the first
+        # version of this guard only covered synthesis, so this path walked
+        # straight past it.
+        if require_synthesis and bundle.template_name == _GENERIC.filename:
+            raise SynthesisFailed(
+                tool_name, calculator, agent is None, self.last_synthesis)
+        return bundle
 
     # -- standard (library-only) path ----------------------------------------
     def _generate_standard(self, plan: dict, tool_name: str, *, intent) -> RunBundle:
@@ -762,10 +1034,20 @@ class CodegenEngine:
     # -- calculator-driven path (LLM synthesis + tool-agnostic fallback) ------
     def _generate_with_calculator(self, plan, libraries, calculator,
                                   calculator_import, calculator_library,
-                                  *, intent, agent, smoke_compute: bool = False) -> RunBundle:
+                                  *, intent, agent, smoke_compute: bool = False,
+                                  require_synthesis: bool = False,
+                                  calculator_executable: Optional[str] = None,
+                                  pseudo_library: Optional[str] = None) -> RunBundle:
         generated_at = (plan.get("metadata") or {}).get("timestamp", "") or ""
         acceptance = plan.get("acceptance_metrics", []) or []
         requested_property = plan.get("requested_property") or "the requested property"
+        # Read the metric names too: this plan's requested_property was null while
+        # its metric was standard_heat_of_formation_kJ_per_mol.
+        wants_cycle = wants_thermo_cycle(
+            plan.get("requested_property"),
+            *[m.get("metric_name") for m in (plan.get("acceptance_metrics") or [])
+              if isinstance(m, dict)],
+            (intent or {}).get("objective") if isinstance(intent, dict) else None)
 
         # The calculator is driven through this library (e.g. GPAW via ASE); the
         # rest of the toolset is available too (e.g. Pymatgen for structure work).
@@ -791,24 +1073,45 @@ class CodegenEngine:
             "structure": structure,
             "acceptance": acceptance,
             "output_file": "results.csv",
+            # Verbatim researcher objective: the property + material fields
+            # can't express a routing decision like "retrieve this from the
+            # Materials Project instead of computing it".
+            "objective": (intent or {}).get("objective") if isinstance(intent, dict) else None,
             # When True, the generated --smoke path runs the real (tiny) computation
             # so an API/keyword error is caught in REPAIR, not at the real run.
             "smoke_compute": smoke_compute,
+            # "sssp"/"pseudodojo" for an engine shipping no pseudopotentials:
+            # switches the prompt to resolve filenames and cutoffs through the
+            # bundle's twain_pseudo.py instead of writing them out.
+            "pseudo_library": pseudo_library,
+            # True when the property is a formation/atomization/reaction enthalpy:
+            # switches the prompt to assemble it through twain_thermo.py.
+            "thermo_cycle": wants_cycle,
         }
 
         # The script is written by the LLM from the discovered toolset + material
         # + property -- there is NO per-property template. If the gateway is
         # unavailable or returns invalid Python, fall back to a tool-agnostic
         # scaffold (loads the toolset, writes a stub) -- never a preset.
+        self.last_synthesis = None
         main_py = self._synthesize_with_llm(brief, agent) if agent is not None else None
         template_name = "llm_synthesized"
         if main_py is None:
+            if require_synthesis:
+                raise SynthesisFailed(
+                    calculator_library or (libraries[0] if libraries else "the tool"),
+                    calculator, agent is None, self.last_synthesis)
             main_py = self._render_generic_fallback(brief, generated_at, acceptance)
             template_name = _GENERIC.filename
 
         # requirements + smoke imports cover the whole toolset (every library, plus
         # the calculator when one is attached), deduped.
         requirements_txt = self._requirements_for_toolset(libraries, calculator)
+        if mp_lookup_requested(brief.get("objective")):
+            # A Materials Project retrieval needs the mp-api client, which no
+            # library's dependency info carries -- without this line the venv
+            # fallback installs pymatgen but the lookup dies on import.
+            requirements_txt += "mp-api\n"
         toolset_imports = [d.import_name for lib in libraries for d in _depinf.import_names(lib)]
         if calculator:
             toolset_imports += [d.import_name for d in _depinf.import_names(calculator)]
@@ -816,9 +1119,16 @@ class CodegenEngine:
         inline_tests_py = _smoke.generate_inline_tests(
             tool_name="+".join(libraries + ([calculator] if calculator else [])),
             required_import_names=import_names,
+            # An external engine's ASE bindings import wherever ASE is installed,
+            # so the import list alone cannot prove this environment can RUN it.
+            required_executables=([calculator_executable]
+                                  if calculator_executable else []),
             main_filename="main.py",
             output_filename="results.csv",
             run_smoke=True,
+            # A load-only smoke (heavy calculator) constructs the calculator and
+            # exits without computing, so no results file is owed.
+            require_output=bool(brief.get("smoke_compute")),
         )
         # A calculator run executes in the heavy sim env; a library-only run runs on
         # the default interpreter (where its library is installed) -- record that so
@@ -835,6 +1145,8 @@ class CodegenEngine:
             inline_tests_py=inline_tests_py,
             tool_name=driver,
             template_name=template_name,
+            pseudo_helper_py=(_pseudo_helper_source() if pseudo_library else None),
+            thermo_helper_py=(_thermo_helper_source() if wants_cycle else None),
         )
 
     def _render_generic_fallback(self, brief, generated_at, acceptance) -> str:
@@ -873,15 +1185,32 @@ class CodegenEngine:
         (:class:`code_gen.script_doctor.ScriptDoctor`), which runs after BUILD --
         so codegen itself never executes generated code.
         """
-        try:
-            raw = agent(self._codegen_prompt(brief))
-        except Exception:  # noqa: BLE001 - any agent failure -> caller falls back to a template
-            return None
         # Require the script to reference the calculator (calculator run) or, for a
         # library-only run, the library itself -- so a stub that never touches the
         # tool is rejected and the caller falls back to the deterministic template.
         must_reference = brief.get("calculator_import") or brief.get("library_import")
-        return extract_valid_source(raw, must_reference)
+        prompt = self._codegen_prompt(brief)
+        attempts = []
+        # Two samples, for the reason the REPAIR stage already takes two: one
+        # draw is flaky, and the same prompt that fails extraction often
+        # succeeds on a retry. Cheap next to a wasted cluster allocation.
+        for attempt in range(1, self.SYNTHESIS_ATTEMPTS + 1):
+            try:
+                raw = agent(prompt)
+            except Exception as exc:  # noqa: BLE001 - recorded, then retried/fallen back
+                attempts.append({"attempt": attempt,
+                                 "reason": f"agent_error: {type(exc).__name__}: {exc}"})
+                continue
+            source, reason = validate_source(raw, must_reference)
+            if source is not None:
+                self.last_synthesis = {"ok": True, "attempts": attempts,
+                                       "attempt": attempt,
+                                       "reply_chars": len(raw or "")}
+                return source
+            attempts.append({"attempt": attempt, "reason": reason,
+                             "reply_chars": len(raw or "")})
+        self.last_synthesis = {"ok": False, "attempts": attempts}
+        return None
 
     def _codegen_prompt(self, brief) -> str:
         """Render the initial code-synthesis prompt from the run brief."""
@@ -917,6 +1246,146 @@ class CodegenEngine:
             )
         else:
             structure_note = ""
+        # The researcher explicitly asked to RETRIEVE the value from the
+        # Materials Project rather than compute it. This route overrides the
+        # compute-protocol requirements above, and it is credential-gated: the
+        # key check must run in --smoke too, so a missing MP_API_KEY fails at
+        # BUILD on the runner (clear, immediate) instead of after a Slurm
+        # queue wait on a compute node.
+        if mp_lookup_requested(brief.get("objective")):
+            database_note = (
+                "- OVERRIDE -- database retrieval, not a calculation: the "
+                "researcher's objective explicitly asks to RETRIEVE this value "
+                "from the Materials Project database instead of computing it. "
+                f"Objective: {json.dumps(brief.get('objective'))}. Do NOT run a "
+                "new calculation and do NOT build the structure. Query the "
+                "database with `MPRester` (`from pymatgen.ext.matproj import "
+                "MPRester`, imported inside the function; the installed "
+                "`mp-api` client backs it), reading the API key from the "
+                "`MP_API_KEY` environment variable. FIRST -- in both the "
+                "--smoke and the real path, before any network call -- check "
+                "the key: if MP_API_KEY is unset or empty, print one clear "
+                "line telling the user to add MP_API_KEY to the runner's .env "
+                "(free key: https://materialsproject.org/api) and exit(3). "
+                "The --smoke path must make NO network request: after the key "
+                "check, `import mp_api` to prove the client is installed, "
+                "then exit 0. In the real run, NEVER trust a provided mp-id "
+                "blindly -- upstream ids are sometimes hallucinated (an "
+                "intent carried mp-1023 for CaPt2, which is actually "
+                "Ho2Co17). Query by id when one is given, but VERIFY the "
+                "returned formula (reduced composition) matches the target "
+                "material; on a mismatch or a missing id, search by formula "
+                "instead and pick the entry matching the requested space "
+                "group/phase when stated (else the lowest energy_above_hull), "
+                "printing which entry was used and why. Retrieve the stored "
+                "property from the appropriate endpoint (e.g. "
+                "elasticity/summary), and include a \"source\" field in the "
+                "JSON output stating the value is a Materials Project "
+                "database retrieval (with the material_id used), not a new "
+                "calculation.\n")
+        else:
+            database_note = ""
+        # A plane-wave engine that ships no pseudopotentials (Quantum ESPRESSO,
+        # ABINIT). The filenames are unguessable but look guessable -- silicon's
+        # SSSP file is Si.pbe-n-rrkjus_psl.1.0.0.UPF while the equally plausible
+        # Si.pbe-n-kjpaw_psl.1.0.0.UPF (oxygen's naming scheme) does not exist --
+        # and a wrong one either dies hours into a queued job or names a real file
+        # for different physics. Same for the cutoffs. So the bundle carries
+        # twain_pseudo.py and the model is told to look both up through it.
+        if brief.get("pseudo_library") == "sssp":
+            pseudo_note = (
+                "- PSEUDOPOTENTIALS -- never write a pseudopotential filename or "
+                "an energy cutoff yourself. The bundle contains `twain_pseudo.py`, "
+                "which reads the installed SSSP library's own manifest. Use it "
+                "verbatim: `from twain_pseudo import espresso_pseudopotentials, "
+                "espresso_cutoffs, pseudo_dir`, then `pseudos = "
+                "espresso_pseudopotentials(atoms)`, `ecutwfc, ecutrho = "
+                "espresso_cutoffs(atoms)` (both already in Ry), and build the "
+                "profile as `EspressoProfile(command='pw.x', "
+                "pseudo_dir=pseudo_dir())`. Pass `pseudopotentials=pseudos` and "
+                "those cutoffs into the Espresso calculator's input data. Do NOT "
+                "hardcode a .UPF name, do NOT invent ecutwfc/ecutrho, and do NOT "
+                "wrap these calls in try/except -- if the library cannot supply an "
+                "element the run MUST fail loudly rather than substitute another "
+                "pseudopotential.\n")
+        elif brief.get("pseudo_library") == "pseudodojo":
+            pseudo_note = (
+                "- PSEUDOPOTENTIALS -- never write a pseudopotential filename or "
+                "an energy cutoff yourself. The bundle contains `twain_pseudo.py`, "
+                "which reads the installed PseudoDojo table's own manifest. Use it "
+                "verbatim: `from twain_pseudo import abinit_pp_paths, abinit_ecut`, "
+                "then build the profile as `AbinitProfile(command='abinit', "
+                "pp_paths=abinit_pp_paths(atoms))` and take `ecut = "
+                "abinit_ecut(atoms)` (Hartree, PseudoDojo's recommended hint -- ASE's "
+                "Abinit takes ecut in eV, so pass `ecut * 27.2114`). Do NOT hardcode "
+                "a .psp8 name, do NOT invent ecut, and do NOT wrap these calls in "
+                "try/except -- if the table cannot supply an element the run MUST "
+                "fail loudly rather than substitute another pseudopotential.\n"
+                "- ABINIT keyword requirements, all three verified against ABINIT "
+                "10.0.3 with this pseudopotential table: pass `pps='psp8'` (without "
+                "it ASE searches for LDA/FHI-format files and aborts with \"Could "
+                "not find lda pseudopotential fhi\" even though the .psp8 files are "
+                "right there), pass `xc='PBE'` (the table is PBE; an LDA functional "
+                "with PBE pseudopotentials is silently inconsistent physics), and "
+                "pass `chksymbreak=0` (ASE writes a shifted Monkhorst-Pack grid, "
+                "which ABINIT rejects for symmetric cells like diamond with \"the k "
+                "point grid is not symmetric\"; note ASE's Abinit does NOT accept a "
+                "dict for `kpts`, so a gamma-centred grid is not an alternative).\n")
+        else:
+            pseudo_note = ""
+        # A property assembled from several species' energies. The algebra is
+        # short and looks obvious, and both of its failure modes return a
+        # plausible number: a dropped H(T)-E_elec term, or a stoichiometric
+        # coefficient that does not match the molecule.
+        if brief.get("thermo_cycle"):
+            thermo_note = (
+                "- THERMOCHEMICAL CYCLE -- this property is assembled from "
+                "several species' energies, so do not write the algebra yourself. "
+                "The bundle contains `twain_thermo.py`; use it verbatim. It counts "
+                "stoichiometry from the structure, supplies each free atom's "
+                "H(T)-E_elec, refuses an unbalanced reaction, and refuses a "
+                "polyatomic species whose correction you forgot to pass.\n"
+                "- PREFER AN ERROR-CANCELLING REACTION over atomization. "
+                "Atomization breaks every bond, so the method's per-bond error "
+                "accumulates straight into the answer -- on CO2's 1608 kJ/mol "
+                "atomization that is ~17 kJ/mol for B3LYP and ~616 for "
+                "Hartree-Fock. Instead pick a BALANCED reaction that forms the "
+                "target from reference species whose standard formation "
+                "enthalpies are known experimentally, conserving bond count and "
+                "type as closely as you can (for CO2: CO + 1/2 O2 -> CO2, not "
+                "C + 2 O -> CO2), so the errors cancel between the two sides. "
+                "Use `from twain_thermo import species, "
+                "formation_enthalpy_via_reaction`, build each participant with "
+                "`species(symbols, energy_eV, correction=H_minus_Eelec_eV, "
+                "coefficient=...)`, and call "
+                "`formation_enthalpy_via_reaction(target_symbols, reactants, "
+                "products, {'C1O1': -110.53, 'O2': 0.0})` -- reference enthalpies "
+                "keyed by formula with elements sorted, 0.0 for an element in its "
+                "standard state. State in the printed output which reaction you "
+                "used and where each reference enthalpy came from. Fall back to "
+                "`atomization_enthalpy` + `formation_enthalpy` only when no "
+                "suitable reference reaction exists, and say so.\n"
+                "- The method must include electron correlation. Bare "
+                "Hartree-Fock (Psi4's `method='scf'`, NWChem's `theory='scf'`) "
+                "recovers none of it and underestimates bond energies by "
+                "hundreds of kJ/mol -- it put this very property at +245.7 "
+                "instead of -393.5. For a bond-energy or thermochemical quantity "
+                "use at least a hybrid functional (B3LYP, PBE0, wB97X-D) or a "
+                "correlated wavefunction method (MP2, CCSD(T)); never plain SCF.\n"
+                "- Every species in the cycle contributes its own H(T)-E_elec, "
+                "the reference ATOMS included. An atom has no vibrations and no "
+                "rotations, so it is tempting to give it no correction at all, but "
+                "it still carries 3/2 kT of translation plus kT of PV = 5/2 kT = "
+                "6.197 kJ/mol at 298.15 K. Omitting it for three reference atoms "
+                "is 18.6 kJ/mol, which is what put a CO2 heat of formation at "
+                "-357.6 against a -393.5 target. The tabulated atomic formation "
+                "enthalpies do NOT absorb it -- those are the atoms' own formation "
+                "enthalpies, and the cycle they feed needs a true enthalpy "
+                "difference at T. Compute the molecule's correction with "
+                "`ase.thermochemistry.IdealGasThermo` (its real geometry and "
+                "symmetry number) and let twain_thermo handle the atoms.\n")
+        else:
+            thermo_note = ""
         return template.format(
             property=brief["property"],
             material_desc=brief["material_desc"],
@@ -930,6 +1399,11 @@ class CodegenEngine:
             also_available=also_line,
             smoke_instruction=smoke_instruction,
             structure_note=structure_note,
+            database_note=database_note,
+            # Ignored by the library-only template, which has no such placeholder.
+            pseudo_note=pseudo_note,
+            thermo_note=thermo_note,
+            spin_note=_SPIN_GUIDANCE,
         )
 
     @staticmethod
@@ -952,6 +1426,7 @@ class CodegenEngine:
             "crystal_system": crystal.get("crystal_system"),
             "space_group": crystal.get("space_group"),
             "space_group_number": crystal.get("space_group_number"),
+            "mp_id": crystal.get("mp_id") or sysd.get("mp_id"),
         }
 
     @staticmethod
@@ -978,11 +1453,25 @@ class CodegenEngine:
         cs = material.get("crystal_system")
         if cs and str(cs).lower() not in base.lower():
             quals.append(str(cs))
+        if material.get("mp_id"):
+            # The database id is the exact handle for a lookup route and a
+            # useful cross-reference for a compute route.
+            quals.append(f"Materials Project id {material['mp_id']}")
         return f"{base}, {', '.join(quals)}" if quals else base
 
     @staticmethod
     def _requirements_for_toolset(libraries: List[str], calculator: Optional[str]) -> str:
-        """requirements.txt covering every library in the toolset (+ the calculator)."""
+        """requirements.txt covering every pip-installable part of the toolset.
+
+        Conda-only packages are deliberately left out: pip cannot install them
+        anywhere, so listing one turns a recoverable "use the provisioned env"
+        into a hard install failure. NWChem is the example -- ``nwchem==7.3.1``
+        on PyPI resolves only to a 0.0.1 stub, so the cluster's pip fallback died
+        with "No matching distribution found" even though twain-envs/nwchem was
+        provisioned and correct. These packages arrive through a cluster env spec
+        (scripts/ris/envs/) or the local pixi env, never through this file, and
+        the smoke probe is what confirms an env actually provides them.
+        """
         deps = []
         for lib in libraries:
             deps.extend(_depinf.infer(lib))
@@ -994,6 +1483,10 @@ class CodegenEngine:
             if dep.package.lower() in seen:
                 continue
             seen.add(dep.package.lower())
+            if dep.package.lower() in _depinf.CONDA_ONLY_PACKAGES:
+                unique.append(f"# {dep.package}: conda-only, comes from the "
+                              f"environment (pip cannot install it)")
+                continue
             unique.append(dep.requirement_line())
         header = "# Auto-generated by TWAIN code_configuration_builder -- pinned for reproducibility."
         return "\n".join([header, *unique]) + "\n"

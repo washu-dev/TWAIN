@@ -26,7 +26,7 @@ class SchemaValidator:
             return False
     def validateFromPath(self, schemaFile, jsonFile):
         try:
-            with open(self.schemaFile, "r") as _schema:
+            with open(schemaFile, "r") as _schema:
                 schemaData = json.load(_schema)
             with open(jsonFile) as _jsonFile:
                 jsonData = json.load(_jsonFile)
@@ -48,4 +48,4 @@ class SchemaValidator:
 
 if __name__ == "__main__":
     schema = SchemaValidator()
-    schema.validate("test.json")
+    schema.validateFromPath("test.json", "test.json")

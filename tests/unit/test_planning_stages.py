@@ -264,3 +264,42 @@ def test_handlers_noop_without_intent(machine):
     assert machine.discover() == State.PLAN
     assert machine.plan() == State.BUILD
     assert machine.context.artifacts == {}
+
+
+# -- the suggested CPU count is a heuristic, not a rule -----------------------
+
+class TestSuggestedCpuCount:
+    """One core per atom is a serviceable default for plane-wave DFT, not a law,
+    so the ratio is tunable and the result is rounded to a width that decomposes
+    cleanly instead of landing on whatever the atom count happens to be."""
+
+    def test_it_scales_with_system_size(self):
+        assert SM._suggest_cpu_count(2, 64) == 2
+        assert SM._suggest_cpu_count(21, 64) == 20     # not 21
+        assert SM._suggest_cpu_count(50, 64) == 48
+
+    def test_it_never_asks_for_more_than_the_node_has(self):
+        assert SM._suggest_cpu_count(200, 64) == 64
+        assert SM._suggest_cpu_count(21, 8) == 8
+        assert SM._suggest_cpu_count(1000, 2) == 2
+
+    def test_it_floors_at_two(self):
+        # k-point / domain parallelism needs a partner.
+        assert SM._suggest_cpu_count(1, 64) == 2
+        assert SM._suggest_cpu_count(0, 64) == 2
+
+    def test_it_snaps_down_not_up(self):
+        """Asking for more cores than the calculation can use just queues longer."""
+        for atoms in range(3, 64):
+            assert SM._suggest_cpu_count(atoms, 64) <= max(2, atoms)
+
+    def test_the_ratio_is_tunable(self, monkeypatch):
+        monkeypatch.setenv("TWAIN_CORES_PER_ATOM", "0.5")
+        assert SM._suggest_cpu_count(40, 64) == 20
+        monkeypatch.setenv("TWAIN_CORES_PER_ATOM", "2")
+        assert SM._suggest_cpu_count(10, 64) == 20
+
+    @pytest.mark.parametrize("bad", ["", "abc", "0", "-3"])
+    def test_a_bad_ratio_falls_back_to_one_per_atom(self, monkeypatch, bad):
+        monkeypatch.setenv("TWAIN_CORES_PER_ATOM", bad)
+        assert SM._suggest_cpu_count(21, 64) == 20

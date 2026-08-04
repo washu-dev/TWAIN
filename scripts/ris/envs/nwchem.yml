@@ -1,0 +1,44 @@
+# Shared cluster env: twain-envs/nwchem -- ab initio quantum chemistry (molecules).
+#
+# This file is the source of truth for what the env contains; apply it with
+# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
+# manual drift is exactly what these specs exist to prevent).
+#
+# nwchem ships only through conda-forge, so without this spec planning vetoes
+# NWChem outright (statemachine's _cluster_cannot_run, which reads these files)
+# and reroutes to a pip-installable tool. Version matched to the local sim env in
+# pixi.toml so a plan validated on a laptop resolves the same way on RIS.
+#
+# openmpi is explicit for the same reason as in gpaw.yml: NWChem is MPI-parallel
+# and the Slurm payload auto-detects the env's mpirun to run one rank per
+# allocated CPU. It is also what makes conda-forge's NWChem find its PMIx/PRRTE
+# runtime data.
+#
+# ase is the driver plans pair it with (ase.calculators.nwchem); rdkit covers
+# SMILES -> 3D structure prep and openff-toolkit rides along because a real
+# NWChem plan paired all three (session d30675c8) -- the job's smoke probe
+# rejects an env missing ANY bundle import.
+#
+# NOTE: NWChem finds its basis sets through NWCHEM_BASIS_LIBRARY, which the conda
+# package sets from an activate.d hook. Anything invoking this env's python by
+# absolute path rather than activating it must reproduce that (the local adapter
+# does -- see _activation_vars); otherwise NWChem fails with "failed opening
+# basis file", which reads like a broken install.
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - nwchem>=7.3.1,<8
+  - openmpi
+  - ase
+  # pymatgen + spglib ride along for the same reason gpaw.yml carries them: a
+  # molecular plan pairs NWChem with them, and the job's smoke probe rejects an
+  # env missing ANY bundle import -- a missing pymatgen sent an NWChem run to
+  # twain-envs/default, which has no nwchem binary (job 2573801, exit 127).
+  - pymatgen
+  - spglib
+  - rdkit
+  - openff-toolkit
+  - numpy
+  - pandas
+  - pyyaml

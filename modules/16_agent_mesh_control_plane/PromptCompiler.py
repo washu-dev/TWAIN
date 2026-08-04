@@ -1,54 +1,9 @@
 """Prompt assembly for the control plane.
 
-:class:`PromptCompiler` is a small fluent builder for stacking prompt fragments
-(from files or literal text) into one string. :class:`PromptGenerator` builds the
-specific stage prompts the state machine sends to the LLM (schema-conformant
-JSON, clarification questions, goal-graph decomposition).
+:class:`PromptGenerator` builds the specific stage prompts the state machine
+sends to the LLM (schema-conformant JSON, clarification questions, goal-graph
+decomposition).
 """
-import twain_paths
-
-
-class PromptCompiler:
-    # Setup
-    def __init__(self):
-        self.prompts = []
-        self.user_prompt = ""
-
-    # PROMPT INPUTS
-    def prompt_from_file(self, file):
-        with open(f"{file}", "r") as file:
-            self.prompts.append(file.read())
-        return self
-
-    def prompt_from_text(self, text):
-        self.prompts.append(text)
-        return self
-
-    def set_user_prompt(self, user_prompt):
-        self.user_prompt = user_prompt
-        return self
-
-    # Variable Modification
-    def get_prompt(self):
-        return "\n".join(self.prompts)
-
-    def reset_prompt(self):
-        self.prompts = []
-        return self
-
-    # SHORTCUTS
-    def data_prompt(self, subject):
-        self.reset_prompt()
-        self.prompt_from_file(twain_paths.INTELLIGENCE_DIR / "Restraints.txt")
-        self.prompt_from_file(twain_paths.SCHEMAS_DIR / f"{subject[:1].upper()}{subject[1:].lower()}Schema.json")
-        self.prompt_from_text(self.user_prompt)
-        return self.get_prompt()
-
-    def subject_prompt(self):
-        self.reset_prompt()
-        self.prompt_from_file(twain_paths.INTELLIGENCE_DIR / "SubjectPrompt.txt")
-        self.prompt_from_text(self.user_prompt)
-        return self.get_prompt()
 
 
 class PromptGenerator:
@@ -79,29 +34,60 @@ class PromptGenerator:
         prompt += "Your response MUST begin with '{', the first character of a json file, and end with '}', the last character of the json file"
         return prompt
 
-    def clarification_prompt(self, intent_spec):
+    def clarification_prompt(self, intent_spec, uncertain_fields=None):
+        """Prompt for the FEWEST, most concise clarification questions.
+
+        ``uncertain_fields`` (optional) is the list of IntentSpec fields whose
+        confidence is below threshold. When supplied, the model is told to ask
+        ONLY about those and to combine them, so CLARIFY stays a quick one- or
+        two-question exchange instead of re-interrogating fields intake already
+        resolved. When empty, it asks the single most essential question. If
+        nothing genuinely needs clarifying the model replies "No questions.".
+        """
+        fields = [f for f in (uncertain_fields or []) if f]
+        if fields:
+            focus = (
+                "Ask ONLY about these unresolved fields, most important first: "
+                + ", ".join(fields) + ". "
+            )
+            cap = max(1, min(len(fields), 3))
+        else:
+            focus = (
+                "No single field is flagged as uncertain; ask only the one question "
+                "most essential to proceed, or none if the request is already clear. "
+            )
+            cap = 1
         prompt = (
-            "You are to generate a list of questions for the following schema file to resolve "
-            "the ambiguities. Based on the following json file, return an ordered list of "
-            "specific questions whose answers will remove any uncertainty. Ask ONLY about "
-            "fields relevant to the chosen system representation: for a periodic solid "
-            "(kind='crystal' or 'surface') ask about the polymorph/phase or the structure "
-            "source (e.g. which specific crystalline form, or a Materials Project id or "
-            "CIF), and NEVER ask for the SMILES of a solid. For a "
-            "discrete molecule (kind='molecule') ask about its identity / SMILES. Do not ask "
-            "about the confidence scores themselves."
+            "You help a computational-chemistry assistant fill the smallest gaps in a "
+            "parsed research request (the JSON IntentSpec below). "
+            + focus
+            + f"Ask the FEWEST questions possible: merge related gaps into a single "
+            f"question and ask at most {cap}. Each question must be one short, plain-language "
+            "sentence a researcher can answer in a few words -- no numbering, no preamble, "
+            "no explanations, and do not restate the request back to them. Respect the "
+            "system representation: for a periodic solid (kind='crystal' or 'surface') ask "
+            "about the polymorph/phase or a structure source (a specific crystalline form, a "
+            "Materials Project id, or a CIF) and NEVER ask for a SMILES; for a discrete "
+            "molecule (kind='molecule') ask about its identity or SMILES. Never ask about "
+            "the confidence scores themselves. If nothing genuinely needs clarifying, reply "
+            "with exactly: No questions.\n\nIntentSpec:\n"
         )
         prompt += intent_spec
         return prompt
 
-    def goalGraphPrompt(self, schema, intent_spec, source_intent_id):
+    def goal_graph_prompt(self, schema, intent_spec, source_intent_id):
         prompt = (
             "You are decomposing a computational-chemistry research request into an "
             "executable goal graph: a directed acyclic graph (DAG) of sub-goals connected "
             "by dependency edges. Break the work into the smallest set of ordered sub-goals "
             "the request actually needs (e.g. discover a method, prepare inputs, run it, "
             "validate against the acceptance metrics, review). Tailor the goals to THIS "
-            "request rather than emitting a fixed template. Every edge's source and target "
+            "request rather than emitting a fixed template. When the property requires it, "
+            "include explicit sub-goals for validating the built structure (correct "
+            "stoichiometry and physically reasonable geometry), relaxing the geometry to "
+            "equilibrium, and converging the numerical settings before the property is "
+            "computed -- a rigorous result depends on these, not just on running the tool "
+            "once. Every edge's source and target "
             "MUST reference goal ids you define, and the graph MUST be acyclic. Fold the "
             "request's acceptance metrics into the validation goal's acceptance_criteria. "
             f"Use '{source_intent_id}' as metadata.source_intent_id. "

@@ -17,7 +17,7 @@ env:
   CLOUDFRONT_DISTRIBUTION_ID: E3PINHJ1G0F5PS
   NODE_VERSION: '20'
   # SSO-only reader role (Terraform: sso_ci_reader_role_arn). Injects the public
-  # EXPO_PUBLIC_AZURE_* identifiers into the build; cannot read other TWAIN secrets.
+  # EXPO_PUBLIC_ENTRA_* identifiers into the build; cannot read other TWAIN secrets.
   TWAIN_SSO_CI_ROLE_ARN: arn:aws:iam::730335203321:role/TWAIN-sso-ci-reader
 
 jobs:
@@ -51,7 +51,10 @@ jobs:
 
       - name: Vulnerability scan — npm audit
         working-directory: app
-        run: npm audit --audit-level=high
+        # Production dependencies only: the remaining high findings are in the
+        # eslint/babel dev toolchain (never shipped in the web bundle) and have
+        # no upstream fix available.
+        run: npm audit --audit-level=high --omit=dev
 
       - name: Dependency license check
         working-directory: app
@@ -101,15 +104,22 @@ jobs:
           set -euo pipefail
           client_id=$(aws secretsmanager get-secret-value --secret-id TWAIN/sso/APP_ID    --query SecretString --output text)
           tenant_id=$(aws secretsmanager get-secret-value --secret-id TWAIN/sso/TENANT_ID --query SecretString --output text)
-          echo "EXPO_PUBLIC_AZURE_CLIENT_ID=${client_id}" >> "$GITHUB_ENV"
-          echo "EXPO_PUBLIC_AZURE_TENANT_ID=${tenant_id}" >> "$GITHUB_ENV"
+          echo "EXPO_PUBLIC_ENTRA_CLIENT_ID=${client_id}" >> "$GITHUB_ENV"
+          echo "EXPO_PUBLIC_ENTRA_TENANT_ID=${tenant_id}" >> "$GITHUB_ENV"
           echo "Loaded Entra client/tenant IDs from Secrets Manager."
+          # ── Access-token mode (do NOT enable until the Entra app registration
+          # exposes the access_as_user scope; requesting a scope that doesn't exist
+          # breaks sign-in). Once WashU IT sets identifierUris + the scope on
+          # CFU-Provost-TWAIN (148f5c4a), uncomment to send the API-audienced
+          # access token instead of the ID token. The API accepts both (aud = the
+          # app/client id in either mode), so no backend change is needed.
+          # echo "EXPO_PUBLIC_ENTRA_API_SCOPE=api://${client_id}/access_as_user" >> "$GITHUB_ENV"
 
       - name: Build Expo web app
         working-directory: app
         env:
           EXPO_PUBLIC_API_BASE_URL: ${{ secrets.API_BASE_URL }}
-          # EXPO_PUBLIC_AZURE_CLIENT_ID / EXPO_PUBLIC_AZURE_TENANT_ID come from
+          # EXPO_PUBLIC_ENTRA_CLIENT_ID / EXPO_PUBLIC_ENTRA_TENANT_ID come from
           # $GITHUB_ENV (set in the previous step) and are inlined by expo export.
         run: npx expo export --platform web
 

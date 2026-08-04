@@ -1,0 +1,26 @@
+# Shared cluster env: twain-envs/default -- the fallback for every plan whose
+# calculator has no dedicated env. The Slurm job probes it with the bundle's
+# smoke test, so it must satisfy EVERY import a plan may pair together, not
+# just the calculator (a missing rdkit rejected an otherwise-fine xtb run).
+#
+# Source of truth for the env's contents; apply with
+# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster).
+#
+# xtb-python and rdkit are conda-only compiled packages -- the job's pip
+# fallback cannot install them, so this env is their only path onto RIS.
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - ase
+  - pymatgen
+  # Materials Project API client: backs database-retrieval tasks ("look up the
+  # stored bulk modulus of X") via pymatgen's MPRester. Needs MP_API_KEY in the
+  # runner's .env at run time.
+  - mp-api
+  - spglib
+  - xtb-python
+  - rdkit
+  - numpy
+  - pandas
+  - pyyaml

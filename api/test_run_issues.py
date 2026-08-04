@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import github_issues
+import run_issue_github
 import run_issues
 from auth import get_current_user
 from main import app
@@ -73,9 +74,18 @@ def _as_user():
 
 @pytest.fixture(autouse=True)
 def _no_github_env(monkeypatch):
-    """Default every test to 'unconfigured'; tests that need GitHub opt in."""
-    for var in ("TWAIN_GITHUB_TOKEN", "GITHUB_TOKEN", "TWAIN_GITHUB_REPO", "TWAIN_RUN_ISSUES"):
+    """Default every test to 'unconfigured'; tests that need GitHub opt in.
+
+    The PAT is resolved by ``github_issues`` (env, then Secrets Manager) and
+    memoised, so the cache is cleared and the Secrets Manager read stubbed out --
+    otherwise an unconfigured test could reach for real AWS.
+    """
+    for var in ("GITHUB_ISSUE_TOKEN", "TWAIN_RUN_ISSUES"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(github_issues, "read_secret", lambda *_a, **_k: None)
+    github_issues._load_token.cache_clear()
+    yield
+    github_issues._load_token.cache_clear()
 
 
 class FakeGitHub:
@@ -100,30 +110,32 @@ class FakeGitHub:
 
 
 def _configured(monkeypatch):
-    monkeypatch.setenv("TWAIN_GITHUB_REPO", "washu-dev/TWAIN")
-    monkeypatch.setenv("TWAIN_GITHUB_TOKEN", "tok")
+    """Make the deployment look credentialed: one PAT, shared with /api/issues."""
+    monkeypatch.setattr(github_issues, "GITHUB_ISSUE_REPO", "washu-dev/TWAIN")
+    monkeypatch.setenv("GITHUB_ISSUE_TOKEN", "tok")
+    github_issues._load_token.cache_clear()
 
 
 # ── Labels + body rendering (pure, no DB) ─────────────────────────────────────
 class TestLabels:
     def test_category_maps_to_its_label_plus_the_app_wide_tag(self):
-        assert github_issues.labels_for("bug") == ["BugReport", "RunReport"]
-        assert github_issues.labels_for("result") == ["ResultDiscrepancy", "RunReport"]
+        assert run_issue_github.labels_for("bug") == ["BugReport", "RunReport"]
+        assert run_issue_github.labels_for("result") == ["ResultDiscrepancy", "RunReport"]
 
     def test_library_category_reuses_the_pipelines_own_tag(self):
         """A user asking for an uninstalled library triages with discovery's asks."""
-        assert github_issues.labels_for("library") == ["LibraryAddition", "RunReport"]
+        assert run_issue_github.labels_for("library") == ["LibraryAddition", "RunReport"]
 
     def test_other_is_just_the_app_wide_tag_not_duplicated(self):
-        assert github_issues.labels_for("other") == ["RunReport"]
+        assert run_issue_github.labels_for("other") == ["RunReport"]
 
     def test_unknown_category_falls_back(self):
-        assert github_issues.labels_for("nonsense") == ["RunReport"]
+        assert run_issue_github.labels_for("nonsense") == ["RunReport"]
 
 
 class TestIssueBody:
     def _body(self, **kw):
-        return github_issues.render_issue_body(
+        return run_issue_github.render_issue_body(
             RUN_CONTEXT, category="bug", description="Docker wasn't running", reporter=USER, **kw
         )
 
@@ -160,28 +172,28 @@ class TestIssueBody:
         assert "u@wustl.edu" in self._body()
 
     def test_empty_description_is_marked_not_blank(self):
-        body = github_issues.render_issue_body(RUN_CONTEXT, category="other", description="  ")
+        body = run_issue_github.render_issue_body(RUN_CONTEXT, category="other", description="  ")
         assert "_(no description given)_" in body
 
     def test_truncation_is_disclosed(self):
-        body = github_issues.render_issue_body(
+        body = run_issue_github.render_issue_body(
             {**RUN_CONTEXT, "truncated": True}, category="bug", description="x")
         assert "truncated" in body
 
     def test_sparse_context_still_renders(self):
         """A run that died before planning has no method/plan/artifacts."""
-        body = github_issues.render_issue_body(
+        body = run_issue_github.render_issue_body(
             {"run_id": "conv-9"}, category="bug", description="died early")
         assert "`conv-9`" in body and "died early" in body
 
 
 class TestTitleCleaning:
     def test_collapses_newlines_and_caps_length(self):
-        assert github_issues.clean_title("  a\nb  c ") == "a b c"
-        assert len(github_issues.clean_title("x" * 500)) == github_issues.MAX_TITLE
+        assert run_issue_github.clean_title("  a\nb  c ") == "a b c"
+        assert len(run_issue_github.clean_title("x" * 500)) == run_issue_github.MAX_TITLE
 
     def test_blank_title_is_blank(self):
-        assert github_issues.clean_title("  \n ") == ""
+        assert run_issue_github.clean_title("  \n ") == ""
 
 
 # ── Submitting ────────────────────────────────────────────────────────────────
@@ -200,7 +212,7 @@ class TestSubmit:
     ):
         _configured(monkeypatch)
         gh = FakeGitHub()
-        with patch.object(github_issues, "_default_transport", gh):
+        with patch.object(run_issue_github, "_default_transport", gh):
             response = self._post()
 
         assert response.status_code == 200
@@ -227,7 +239,7 @@ class TestSubmit:
         self, _conv, _ctx, _count, mock_record, monkeypatch
     ):
         _configured(monkeypatch)
-        with patch.object(github_issues, "_default_transport",
+        with patch.object(run_issue_github, "_default_transport",
                           FakeGitHub(create_status=403, message="Resource not accessible")):
             assert self._post().status_code == 200
         result = mock_record.call_args.kwargs["result"]
@@ -242,7 +254,7 @@ class TestSubmit:
         def boom(*_a, **_kw):
             raise OSError("connection reset")
 
-        with patch.object(github_issues, "_default_transport", boom):
+        with patch.object(run_issue_github, "_default_transport", boom):
             assert self._post().status_code == 200
         assert mock_record.call_args.kwargs["result"]["status"] == "failed"
 
@@ -252,7 +264,7 @@ class TestSubmit:
         _configured(monkeypatch)
         monkeypatch.setenv("TWAIN_RUN_ISSUES", "0")
         gh = FakeGitHub()
-        with patch.object(github_issues, "_default_transport", gh):
+        with patch.object(run_issue_github, "_default_transport", gh):
             assert self._post().status_code == 200
         assert gh.calls == []
         assert mock_record.call_args.kwargs["result"]["status"] == "queued"

@@ -1,31 +1,65 @@
 import json
+import math
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import auth
 import conversations as convo
 import github_issues
+import migrate
+import run_issue_github
 import run_issues
 from auth import AdminUser, CurrentUser
-from database import list_users, query_greetings, set_user_role
+from database import list_users, set_notify_prefs, set_user_role, upsert_user
 
 # How often (seconds) the SSE stream polls run_events, and its hard time cap.
 SSE_POLL_SECONDS = float(os.getenv("SSE_POLL_SECONDS", "1.0"))
 SSE_MAX_SECONDS = float(os.getenv("SSE_MAX_SECONDS", "1800"))
 
-app = FastAPI(title="TWAIN API", version="0.1.0")
+
+def _flag(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    return default if v is None else v.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Apply idempotent DB migrations on boot so a deploy needs no manual step.
+
+    Disable with ``RUN_MIGRATIONS_ON_STARTUP=false`` (e.g. when migrations run as
+    a separate one-off task). A failure here intentionally stops the API from
+    serving on an unmigrated schema — the right signal for a bad deploy — rather
+    than coming up "healthy" but broken.
+    """
+    if _flag("RUN_MIGRATIONS_ON_STARTUP", default=True):
+        try:
+            applied = migrate.apply_migrations()
+            print(
+                f"[startup] migrations applied: {', '.join(applied)}"
+                if applied else "[startup] database schema already up to date"
+            )
+        except Exception as exc:  # noqa: BLE001 - surface loudly, then fail fast
+            print(f"[startup] FATAL: database migration failed: {exc}")
+            raise
+    yield
+
+
+app = FastAPI(title="TWAIN API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8081",
         "http://localhost:3000",
+        "http://localhost:3001",  # app/package.json "web" script pins this port
         "http://localhost:3002",
+        "http://localhost:8081",  # default `npx expo start --web` port
         "https://d1z5umg4xc2bl8.cloudfront.net",
     ],
     allow_credentials=True,
@@ -40,29 +74,32 @@ async def health_check():
     return {"status": "ok"}
 
 
-@app.get("/api/greetings")
-async def get_greetings():
-    """Fetch all greetings from the database and return as JSON."""
-    try:
-        greetings = query_greetings()
-        if not greetings:
-            return JSONResponse(
-                status_code=200,
-                content={"data": [], "message": "No greetings found"},
-            )
-        return JSONResponse(
-            status_code=200,
-            content={
-                "data": greetings,
-                "count": len(greetings),
-                "message": "Greetings retrieved successfully",
-            },
+# ── Interim email login (pre-SSO) ─────────────────────────────────────────────
+class InterimLogin(BaseModel):
+    email: str
+
+
+@app.post("/api/auth/login")
+async def interim_login(body: InterimLogin):
+    """Interim email sign-in: validate the email, upsert the user, mint a token.
+
+    Available only when ``INTERIM_JWT_SECRET`` is configured. Entra tokens are
+    still accepted directly on every other endpoint once SSO is wired up.
+    """
+    if not auth.interim_auth_available():
+        raise HTTPException(status_code=503, detail="Interim auth is not configured.")
+    email = body.email.strip().lower()
+    if not auth.email_allowed(email):
+        raise HTTPException(
+            status_code=403, detail="This email is not permitted to sign in."
         )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e), "message": "Failed to retrieve greetings"},
-        )
+    user = upsert_user(
+        f"interim:{email}",
+        email,
+        email,
+        bootstrap_admin=email in auth.BOOTSTRAP_ADMIN_EMAILS,
+    )
+    return {"data": {"token": auth.mint_interim_token(user), "user": user}}
 
 
 class RoleUpdate(BaseModel):
@@ -71,8 +108,41 @@ class RoleUpdate(BaseModel):
 
 @app.get("/api/me")
 async def get_me(user: CurrentUser):
-    """Return the authenticated user (identity + role)."""
+    """Return the authenticated user (identity + role + notification prefs)."""
     return {"data": user}
+
+
+# Keep in lockstep with runner/notifications.py NOTIFY_KINDS (the reasons the
+# runner actually emails about). The api and runner are separate deployables,
+# so the list is mirrored here rather than imported.
+NOTIFY_KINDS = ("input", "approval", "completed", "failed", "terminated")
+
+
+class NotifyPrefs(BaseModel):
+    """The Settings page sends its whole state; missing key = "send"."""
+
+    enabled: bool = True
+    kinds: dict[str, bool] = {}
+
+
+@app.put("/api/me/notifications")
+async def put_notify_prefs(body: NotifyPrefs, user: CurrentUser):
+    """Replace the caller's email notification preferences.
+
+    The runner consults these before every send: emails off entirely
+    (``enabled=false``) or per-kind opt-outs (``kinds[kind]=false``).
+    """
+    unknown = sorted(set(body.kinds) - set(NOTIFY_KINDS))
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown notification kind(s): {', '.join(unknown)}; "
+                   f"valid kinds: {', '.join(NOTIFY_KINDS)}",
+        )
+    prefs = set_notify_prefs(user["id"], body.model_dump())
+    if prefs is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"data": prefs}
 
 
 @app.get("/api/admin/users")
@@ -91,10 +161,43 @@ async def admin_set_user_role(user_id: str, body: RoleUpdate, _admin: AdminUser)
     return {"data": updated}
 
 
+# ── GitHub issue submission ───────────────────────────────────────────────────
+class CreateIssue(BaseModel):
+    title: str
+    body: str = ""
+
+
+@app.post("/api/issues", status_code=201)
+async def create_issue(body: CreateIssue, user: CurrentUser):
+    """Open a GitHub issue on the TWAIN repo for the signed-in user.
+
+    Issues are created by a single service PAT, so the caller's email — taken
+    from their validated token, not the request body — is embedded in the issue
+    for attribution.
+    """
+    if not body.title.strip():
+        raise HTTPException(status_code=422, detail="title must not be empty.")
+    try:
+        result = github_issues.create_issue(
+            title=body.title,
+            body=body.body,
+            email=user.get("email", ""),
+            name=user.get("name"),
+        )
+    except github_issues.GitHubError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Could not create GitHub issue: {exc}"
+        ) from exc
+    return {"data": result}
+
+
 # ── Conversations / chat (Phase 1) ────────────────────────────────────────────
 class CreateConversation(BaseModel):
     request: str
     title: str | None = None
+    # Optional per-run LLM cost cap (USD). None => deployment default (the runner
+    # falls back to TWAIN_RUN_MAX_COST). Must be positive when supplied.
+    max_cost: float | None = None
 
 
 class SendMessage(BaseModel):
@@ -103,6 +206,22 @@ class SendMessage(BaseModel):
 
 class SendApproval(BaseModel):
     decision: Literal["approve", "reject"]
+    # Optional plan-unit overrides (ram GB, max_time hours) from the approval card.
+    slurm_request: dict | None = None
+
+
+class RerunConversation(BaseModel):
+    # Pipeline stage to restart from (e.g. "CLARIFY"). Validated against
+    # convo.RERUNNABLE_STATES in the handler.
+    state: str
+    # Optional mid-session revision: the researcher's "here's what to change"
+    # message, folded into the run's intent before re-planning.
+    feedback: str | None = None
+    # Replacement opening request, for re-running from INTAKE. Only INTAKE
+    # re-reads the raw request (every later stage works from the IntentSpec it
+    # produced), so the handler rejects it for any other target rather than
+    # accepting an edit that would silently do nothing.
+    request: str | None = None
 
 
 def _require_own_conversation(conversation_id: str, user: dict) -> dict:
@@ -117,7 +236,11 @@ async def start_conversation(body: CreateConversation, user: CurrentUser):
     """Start a new run from a natural-language request and enqueue it."""
     if not body.request.strip():
         raise HTTPException(status_code=422, detail="request must not be empty.")
-    conversation = convo.create_conversation(user["id"], body.request, body.title)
+    if body.max_cost is not None and body.max_cost <= 0:
+        raise HTTPException(status_code=422, detail="max_cost must be a positive number.")
+    conversation = convo.create_conversation(
+        user["id"], body.request, body.title, max_cost=body.max_cost
+    )
     return {"data": conversation}
 
 
@@ -135,6 +258,14 @@ async def get_conversation_detail(conversation_id: str, user: CurrentUser):
     return {"data": {**conversation, "messages": convo.list_messages(conversation_id)}}
 
 
+@app.delete("/api/conversations/{conversation_id}")
+async def remove_conversation(conversation_id: str, user: CurrentUser):
+    """Delete a conversation and all of its data (owner only)."""
+    if not convo.delete_conversation(conversation_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"data": {"id": conversation_id, "deleted": True}}
+
+
 @app.post("/api/conversations/{conversation_id}/messages")
 async def post_message(conversation_id: str, body: SendMessage, user: CurrentUser):
     """Add a user turn (a chat reply or an answer to a clarification question)."""
@@ -148,7 +279,65 @@ async def post_message(conversation_id: str, body: SendMessage, user: CurrentUse
 async def post_approval(conversation_id: str, body: SendApproval, user: CurrentUser):
     """Answer a plan-approval gate ('approve' resumes the run, 'reject' stops it)."""
     _require_own_conversation(conversation_id, user)
-    return {"data": convo.add_approval_response(conversation_id, body.decision)}
+    return {
+        "data": convo.add_approval_response(
+            conversation_id, body.decision, slurm_request=body.slurm_request
+        )
+    }
+
+
+@app.post("/api/conversations/{conversation_id}/terminate")
+async def post_terminate(conversation_id: str, user: CurrentUser):
+    """Ask the runner to stop this run at the next opportunity.
+
+    Records a 'terminate' control message and flips the conversation to
+    'cancelling'; the runner notices between stages / polls, cancels any
+    in-flight Slurm job, and settles the conversation as 'cancelled'.
+    """
+    conversation = _require_own_conversation(conversation_id, user)
+    if conversation["status"] in convo.TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="Run already finished.")
+    return {"data": convo.request_termination(conversation_id)}
+
+
+@app.post("/api/conversations/{conversation_id}/rerun")
+async def rerun_conversation(conversation_id: str, body: RerunConversation, user: CurrentUser):
+    """Re-run a conversation from an earlier pipeline stage.
+
+    Resets that stage and everything after it and drives the run again; the
+    stages before it are kept as input. Allowed on a finished run, and on one
+    suspended at a gate (nothing is driving a suspended run) so the researcher
+    can redirect it from the accept-or-rerun question instead of only being
+    offered the automatic correction loop.
+
+    ``request`` replaces the opening prompt and is only accepted with INTAKE,
+    the one stage that re-reads it.
+    """
+    _require_own_conversation(conversation_id, user)
+    state = body.state.strip().upper()
+    if state not in convo.RERUNNABLE_STATES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"state must be one of: {', '.join(convo.RERUNNABLE_STATES)}",
+        )
+    request = (body.request or "").strip() or None
+    if request and state != "INTAKE":
+        raise HTTPException(
+            status_code=422,
+            detail="An edited request only applies when re-running from INTAKE; "
+                   "every later stage works from the spec intake already produced.",
+        )
+    try:
+        conversation = convo.rerun_conversation(
+            conversation_id, user["id"], state,
+            feedback=(body.feedback or "").strip() or None,
+            request=request,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"data": conversation}
 
 
 def _sse_event_stream(conversation_id: str):
@@ -178,28 +367,97 @@ async def stream_conversation(conversation_id: str, user: CurrentUser):
     )
 
 
+def _json_safe(value):
+    """Replace non-finite floats with None so the response can be serialized.
+
+    ``json.loads`` accepts the bare ``NaN``/``Infinity`` that a generated script
+    prints and that older artifacts still contain, but Starlette renders
+    responses with ``allow_nan=False``. Letting one through does not degrade a
+    field -- it raises during rendering and turns the whole report into a 500.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 def _load_json_artifact(conversation_id: str, name: str):
     """Fetch an artifact and parse it as JSON, or return raw text / None."""
     artifact = convo.get_artifact(conversation_id, name)
     if artifact is None:
         return None
     try:
-        return json.loads(artifact["content"])
+        return _json_safe(json.loads(artifact["content"]))
     except (ValueError, TypeError):
         return artifact["content"]
 
 
+def _extract_result(execution_result):
+    """Pull the structured result the generated script prints to stdout, if any.
+
+    Convention: the run's ``main.py`` prints a JSON object with the computed
+    property, e.g. ``{"property": "band_gap", "band_gap": 6.73, ...}``. Returns
+    the last such object found, or None.
+
+    The object may span several lines. Scripts routinely print it with
+    ``json.dumps(obj, indent=2)``, and an earlier version of this function tested
+    ``line.startswith("{") and line.endswith("}")`` -- which only ever matches a
+    one-line object, so a pretty-printed result parsed to None and the report card
+    fell back to "no structured result found" while displaying that very JSON as
+    raw output. The value was never lost (INTERPRET parses the same stdout for the
+    normalized metric), but the headline was blank.
+
+    Decoding starts only at a line that begins with ``{``, so a brace inside an
+    engine's log text cannot start a spurious parse, and the scan stays cheap on
+    the tens of kilobytes of solver output these runs produce.
+    """
+    if not isinstance(execution_result, dict):
+        return None
+    stdout = execution_result.get("stdout")
+    if not isinstance(stdout, str):
+        return None
+    decoder = json.JSONDecoder()
+    result = None
+    offset = 0
+    for raw in stdout.splitlines(keepends=True):
+        if raw.lstrip().startswith("{"):
+            start = offset + (len(raw) - len(raw.lstrip()))
+            try:
+                parsed, _ = decoder.raw_decode(stdout, start)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                result = parsed
+        offset += len(raw)
+    # json.loads accepts bare NaN; the response renderer does not.
+    return _json_safe(result)
+
+
 @app.get("/api/conversations/{conversation_id}/report")
 async def get_report(conversation_id: str, user: CurrentUser):
-    """Assemble a run report: summary + the list of downloadable artifacts."""
+    """Assemble a run report: headline result, summary, and downloadable artifacts."""
     conversation = _require_own_conversation(conversation_id, user)
+    execution_result = _load_json_artifact(conversation_id, "execution_result")
     return {
         "data": {
             "conversation": conversation,
             "final_state": conversation["current_state"],
             "status": conversation["status"],
             "plan": _load_json_artifact(conversation_id, "execution_plan"),
-            "execution_result": _load_json_artifact(conversation_id, "execution_result"),
+            "execution_result": execution_result,
+            "result": _extract_result(execution_result),
+            "results_dir": (
+                execution_result.get("artifacts_dir")
+                if isinstance(execution_result, dict)
+                else None
+            ),
+            # Epic 6 artifacts: the interpreted metric and the validation
+            # verdict, so the report can say how the result was checked.
+            "normalized_result": _load_json_artifact(conversation_id, "normalized_result"),
+            "validation": _load_json_artifact(conversation_id, "validation_report"),
             "budget": _load_json_artifact(conversation_id, "budget"),
             "artifacts": convo.list_artifacts(conversation_id),
         }
@@ -226,9 +484,9 @@ async def get_issue_context(conversation_id: str, user: CurrentUser):
     return {
         "data": {
             "run_context": run_issues.collect_run_context(conversation),
-            "github_configured": github_issues.issues_enabled(),
-            "repo": github_issues.resolve_repo(),
-            "categories": list(github_issues.CATEGORIES),
+            "github_configured": run_issue_github.issues_enabled(),
+            "repo": run_issue_github.resolve_repo(),
+            "categories": list(run_issue_github.CATEGORIES),
             "submitted": run_issues.list_issues(conversation_id),
         }
     }
@@ -243,8 +501,8 @@ async def submit_run_issue(conversation_id: str, body: SubmitRunIssue, user: Cur
     ``created`` from ``queued`` (no credentials configured) and ``failed``.
     """
     conversation = _require_own_conversation(conversation_id, user)
-    title = github_issues.clean_title(body.title)
-    description = body.description.strip()[: github_issues.MAX_DESCRIPTION]
+    title = run_issue_github.clean_title(body.title)
+    description = body.description.strip()[: run_issue_github.MAX_DESCRIPTION]
     if not title:
         raise HTTPException(status_code=422, detail="title must not be empty.")
     if not description:
@@ -259,13 +517,13 @@ async def submit_run_issue(conversation_id: str, body: SubmitRunIssue, user: Cur
         )
 
     context = run_issues.collect_run_context(conversation)
-    if github_issues.issues_enabled():
-        result = github_issues.GitHubIssueClient().create_issue(
+    if run_issue_github.issues_enabled():
+        result = run_issue_github.GitHubIssueClient().create_issue(
             title=title,
-            body=github_issues.render_issue_body(
+            body=run_issue_github.render_issue_body(
                 context, category=body.category, description=description, reporter=user
             ),
-            labels=github_issues.labels_for(body.category),
+            labels=run_issue_github.labels_for(body.category),
         )
     else:
         # Recorded, not filed: the deployment has no issue-tracker credentials.

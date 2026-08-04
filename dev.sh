@@ -17,7 +17,7 @@
 #
 # Config via env (sensible local defaults):
 #   DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD API_PORT AUTH_DISABLED
-#   PG_CONTAINER TWAIN_EXECUTE_LOCALLY
+#   PG_CONTAINER TWAIN_EXECUTE_LOCALLY TWAIN_DB_FROM_ENV
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,6 +26,10 @@ cd "$REPO"
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-twaindb}"
+# Use the DB_* env vars below for the API's connection, not AWS Secrets Manager
+# (which has no credentials locally). Without this the API 500s on every
+# DB-backed request. See api/database.py:_load_db_config.
+TWAIN_DB_FROM_ENV="${TWAIN_DB_FROM_ENV:-true}"
 API_PORT="${API_PORT:-8000}"
 AUTH_DISABLED="${AUTH_DISABLED:-true}"
 PG_CONTAINER="${PG_CONTAINER:-twain-pg}"
@@ -33,6 +37,10 @@ PG_CONTAINER="${PG_CONTAINER:-twain-pg}"
 # plan-approval gate in the UI still applies). --no-execute or
 # TWAIN_EXECUTE_LOCALLY=0 keeps the pipeline planning-only.
 TWAIN_EXECUTE_LOCALLY="${TWAIN_EXECUTE_LOCALLY:-1}"
+# The API resolves DB credentials from AWS Secrets Manager by default (the
+# cloud path); local dev has no AWS credentials, so read the DB_* env vars
+# exported below instead (api/database.py's offline escape hatch).
+TWAIN_DB_FROM_ENV="${TWAIN_DB_FROM_ENV:-true}"
 
 RUN_RUNNER=1
 RUN_APP=1
@@ -57,8 +65,13 @@ require python3
 # Two ways to run psql commands, so the script works both with a native install
 # and with Postgres inside Docker (no psql client on the host needed).
 USE_DOCKER_PG=0
+# -w: never prompt for a password. Without it, when the twain-pg container is
+# already up (Colima running), this probe hits the container's Postgres, which
+# asks for a password interactively -- blocking the script on a prompt that can
+# only fail. With -w the probe fails silently and we take the Docker path.
 if command -v psql >/dev/null 2>&1 \
-   && psql -h "$DB_HOST" -p "$DB_PORT" -U "${DB_USER:-$(whoami)}" -lqt >/dev/null 2>&1; then
+   && PGCONNECT_TIMEOUT=3 PGPASSWORD="${DB_PASSWORD:-}" \
+      psql -w -h "$DB_HOST" -p "$DB_PORT" -U "${DB_USER:-$(whoami)}" -lqt >/dev/null 2>&1; then
   DB_USER="${DB_USER:-$(whoami)}"
   DB_PASSWORD="${DB_PASSWORD:-}"
 else
@@ -92,7 +105,7 @@ else
     sleep 1
   done
 fi
-export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD AUTH_DISABLED TWAIN_EXECUTE_LOCALLY
+export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD AUTH_DISABLED TWAIN_EXECUTE_LOCALLY TWAIN_DB_FROM_ENV
 
 # psql against the dev DB, transparently local or via the container.
 run_psql() {
@@ -157,8 +170,11 @@ fi
 
 # ── 7. Web app ────────────────────────────────────────────────────────────────
 if [ "$RUN_APP" = 1 ]; then
-  info "Web app    → http://localhost:8081"
-  ( cd app && EXPO_PUBLIC_API_BASE_URL="http://localhost:$API_PORT" exec npm run web ) &
+  info "Web app    → http://localhost:3001"
+  # EXPO_PUBLIC_AUTH_DISABLED mirrors the API's AUTH_DISABLED so local dev skips
+  # the interim login screen (the API injects a dev user regardless).
+  ( cd app && EXPO_PUBLIC_API_BASE_URL="http://localhost:$API_PORT" \
+      EXPO_PUBLIC_AUTH_DISABLED="true" exec npm run web ) &
 fi
 
 wait

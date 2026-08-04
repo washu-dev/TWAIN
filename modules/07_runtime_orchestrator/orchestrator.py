@@ -61,6 +61,15 @@ from retry_policy import (
 
 # Pipeline state -> provenance event_type (only the six the schema allows).
 # DECOMPOSE/DISCOVER/PLAN are all planning-phase work, so they log as "plan".
+class RunCancelled(RuntimeError):
+    """The researcher terminated the run (web UI Terminate button).
+
+    Raised out of :meth:`Orchestrator.run` (never converted to an error card)
+    so the driver -- the runner service -- can mark the conversation
+    'cancelled' instead of 'error'.
+    """
+
+
 _PROVENANCE_EVENT_TYPE = {
     State.INTAKE: "request",
     State.DECOMPOSE: "plan",
@@ -108,8 +117,14 @@ class Orchestrator:
         provenance: bool = True,
         step_timeouts: bool = True,
         step_retries: int = 0,
-        max_replans: int = 3,
-        max_corrections: int = 3,
+        # Backstops against a state machine that will not stop looping -- NOT
+        # the intended limit. The state machine's own rerun controller bounds
+        # the correction loop gracefully (it delivers the flagged result for
+        # review); these must stay above its budget, or they abort the run
+        # first and the researcher loses the result and the rationale instead
+        # of receiving them flagged. See StateMachine._gate_rerun.
+        max_replans: int = 6,
+        max_corrections: int = 6,
         max_transitions: int = 100,
         budget_tracker: Optional[BudgetTracker] = None,
         run_max_cost: float = 1.0,
@@ -123,6 +138,9 @@ class Orchestrator:
         verify_codegen: bool = False,
         auto_approve: bool = False,
         suspend_exc: Optional[type] = None,
+        execute_slurm: bool = False,
+        slurm_cluster: Optional[str] = None,
+        cancel_check=None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -134,6 +152,11 @@ class Orchestrator:
         # later ``resume`` re-enters the same state. None (CLI/demo/tests) => no
         # suspend path: an ask that blocks on stdin behaves exactly as before.
         self._suspend_exc = suspend_exc
+        # Terminate seam (web UI's Terminate button): a zero-arg callable
+        # returning True once the researcher asked to stop. Checked between
+        # stages and before classifying any failure, so a cancelled run raises
+        # RunCancelled instead of producing an error card.
+        self.cancel_check = cancel_check
         self.step_timeouts = step_timeouts
         self.step_retries = step_retries
         self.max_replans = max_replans
@@ -150,7 +173,10 @@ class Orchestrator:
         )
 
         # ---- budget tracking ------------------------------------------------
-        self.budget_tracker = budget_tracker or BudgetTracker()
+        # A fresh tracker is scoped to this run, so its global ceiling is the run
+        # cost cap (keeps budget.json's "global" tier coherent with "run"); an
+        # injected tracker keeps whatever cross-run ceiling the caller set.
+        self.budget_tracker = budget_tracker or BudgetTracker(global_budget=run_max_cost)
         self.run_budget = RunBudget(
             max_cost=run_max_cost,
             max_iterations=run_max_iterations,
@@ -201,6 +227,14 @@ class Orchestrator:
             # run reaches completion without human input (see the runner's
             # TWAIN_AUTO_RUN). The plan-approval gate is enforced by the driver.
             auto_approve=auto_approve,
+            # HPC route (Story 5.4): submit the RunBundle to the Slurm cluster
+            # instead of running it locally/in Docker (see the runner's
+            # TWAIN_EXECUTE_SLURM / TWAIN_SLURM_CLUSTER).
+            execute_slurm=execute_slurm,
+            slurm_cluster=slurm_cluster,
+            # Terminate seam: lets a long EXECUTE (Slurm poll loop) notice the
+            # researcher's terminate request and scancel the cluster job.
+            should_abort=cancel_check,
         )
 
         if resuming:
@@ -311,6 +345,15 @@ class Orchestrator:
         and repeated failures trip the breaker before we burn the budget.
         """
         timeout = timeout_for(state.name) if self.step_timeouts else None
+        # A Slurm-routed EXECUTE legitimately outlives the default 2h stage
+        # budget (the plan's wall time can be 4h+): stretch the stage timeout to
+        # the machine's own wait budget so the stage isn't killed mid-poll.
+        if (timeout is not None and state == State.EXECUTE
+                and getattr(self.sm, "execute_slurm", False)):
+            try:
+                timeout = max(timeout, self.sm.slurm_wait_budget() + 5 * 60)
+            except Exception:  # noqa: BLE001 - keep the default budget
+                pass
         suspended: Dict[str, BaseException] = {}
 
         def _step():
@@ -355,7 +398,23 @@ class Orchestrator:
                 )
 
     # ----------------------------------------------------------------- error path
+    def _raise_if_cancelled(self) -> None:
+        """Raise :class:`RunCancelled` once the researcher asked to terminate."""
+        if self.cancel_check is not None and self.cancel_check():
+            self.run_session.set_status(RunStatus.PAUSED)
+            self._checkpoint()
+            self._publish("run.cancelled",
+                          {"state": self.sm.current_state.name},
+                          priority=Priority.CRITICAL)
+            raise RunCancelled(
+                f"run {self.session_id} terminated by the researcher"
+            )
+
     def _handle_error(self, exc: Exception, state: State) -> RunStatus:
+        # A failure while termination is pending is a consequence of the
+        # termination (aborted waits, cancelled Slurm job), not a run error:
+        # don't alarm the researcher with an error card for their own action.
+        self._raise_if_cancelled()
         classified = error_handler.classify(exc, state.name)
         self.last_error = classified
         self.run_session.error = classified.to_dict()
@@ -408,6 +467,7 @@ class Orchestrator:
         self._publish("run.started", {"state": self.sm.current_state.name})
 
         while True:
+            self._raise_if_cancelled()
             state = self.sm.current_state
 
             if state == State.TERMINATE:
@@ -478,6 +538,30 @@ class Orchestrator:
                 "budget": self.run_budget.to_dict(),
             })
 
+            # 4a) park at the approval gate. Entering BUILD without an approved
+            #     plan means the run needs the researcher: on a fresh run the
+            #     driver already stops here via ``until``, but a replan re-enters
+            #     BUILD mid-leg with a *new* plan and a cleared approval. Pausing
+            #     hands it back to the driver to post a fresh approval card;
+            #     driving on would run build() and then trip the BUILD->REPAIR
+            #     guard, failing a run that is merely waiting on a human.
+            if entered == State.BUILD and not self.sm.context.plan_approved:
+                self.run_session.set_status(RunStatus.PAUSED)
+                self._checkpoint()
+                self._publish("run.paused", {"state": entered.name})
+                return RunStatus.PAUSED
+
+            # 4b) post-step budget gate. The pre-step gate (step 0) only sees the
+            #     cost *before* this stage ran; re-check now that this stage's LLM
+            #     spend has been synced so a run stops promptly once it hits the
+            #     cap, rather than overshooting by up to one stage. A run that just
+            #     reached TERMINATE is already done -- don't fail a finished run.
+            if entered != State.TERMINATE:
+                try:
+                    self._check_budget()
+                except (OverBudget, OverMaxIterations, OverMaxWallTime) as exc:
+                    return self._handle_error(exc, entered)
+
             # 5) hard safety net against runaway transition counts
             if self.run_session.transition_count > self.max_transitions:
                 return self._handle_error(
@@ -487,6 +571,48 @@ class Orchestrator:
                     ),
                     entered,
                 )
+
+    # --------------------------------------------------------------- rewind / rerun
+    def rewind_to(self, target: State, *, reseed: Optional[Dict] = None) -> None:
+        """Rewind this run to an earlier stage so :meth:`run` re-executes from it.
+
+        Delegates the state/artifact/flag reset to :meth:`StateMachine.rewind_to`,
+        then re-applies any guard ``reseed`` the driver relies on for the stubbed
+        happy path (the runner seeds ``execution_status``/``validation_result`` so
+        a planning-only run still reaches TERMINATE). It mirrors the machine's new
+        state + context into the :class:`RunSession`, clears any terminal error,
+        resets the loop counters, marks the run RUNNING, and checkpoints -- so the
+        store a fresh runner resumes from reflects the rewound run.
+        """
+        self.sm.rewind_to(target)
+        if reseed:
+            for key, value in reseed.items():
+                setattr(self.sm.context, key, value)
+        self.run_session.set_state(self.sm.current_state)
+        self.run_session.set_context(self.sm.context)
+        self.run_session.set_status(RunStatus.RUNNING)
+        self.run_session.error = None
+        self.run_session.transition_count = 0
+        self.run_session.replan_count = 0
+        self.run_session.correct_count = 0
+        self._checkpoint()
+        self._publish("run.rewound", {"state": self.sm.current_state.name})
+
+    def approve_plan(self, approved: bool = True) -> None:
+        """Record the researcher's plan approval so the run may build/execute.
+
+        Delegates to :meth:`StateMachine.approve_plan` (which sets + persists the
+        ``plan_approved`` guard flag), then mirrors it into the :class:`RunSession`
+        and checkpoints, so a run resumed in a fresh process still sees the
+        approval. This is the ONLY way (outside an explicit context seed) that the
+        guarded ``BUILD->REPAIR`` / ``REPAIR->EXECUTE`` transitions become allowed:
+        without it a driven run halts at the approval gate before anything is
+        built or executed.
+        """
+        self.sm.approve_plan(approved)
+        self.run_session.set_context(self.sm.context)
+        self._checkpoint()
+        self._publish("run.plan_approved", {"approved": approved})
 
     # ----------------------------------------------------------------- demo entry
     @classmethod
@@ -543,6 +669,16 @@ def _main(argv=None) -> int:
         help="build a venv and pip-install the bundle's requirements before running "
              "(needed when the selected tool isn't already importable)",
     )
+    parser.add_argument(
+        "--slurm", action="store_true",
+        help="submit the RunBundle to the Slurm cluster (configs/clusters/, default "
+             "compute2) instead of executing locally; needs VPN + SSH key, or run "
+             "on a login node with TWAIN_SLURM_HOST=''",
+    )
+    parser.add_argument(
+        "--cluster", default=None,
+        help="cluster profile name for --slurm (default: compute2)",
+    )
     args = parser.parse_args(argv)
 
     if args.session_id and Session.exists(args.session_id):
@@ -554,8 +690,10 @@ def _main(argv=None) -> int:
 
     orch = Orchestrator.demo(
         session_id=args.session_id,
-        execute_locally=not args.no_execute,
+        execute_locally=not args.no_execute and not args.slurm,
         execute_install_deps=args.install_deps,
+        execute_slurm=args.slurm,
+        slurm_cluster=args.cluster,
     )
     status = orch.run()
     rs = orch.run_session

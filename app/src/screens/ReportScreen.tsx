@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { apiClient, ArtifactMeta, Report } from '@/api/client';
+import { useAuth } from '@/hooks/useAuth';
+import { canCopy, copyText } from '@/utils/clipboard';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -18,12 +20,15 @@ const C = Colors.light;
 export const ReportScreen: React.FC = () => {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id?: string }>();
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!id) return;
+    // Same auth race as ChatScreen: fetching before MSAL has a token 401s.
+    if (authLoading || !isAuthenticated) return;
     let cancelled = false;
     (async () => {
       try {
@@ -38,7 +43,7 @@ export const ReportScreen: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, authLoading, isAuthenticated]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
@@ -53,7 +58,16 @@ export const ReportScreen: React.FC = () => {
         <Text style={styles.title} numberOfLines={1}>
           {report?.conversation?.title ?? 'Report'}
         </Text>
-        <View style={{ width: 48 }} />
+        {/* Always reachable path back to the run's chat — from here the user
+            can re-run from a step or ask for changes. Works even when the
+            report was opened directly (Browse / URL), where Back can't. */}
+        <TouchableOpacity
+          onPress={() => router.push({ pathname: '/chat', params: { id: id as string } })}
+          accessibilityRole="button"
+          accessibilityLabel="Open the conversation for this run"
+        >
+          <Text style={styles.openChat}>Chat ›</Text>
+        </TouchableOpacity>
       </View>
 
       {loading && <ActivityIndicator style={{ marginTop: Spacing.five }} color={C.washuRed} />}
@@ -68,21 +82,100 @@ export const ReportScreen: React.FC = () => {
             </View>
           </View>
 
+          <ResultCard
+            result={report.result ?? {}}
+            primaryMetric={primaryMetric(report)}
+            resultsDir={report.results_dir}
+            fallbackOutput={report.result ? null : stdoutTail(report)}
+          />
+
+          <ValidationCard report={report} />
+
           <SummaryCard report={report} />
 
-          <Text style={styles.sectionHeading}>Files</Text>
-          <Text style={styles.sectionHint}>
-            Tap to expand. {`run_bundle/main.py`} is the generated pymatgen script.
-          </Text>
-          {report.artifacts.length === 0 && (
-            <Text style={styles.empty}>No files were produced for this run yet.</Text>
-          )}
-          {report.artifacts.map((a) => (
-            <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
-          ))}
+          <BudgetCard report={report} />
+
+          <Files report={report} />
         </ScrollView>
       )}
     </SafeAreaView>
+  );
+};
+
+// The metric INTERPRET (module 10) selected as the answer. Both the Result card
+// and the Validation card read it through primaryMetric() so the headline and the
+// verdict can never be about different numbers.
+type PrimaryMetric = {
+  name?: string;
+  value?: number;
+  uncertainty?: number;
+  unit?: string;
+};
+
+function primaryMetric(report: Report | null): PrimaryMetric | null {
+  const normalized =
+    typeof report?.normalized_result === 'object' && report.normalized_result
+      ? report.normalized_result
+      : null;
+  const metric = (normalized?.['primary_metric'] ?? null) as PrimaryMetric | null;
+  return metric && typeof metric.value === 'number' ? metric : null;
+}
+
+// How the result was checked (Epic 6): the interpreted metric and the
+// cross-validation verdict. Renders only when the run interpreted something —
+// planning-only or failed runs have nothing to validate.
+const ValidationCard: React.FC<{ report: Report }> = ({ report }) => {
+  const validation =
+    typeof report.validation === 'object' && report.validation ? report.validation : null;
+  const normalized =
+    typeof report.normalized_result === 'object' && report.normalized_result
+      ? report.normalized_result
+      : null;
+  if (!validation && !normalized) return null;
+
+  const metric = primaryMetric(report);
+  const metricText =
+    metric && typeof metric.value === 'number'
+      ? `${metric.name} = ${formatValue(metric.value)}` +
+        (metric.uncertainty ? ` ± ${formatValue(metric.uncertainty)}` : '') +
+        (metric.unit ? ` ${metric.unit}` : '')
+      : null;
+
+  const status = String(validation?.['acceptance_status'] ?? 'not performed');
+  const rationale =
+    typeof validation?.['rationale'] === 'string' ? (validation['rationale'] as string) : null;
+  const rerun = (validation?.['rerun'] ?? null) as
+    | { decision?: string; stop_reason?: string; reason?: string; final_verdict?: string }
+    | null;
+  const stopped = rerun?.decision === 'stop';
+
+  const statusColor =
+    status === 'accepted' ? C.washuGreen : status === 'rejected' ? C.washuRed : '#B56A00';
+
+  return (
+    <View style={styles.card}>
+      <View style={styles.validationHeader}>
+        <Text style={styles.cardTitle}>Validation</Text>
+        <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
+          <Text style={styles.statusBadgeText}>{status.replace('_', ' ')}</Text>
+        </View>
+      </View>
+      {metricText && <Row label="Interpreted result" value={metricText} />}
+      {rationale && <Text style={styles.validationRationale}>{rationale}</Text>}
+      {!validation && (
+        <Text style={styles.note}>
+          A result was extracted, but no reference (literature baseline or acceptance
+          criterion) was available to check it against.
+        </Text>
+      )}
+      {stopped && (
+        <Text style={styles.note}>
+          The automatic correction loop stopped (
+          {rerun?.stop_reason ?? rerun?.reason ?? 'budget exhausted'}). The result is delivered
+          for your review — verdict on record: {rerun?.final_verdict ?? status}.
+        </Text>
+      )}
+    </View>
   );
 };
 
@@ -109,17 +202,65 @@ const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
   const execText = exec
     ? String(exec['status'] ?? (exec['succeeded'] ? 'succeeded' : 'failed'))
     : 'not run locally (execution disabled)';
+  // Slurm runs carry their job identity in install_log (see
+  // SlurmExecutionAdapter): show which cluster/job produced the result.
+  const slurmInfo = exec?.['install_log'] as
+    | { job_id?: string; cluster?: string }
+    | undefined;
+  const slurmText = slurmInfo?.job_id
+    ? `${slurmInfo.cluster ?? 'Slurm'} — job ${slurmInfo.job_id}`
+    : null;
+
+  const summary = typeof plan?.['summary'] === 'string' ? (plan['summary'] as string) : null;
 
   return (
     <View style={styles.card}>
       <Text style={styles.cardTitle}>Summary</Text>
+      {summary ? <Text style={styles.summaryText}>{summary}</Text> : null}
       <Row label="Selected method" value={methodText} />
       <Row label="Estimated cost" value={costParts.length ? costParts.join(' + ') : '—'} />
       <Row label="Execution" value={execText} />
+      {slurmText && <Row label="Ran on" value={slurmText} />}
       {!plan && (
         <Text style={styles.note}>
           No execution plan was produced (the run stopped before planning). The raw specs are below.
         </Text>
+      )}
+    </View>
+  );
+};
+
+// Actual spend for the run, from the budget.json artifact the orchestrator writes
+// each step. Renders nothing until a budget snapshot exists (e.g. very early runs).
+const BudgetCard: React.FC<{ report: Report }> = ({ report }) => {
+  const budget = typeof report.budget === 'object' && report.budget ? report.budget : null;
+  const run = budget?.run;
+  if (!run) return null;
+
+  const used = Number(run.cost ?? 0);
+  const max = Number(run.max_cost ?? 0);
+  const remaining = Math.max(max - used, 0);
+  const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
+  const overBudget = max > 0 && used >= max;
+  const mins = (secs?: number) => (secs != null ? `${(Number(secs) / 60).toFixed(1)} min` : '—');
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>Budget</Text>
+      <View style={styles.meterTrack}>
+        <View
+          style={[styles.meterFill, { width: `${pct}%` }, overBudget && styles.meterFillOver]}
+        />
+      </View>
+      <Row label="LLM cost used" value={`$${used.toFixed(4)} / $${max.toFixed(2)}`} />
+      <Row label="Remaining" value={`$${remaining.toFixed(4)}`} />
+      <Row label="Iterations" value={`${run.iterations ?? 0} / ${run.max_iterations ?? 0}`} />
+      <Row
+        label="Elapsed"
+        value={`${mins(run.elapsed_seconds)} / ${mins(run.wall_time_limit_seconds)}`}
+      />
+      {overBudget && (
+        <Text style={styles.note}>This run reached its cost budget and was stopped.</Text>
       )}
     </View>
   );
@@ -150,42 +291,235 @@ const ArtifactRow: React.FC<{ conversationId: string; meta: ArtifactMeta }> = ({
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    // The "Copied" flash outlives the row if the report reloads under it.
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+  }, []);
+
+  /** The file's text, fetching it once if this row has not loaded it yet. */
+  const ensureContent = async (): Promise<string | null> => {
+    if (content !== null) return content;
+    setLoading(true);
+    try {
+      const data = await apiClient.getArtifact(conversationId, meta.name);
+      setContent(data.content);
+      return data.content;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load file');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const toggle = async () => {
     const next = !expanded;
     setExpanded(next);
-    if (next && content === null && !loading) {
-      setLoading(true);
-      try {
-        const data = await apiClient.getArtifact(conversationId, meta.name);
-        setContent(data.content);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load file');
-      } finally {
-        setLoading(false);
-      }
+    if (next && content === null && !loading) await ensureContent();
+  };
+
+  // Copy without needing to expand first: a researcher pasting main.py into a
+  // cluster shell does not want to read it here.
+  const handleCopy = async () => {
+    if (loading) return;
+    const text = await ensureContent();
+    if (text === null) return;
+    if (!(await copyText(text))) {
+      setError('Could not copy to the clipboard — select the text instead.');
+      return;
     }
+    setCopied(true);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(false), 1500);
   };
 
   return (
     <View style={styles.artifact}>
-      <TouchableOpacity style={styles.artifactHeader} onPress={toggle} accessibilityRole="button">
-        <Text style={styles.artifactChevron}>{expanded ? '▾' : '▸'}</Text>
-        <Text style={styles.artifactName} numberOfLines={1}>{meta.name}</Text>
-        <Text style={styles.artifactKind}>{meta.kind}</Text>
-      </TouchableOpacity>
+      {/* The toggle and the copy button are siblings rather than nested, so a tap
+          on Copy cannot also expand the row. */}
+      <View style={styles.artifactHeader}>
+        <TouchableOpacity
+          style={styles.artifactHeaderMain}
+          onPress={toggle}
+          accessibilityRole="button"
+        >
+          <Text style={styles.artifactChevron}>{expanded ? '▾' : '▸'}</Text>
+          <Text style={styles.artifactName} numberOfLines={1}>{meta.name}</Text>
+          <Text style={styles.artifactKind}>{meta.kind}</Text>
+        </TouchableOpacity>
+        {canCopy && (
+          <TouchableOpacity
+            style={[styles.copyBtn, loading && styles.copyBtnDisabled]}
+            onPress={handleCopy}
+            disabled={loading}
+            accessibilityRole="button"
+            accessibilityLabel={`Copy ${meta.name}`}
+          >
+            <Text style={styles.copyText}>{copied ? '✓ Copied' : 'Copy'}</Text>
+          </TouchableOpacity>
+        )}
+      </View>
       {expanded && (
         <View style={styles.artifactBody}>
           {loading && <ActivityIndicator color={C.washuRed} />}
           {error && <Text style={styles.error}>{error}</Text>}
           {content !== null && (
-            <ScrollView horizontal style={styles.codeScroll}>
-              <Text style={styles.code}>{content}</Text>
+            // Vertical scroller (capped height) wrapping a horizontal one for
+            // long lines. A single horizontal ScrollView clipped anything
+            // taller than the cap with no way to reach the bottom of the file.
+            <ScrollView style={styles.codeScroll} nestedScrollEnabled>
+              <ScrollView horizontal nestedScrollEnabled>
+                <Text style={styles.code} selectable>
+                  {content}
+                </Text>
+              </ScrollView>
             </ScrollView>
           )}
         </View>
       )}
     </View>
+  );
+};
+
+function formatValue(v: unknown): string {
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(4)));
+  }
+  return String(v);
+}
+
+// The last lines the run's script printed — the human-readable result when no
+// structured (single-line JSON) result was found in stdout.
+function stdoutTail(report: Report, maxLines = 12): string | null {
+  const exec = report.execution_result;
+  const stdout =
+    typeof exec === 'object' && exec && typeof exec['stdout'] === 'string'
+      ? (exec['stdout'] as string)
+      : null;
+  if (!stdout) return null;
+  const lines = stdout
+    .split('\n')
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return null;
+  return lines.slice(-maxLines).join('\n');
+}
+
+// Headline scientific result: the property + value the run computed, plus where
+// the output files are stored. Falls back gracefully for arbitrary result shapes,
+// and shows the script's raw output when no structured result was printed — so
+// the top of the report always answers "what did the run produce?".
+const ResultCard: React.FC<{
+  result: Record<string, unknown>;
+  primaryMetric?: PrimaryMetric | null;
+  resultsDir?: string | null;
+  fallbackOutput?: string | null;
+}> = ({ result, primaryMetric, resultsDir, fallbackOutput }) => {
+  const propName = typeof result['property'] === 'string' ? (result['property'] as string) : null;
+  // `property` is only usable as a headline when it names a key verbatim. Scripts
+  // routinely print the quantity instead of the key it was stored under —
+  // "standard_heat_of_formation" while the number lives in
+  // standard_heat_of_formation_kJ_per_mol — and then this lookup is undefined.
+  const direct = propName ? result[propName] : undefined;
+
+  // Second choice: the metric INTERPRET chose. The agent has already decided
+  // which of the printed numbers is the answer, and it is the same one validation
+  // graded, so reusing it keeps the headline from ever disagreeing with the
+  // verdict below — which a second, independent guess here could.
+  const interpreted = typeof primaryMetric?.value === 'number' ? primaryMetric : null;
+
+  const headlineName = direct != null ? propName : (interpreted?.name ?? null);
+  const headlineValue = direct != null ? direct : interpreted?.value;
+  const headlineUnit =
+    direct != null ? result[`${propName}_unit`] : (interpreted?.unit ?? undefined);
+
+  const hidden = new Set<string>(['property', 'smoke', 'output_file']);
+  for (const key of [propName, headlineName]) {
+    if (key) {
+      hidden.add(key);
+      hidden.add(`${key}_unit`);
+    }
+  }
+  const rows = Object.entries(result).filter(
+    ([k, v]) =>
+      !hidden.has(k) &&
+      (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'),
+  );
+
+  const hasStructured = headlineValue != null || rows.length > 0;
+
+  return (
+    <View style={styles.resultCard}>
+      <Text style={styles.resultCardTitle}>Result</Text>
+      {headlineName && headlineValue != null && (
+        <Text style={styles.resultHeadline}>
+          {headlineName}: {formatValue(headlineValue)}
+          {headlineUnit ? ` ${String(headlineUnit)}` : ''}
+        </Text>
+      )}
+      {rows.map(([k, v]) => (
+        <Row key={k} label={k} value={formatValue(v)} />
+      ))}
+      {!hasStructured && fallbackOutput ? (
+        <>
+          <Text style={styles.resultFallbackLabel}>
+            What the run printed (no structured result found):
+          </Text>
+          <Text style={styles.resultFallback} selectable>
+            {fallbackOutput}
+          </Text>
+        </>
+      ) : null}
+      {!hasStructured && !fallbackOutput ? (
+        <Text style={styles.resultEmpty}>
+          This run has no result output (it may have stopped before executing).
+          The plan, budget, and any files it did produce are below.
+        </Text>
+      ) : null}
+      {resultsDir ? (
+        <View style={styles.resultPathBox}>
+          <Text style={styles.resultPathLabel}>Results stored at</Text>
+          <Text style={styles.resultPath} selectable>
+            {resultsDir}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
+// Artifacts split into what the run produced (output/…) vs. specs + the bundle.
+const Files: React.FC<{ report: Report }> = ({ report }) => {
+  const outputs = report.artifacts.filter((a) => a.name.startsWith('output/'));
+  const details = report.artifacts.filter((a) => !a.name.startsWith('output/'));
+  return (
+    <>
+      {outputs.length > 0 && (
+        <>
+          <Text style={styles.sectionHeading}>Output files</Text>
+          <Text style={styles.sectionHint}>
+            The files your run produced — results and solver logs.
+          </Text>
+          {outputs.map((a) => (
+            <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
+          ))}
+        </>
+      )}
+
+      <Text style={styles.sectionHeading}>Run details</Text>
+      <Text style={styles.sectionHint}>
+        Specs and the generated run bundle. run_bundle/main.py is the generated script.
+      </Text>
+      {report.artifacts.length === 0 && (
+        <Text style={styles.empty}>No files were produced for this run yet.</Text>
+      )}
+      {details.map((a) => (
+        <ArtifactRow key={a.name} conversationId={report.conversation.id} meta={a} />
+      ))}
+    </>
   );
 };
 
@@ -202,6 +536,7 @@ const styles = StyleSheet.create({
     backgroundColor: C.washuRed,
   },
   back: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', width: 48 },
+  openChat: { color: '#FFFFFF', fontSize: 15, fontWeight: '600', width: 48, textAlign: 'right' },
   title: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
   scroll: { flex: 1 },
   content: { padding: Spacing.three, gap: Spacing.three },
@@ -223,6 +558,51 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   cardTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: Spacing.one },
+  meterTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: C.backgroundElement,
+    overflow: 'hidden',
+    marginBottom: Spacing.two,
+  },
+  meterFill: { height: 8, borderRadius: 4, backgroundColor: C.washuGreen },
+  meterFillOver: { backgroundColor: C.washuRed },
+  summaryText: { fontSize: 14, color: C.text, lineHeight: 20, marginBottom: Spacing.two },
+  validationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.one,
+  },
+  validationRationale: { fontSize: 13, color: C.text, lineHeight: 19, marginTop: Spacing.one },
+  resultCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.washuGreen,
+    borderLeftWidth: 4,
+    padding: Spacing.three,
+    gap: Spacing.one,
+    backgroundColor: C.washuWhite,
+  },
+  resultCardTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.washuGreen,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  resultHeadline: { fontSize: 22, fontWeight: '700', color: C.text, marginVertical: Spacing.one },
+  resultFallbackLabel: { fontSize: 12, color: C.textSecondary, marginTop: Spacing.one },
+  resultFallback: { fontFamily: mono, fontSize: 12, color: C.text, lineHeight: 17 },
+  resultEmpty: { fontSize: 13, color: C.textSecondary, fontStyle: 'italic' },
+  resultPathBox: { marginTop: Spacing.two, gap: 2 },
+  resultPathLabel: {
+    fontSize: 11,
+    color: C.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  resultPath: { fontSize: 12, color: C.text, fontFamily: mono },
   row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3, gap: Spacing.three },
   rowLabel: { color: C.textSecondary, fontSize: 14 },
   rowValue: { color: C.text, fontSize: 14, fontWeight: '600', flexShrink: 1, textAlign: 'right' },
@@ -238,11 +618,28 @@ const styles = StyleSheet.create({
     padding: Spacing.three,
     backgroundColor: C.backgroundElement,
   },
+  artifactHeaderMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    minWidth: 0,          // lets the long file name ellipsize instead of pushing Copy out
+  },
+  copyBtn: {
+    paddingVertical: Spacing.one,
+    paddingHorizontal: Spacing.two,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: C.textSecondary,
+    backgroundColor: C.washuWhite,
+  },
+  copyBtnDisabled: { opacity: 0.5 },
+  copyText: { fontSize: 11, fontWeight: '700', color: C.text },
   artifactChevron: { fontSize: 14, color: C.washuRed, width: 16 },
   artifactName: { flex: 1, fontSize: 14, fontWeight: '600', color: C.text },
   artifactKind: { fontSize: 11, color: C.textSecondary, textTransform: 'uppercase' },
   artifactBody: { padding: Spacing.three, backgroundColor: C.washuWhite },
-  codeScroll: { maxHeight: 320 },
+  codeScroll: { maxHeight: 480 },
   code: { fontFamily: mono, fontSize: 12, color: C.text },
   error: { color: C.washuRed, padding: Spacing.three },
 });

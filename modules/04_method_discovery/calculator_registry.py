@@ -194,6 +194,21 @@ class CalculatorEntry:
     # e.g. DFTB+ is semiempirical (a tiny single-point is <1s) and its Slater-Koster
     # files are fetched into DFTB_PREFIX by runner/fetch_slako.sh.
     smoke_can_compute: Optional[bool] = None
+    # The engine's own executable, for calculators that are external programs
+    # driven through ASE (nwchem, dftb+). Their python side imports fine wherever
+    # ASE is installed, so only checking the import cannot tell an environment
+    # that can run the engine from one that merely has the bindings -- the
+    # cluster picked twain-envs/default that way and the run died mid-optimization
+    # with "nwchem: command not found". None for a calculator that IS a python
+    # package (GPAW), where the import check is already sufficient.
+    executable: Optional[str] = None
+    # Which pseudopotential library a run needs, for plane-wave engines that ship
+    # none ("sssp" for Quantum ESPRESSO, "pseudodojo" for ABINIT). Set means the
+    # bundle gets twain_pseudo.py and the codegen prompt is told to resolve
+    # filenames and cutoffs through it -- a pseudopotential filename is
+    # unguessable yet looks guessable, and inventing one either crashes hours into
+    # a queued job or names a real file for different physics.
+    pseudo_library: Optional[str] = None
 
     def covers(self, property_key: str) -> bool:
         """Whether this calculator can compute ``property_key`` (case-insensitive)."""
@@ -272,6 +287,20 @@ _PROPERTY_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
         "cohesive energy", "formation energy", "atomization energy",
     )),
     ("forces", ("interatomic force", "atomic forces", "force on each atom")),
+    # Mechanical properties. Listed before elastic_constants so the common
+    # "elasticity/bulk modulus" phrasing resolves to the specific scalar the
+    # researcher named. A missing entry here is not cosmetic: a library-only
+    # plan (e.g. discovery picked Pymatgen) relies on requested_property to
+    # reroute codegen to LLM synthesis, and with None it rendered the
+    # fail-loud structure_analysis template instead (the CaPt2 failure).
+    ("bulk_modulus", (
+        "bulk modulus", "bulk-modulus", "bulk_modulus", "compressibility",
+        "equation of state", "birch-murnaghan", "birch murnaghan",
+    )),
+    ("elastic_constants", (
+        "elastic constant", "elastic tensor", "elastic moduli",
+        "shear modulus", "young's modulus", "poisson ratio",
+    )),
 )
 # NOTE: this table is a *seed* of common properties for the deterministic path,
 # not the decision-maker. A vague ask that names no specific observable

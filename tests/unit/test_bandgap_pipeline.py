@@ -209,12 +209,80 @@ class TestPlanningSelectsCalculator:
         # Use band_structure: every calculator that covers it is ASE-driven, so
         # Pymatgen can't drive it directly -> a bridging library is brought in.
         # (band_gap would instead pair Pymatgen with the Pymatgen-native MatGL.)
-        libraries, calc, calc_lib = m._select_toolset(
+        libraries, calc, calc_lib, _blocked = m._select_toolset(
             ranked, "band_structure", "materials", platform="linux-64")
         assert libraries[0] == "Pymatgen"   # discovery's primary is honoured
         assert "ASE" in libraries           # bridging library brought in
         assert calc.name == "GPAW"          # the DFT calculator is attached
         assert calc_lib == "ASE"            # ...driven through ASE, not Pymatgen
+
+    def test_cluster_blocked_engine_is_surfaced_not_silently_substituted(self, tmp_path):
+        # Slurm routing, with the best-fit engine (GPAW) vetoed as if no env
+        # spec provisioned it: planning must still produce a runnable plan
+        # (substitute calculator) AND tell the researcher -- via the
+        # ENGINE UNAVAILABLE safety note the approval card keys off -- which
+        # engine was passed over and that a GitHub issue can get it
+        # provisioned. This is the "let the user decide" contract.
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path)
+        m.decompose()
+        m.discover()
+        m.execute_slurm = True
+        with patch.object(SM, "current_platform", return_value="linux-64"), \
+             patch.object(SM, "_cluster_cannot_run",
+                          side_effect=lambda lib: lib.lower() == "gpaw"):
+            m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert plan["selected_method"]["calculator"] != "GPAW"  # substitute used
+        notes = [n for n in plan["safety_notes"]
+                 if n.startswith(SM.ENGINE_UNAVAILABLE_PREFIX)]
+        assert notes, plan["safety_notes"]
+        assert "GPAW" in notes[0]                       # names the blocked engine
+        assert "GitHub issue" in notes[0]               # ...and the way to get it
+        assert plan["selected_method"]["calculator"] in notes[0]  # ...and the substitute
+        # The generic "not installed" note must not double-report the veto.
+        assert not any("not installed" in n and "GPAW" in n
+                       for n in plan["safety_notes"])
+
+    def test_cpu_request_scales_with_system_size(self, tmp_path):
+        # Suggested Slurm CPUs follow ~1 CPU per atom instead of a flat 8:
+        # silicon's formula counts 1 atom, floored to 2 (k-point/domain
+        # parallelism needs a partner). Still editable on the approval card.
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path)
+        m.decompose()
+        m.discover()
+        with patch.object(SM, "current_platform", return_value="linux-64"):
+            m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert plan["slurm_request"]["cpu_count"] == 2
+
+    def test_cpu_request_scales_with_formula_atoms(self, tmp_path):
+        # Aspirin (C9H8O4) counts 21 atoms. The suggestion scales with that but
+        # snaps to a width that decomposes cleanly, so 20 rather than 21 -- one
+        # core per atom is a heuristic, not a rule (see _suggest_cpu_count).
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path, ASPIRIN_INTENT)
+        m.decompose()
+        m.discover()
+        m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert plan["slurm_request"]["cpu_count"] == 20
+        # ... and the card is told it was a suggestion, and on what basis.
+        assert "21-atom" in plan["slurm_rationale"]["cpu_count"]
+        assert "suggestion" in plan["slurm_rationale"]["cpu_count"].lower()
+
+    def test_no_engine_note_when_everything_is_runnable(self, tmp_path):
+        # Off-Slurm (or nothing vetoed): the note never appears.
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path)
+        m.decompose()
+        m.discover()
+        with patch.object(SM, "current_platform", return_value="linux-64"):
+            m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert not any(n.startswith(SM.ENGINE_UNAVAILABLE_PREFIX)
+                       for n in plan["safety_notes"])
 
     def test_multi_library_requirements_cover_whole_toolset(self):
         from code_gen.codegen_engine import CodegenEngine
@@ -236,7 +304,12 @@ class TestPlanningSelectsCalculator:
         bundle = CodegenEngine().generate(plan)  # no agent -> fallback template
         compile(bundle.main_py, "main.py", "exec")
         reqs = bundle.requirements_txt
-        assert "pymatgen==" in reqs and "ase==" in reqs and "gpaw==" in reqs
+        # The conda-only engine is NOT pinned for pip -- listing it turned a
+        # recoverable "use the provisioned env" into a hard install failure on
+        # RIS ("No matching distribution found for nwchem==7.3.1"). It is named
+        # as a comment so the file still records the whole toolset.
+        assert "pymatgen==" in reqs and "ase==" in reqs
+        assert "gpaw==" not in reqs and "# gpaw: conda-only" in reqs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -349,7 +422,12 @@ class TestBuildGeneratesSiliconScript:
         assert "gpaw" in main_py.lower()
         assert 'bulk("Si"' in main_py                 # the exact script we synthesized
         reqs = (Path(m.context.artifacts["run_bundle"]) / "requirements.txt").read_text()
-        assert "gpaw==" in reqs and "ase==" in reqs
+        # The conda-only engine is NOT pinned for pip -- listing it turned a
+        # recoverable "use the provisioned env" into a hard install failure on
+        # RIS ("No matching distribution found for nwchem==7.3.1"). It is named
+        # as a comment so the file still records the whole toolset.
+        assert "ase==" in reqs
+        assert "gpaw==" not in reqs and "# gpaw: conda-only" in reqs
 
     def test_fallback_is_generic_scaffold_not_a_preset(self, tmp_path):
         # No gateway -> a tool-agnostic scaffold, NOT a band-gap preset template.
@@ -466,6 +544,24 @@ class TestHeavyCalcGate:
         assert result["status"] == "deferred"
         # the run can still wind down cleanly
         assert m.context.execution_status is True
+
+    def test_ui_button_payloads_parse_correctly(self, tmp_path):
+        # The web UI's heavy-gate buttons send exactly "yes" / "no" (ChatScreen
+        # handleYesNo). Pin those payloads to the parser so a wording change in
+        # _confirm_heavy_execution can't silently break the buttons.
+        m = self._machine_ready_to_execute(tmp_path, answer="yes")
+        assert m._confirm_heavy_execution() is True
+        m = self._machine_ready_to_execute(tmp_path, answer="no")
+        assert m._confirm_heavy_execution() is False
+
+    def test_heavy_prompt_carries_the_yn_marker(self, tmp_path):
+        # The UI shows Yes/No buttons only when the pending clarification
+        # contains "[y/N]" -- the marker the confirmation prompt must keep.
+        asked = []
+        m = self._machine_ready_to_execute(tmp_path, answer="n")
+        m.ask = lambda message: asked.append(message) or "n"
+        assert m._confirm_heavy_execution() is False
+        assert asked and "[y/N]" in asked[0]
 
     def test_auto_approve_proceeds_without_prompting(self, tmp_path):
         # Unattended mode: a heavy calculator runs without any confirmation, even
@@ -598,4 +694,9 @@ class TestNoPresetTemplates:
         compile(main_py, "main.py", "exec")
         assert "ase.calculators.dftb" in main_py       # the LLM's DFTB+ script
         reqs = (Path(m.context.artifacts["run_bundle"]) / "requirements.txt").read_text()
-        assert "dftbplus==" in reqs and "ase==" in reqs
+        # The conda-only engine is NOT pinned for pip -- listing it turned a
+        # recoverable "use the provisioned env" into a hard install failure on
+        # RIS ("No matching distribution found for nwchem==7.3.1"). It is named
+        # as a comment so the file still records the whole toolset.
+        assert "ase==" in reqs
+        assert "dftbplus==" not in reqs and "# dftbplus: conda-only" in reqs

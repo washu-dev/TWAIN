@@ -117,7 +117,22 @@ class ExecutionPlan:
     # mirrored into safety_notes for the researcher. Optional, so existing plans
     # and tests are unaffected.
     library_requests: List[dict] = field(default_factory=list)
+    # A plain-language description of what this run will do -- the property, the
+    # concrete system, the toolset, and the reasoning behind the approach. Built
+    # at plan time so the approval gate shows *what will happen*, not just which
+    # tools are used. Optional so existing plans/tests are unaffected.
+    summary: Optional[str] = None
+    # Why each suggested Slurm figure is what it is, keyed by field name. The
+    # approval card shows these so the researcher can see the numbers are TWAIN's
+    # suggestion and on what basis, rather than guessing whether they are a hard
+    # requirement. Optional so existing plans/tests are unaffected.
+    slurm_rationale: Optional[dict] = None
+
     def __post_init__(self):
+        if self.summary is not None and type(self.summary) is not str:
+            raise ValueError("summary must be a str when provided")
+        if self.slurm_rationale is not None and type(self.slurm_rationale) is not dict:
+            raise ValueError("slurm_rationale must be a dict when provided")
         if type(self.selected_method) is dict:
             self.selected_method = SelectedMethod(**self.selected_method)
         elif type(self.selected_method) is not SelectedMethod:

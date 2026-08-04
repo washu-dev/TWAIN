@@ -31,15 +31,26 @@ responds. No thread is ever pinned to a waiting run.
    now?" confirmation during EXECUTE suspends/resumes the same way.)
 5. Throughout, an event sink writes `run_events` (tailed by the SSE endpoint)
    and mirrors `current_state` / `status` onto the conversation.
+6. **Terminate** (the button in the chat header) posts
+   `POST /api/conversations/{id}/terminate`, which records a `terminate`
+   control message and flips the status to `cancelling`. The runner polls for
+   it between stages, inside the clarify/approval waits, and between Slurm
+   `squeue` polls (where it also `scancel`s the cluster job), then settles the
+   conversation as `cancelled` instead of `error`.
 
 **Waking the runner** — instead of polling every second, the runner `LISTEN`s on
 the `twain_jobs` channel; a trigger (`api/migrations/003_job_notify.sql`)
 `NOTIFY`s it the instant a job is queued, so a released runner wakes immediately.
 A generous fallback poll (`--poll`, default 30s) covers any missed notification.
 
-**Notifications** — on each suspend the run reaches out so the user can return
-when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or `sns`/`ses`);
-see `runner/notifications.py`. `TWAIN_APP_URL` adds a deep link back to the run.
+**Notifications** — on each suspend the run reaches out to the *owner* who left
+it (resolved from `users` via the conversation; see `db.owner_contact`) so they
+can return when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or
+`ses`/`sendgrid` email / `sns` SMS); email targets the owner's address and `sns`
+texts their `phone` (migration `005_user_contact.sql`), each falling back to the
+configured global `TWAIN_NOTIFY_EMAIL` / `TWAIN_NOTIFY_SNS_TOPIC_ARN` when the
+owner has no contact on file. See `runner/notifications.py`. `TWAIN_APP_URL` adds
+a deep link back to the run.
 
 **Resume durability** — a run's state + context resume from the Postgres session
 store, and its stage artifacts (intent_spec, execution_plan, the generated run
@@ -68,7 +79,11 @@ that session.
 ## Run locally
 Requires a reachable Postgres with the schema from `api/migrations/001_web_ui.sql`
 applied, plus the WashU LLM credentials in `.env` (`API_KEY`, `CLIENT_ID`,
-`CLIENT_SECRET`).
+`CLIENT_SECRET`). Optional: `MP_API_KEY` (free key from
+[materialsproject.org/api](https://materialsproject.org/api)) enables
+database-retrieval tasks — prompts that ask to *look up* a stored value from the
+Materials Project rather than compute it. Without the key such runs fail fast at
+BUILD with a message saying to set it.
 
 ```bash
 # refresh the lock after the psycopg2/boto3 additions (one time)
@@ -186,6 +201,227 @@ docker run --rm --platform linux/amd64 twain-runner \
 docker run --rm --platform linux/amd64 --env-file .env -e TWAIN_AUTO_RUN=1 \
   -e DB_HOST=host.docker.internal -v "$PWD/logs:/app/logs" twain-runner
 ```
+
+## Run on the Slurm cluster (WashU RIS Compute2)
+When a run exceeds what your laptop (or the Docker route) should carry, EXECUTE
+can submit the built RunBundle to the school's HPC cluster instead
+(Story 5.4). Set `TWAIN_EXECUTE_SLURM=1` to route every run there (this is how
+the RIS deployment runs — the web app no longer offers a per-run choice), or
+pass `--slurm` to the orchestrator CLI:
+
+```bash
+pixi run python modules/07_runtime_orchestrator/orchestrator.py --slurm
+```
+
+What happens at EXECUTE:
+1. **stage** — the bundle is rsynced to
+   `<storage_root>/twain-runs/<session_id>/` on the cluster
+   (`configs/clusters/compute2.json` points at the writable allocation dir);
+2. **submit** — an `#SBATCH` script is rendered from the plan's `slurm_request`
+   (partition auto-selected from CPU/GPU/wall-time; `ml load ris slurm`) and
+   submitted on a login node over SSH;
+3. **wait** — `squeue`/`sacct` are polled (bounded). If the wait budget expires
+   the job is **left running** and the result says how to check on it
+   (`squeue --job <id>`) — a multi-hour job is never killed just because our
+   wait was shorter;
+4. **fetch** — outputs (`results.csv`, the job log) are rsynced back into the
+   session's artifacts dir, and `sacct` Elapsed/MaxRSS land on the execution
+   result for provenance.
+
+The job builds its own venv from the bundle's `requirements.txt` (compute
+nodes have no TWAIN environment), and the smoke test runs first so a missing
+dependency fails in seconds instead of after a long queue wait.
+
+**Compiled calculators (GPAW, xtb, DFTB+) can't be pip-installed by the job**
+— GPAW needs libxc headers, xtb-python isn't on PyPI at all. For those,
+shared environments live under the profile's `envs_root`
+(`/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs` on compute2); the
+job automatically prefers `<envs_root>/<calculator>/bin/python` (then
+`<envs_root>/<tool>/`, then `<envs_root>/default/`) over building a venv —
+selecting the first env that passes the bundle's smoke test, so an env that
+exists but lacks an import never silently wins.
+
+**The envs are declarative.** Each env has a version-controlled spec in
+`scripts/ris/envs/<name>.yml` (the env is named after the spec file and
+matched case-insensitively against the plan's calculator / tool name, so
+`gpaw.yml` -> `twain-envs/gpaw` serves any plan that selects GPAW). Provision
+or sync them on a login node — micromamba needs no modules or sudo, and the
+script installs it if missing:
+
+```bash
+ssh <wustl-key>@c2-login-001.ris.wustl.edu
+cd /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend
+bash scripts/ris/provision_envs.sh           # all specs
+bash scripts/ris/provision_envs.sh default   # just one env
+```
+
+To add a package (a new plan needs an import the env lacks — the smoke test
+names it in the job log, and the pre-submit preflight names it before
+queueing), **edit the spec, commit, and rerun the script**. Never
+`micromamba install` into a shared env by hand: manual drift is how
+`twain-envs/default` silently lost rdkit, and hand edits also race against
+teammates' running jobs.
+
+**The specs also gate planning.** Under `TWAIN_EXECUTE_SLURM`, discovery
+only plans around a library whose packages the cluster can actually get:
+declared by a spec in `scripts/ris/envs/`, or genuinely installable from
+PyPI (checked live, cached; known unbuildable-on-nodes packages like gpaw
+and the conda-only codes are also blockable offline via
+`CONDA_ONLY_PACKAGES` in `dependency_inferencer.py`). Anything else is
+rerouted to a runnable tool at plan time instead of dying in the job's
+`pip install`. The reroute is never silent: the plan carries an
+"ENGINE UNAVAILABLE ON THIS DEPLOYMENT" safety note naming the passed-over
+engine and the substitute, and the approval card turns it into a one-tap,
+prefilled GitHub issue asking the team to provision the engine — the
+researcher decides whether to run the substitute or request the real thing.
+So to make a conda-only tool (e.g. Psi4) available on RIS:
+add its spec, provision it, commit — planning picks it up from the spec
+alone. If a run still fails with a Python traceback inside the generated
+script, EXECUTE feeds that traceback back to the repair LLM and resubmits
+automatically (bounded by `TWAIN_RUNTIME_REPAIR_ATTEMPTS`, default 2).
+
+To verify an env exactly the way the Slurm job invokes it (no activation;
+`OPAL_PREFIX` tells OpenMPI where its runtime data lives — always use the
+ABSOLUTE path, a relative mpirun path breaks OpenMPI's prefix
+auto-detection):
+
+```bash
+ROOT=/storage2/fs1/mdan/Active/dtrc2026-workshop
+"$ROOT/twain-envs/gpaw/bin/python" \
+  -c "import gpaw, ase, pymatgen, spglib; print(gpaw.__version__)"
+OPAL_PREFIX="$ROOT/twain-envs/gpaw" \
+  "$ROOT/twain-envs/gpaw/bin/mpirun" --version | head -1
+```
+
+**Before submitting**, the adapter also runs a preflight from the login node:
+each candidate env is probed with the bundle's smoke test, and if none passes
+it asks pip (`--dry-run`) whether the job's venv fallback could even install
+the requirements. A definite "no matching distribution" verdict fails the run
+immediately with a pointer to the env specs — instead of after staging plus a
+queue wait.
+
+Prerequisites and knobs:
+- WashU VPN (AnyConnect) + Duo, and an SSH key for the login node
+  (`ssh <wustl-key>@c2-login-001.ris.wustl.edu` must work non-interactively).
+- `TWAIN_SLURM_USER` — your WUSTL key (omit if `~/.ssh/config` handles it);
+  `TWAIN_SLURM_HOST` — override the login node, or set it to the empty string
+  when the process already runs *on* a login node (no SSH hop);
+  `TWAIN_SLURM_CLUSTER` / `--cluster` — another `configs/clusters/` profile.
+
+## Deploy the backend ON RIS (runner on the login node)
+
+Instead of running the runner on your laptop (VPN required, laptop must stay
+awake), deploy it to the cluster itself. It polls the same shared Postgres on
+AWS RDS, so the web UI and API stay exactly where they are — only the runner
+moves. On the login node it submits `sbatch` directly (no SSH hop, no VPN in
+the loop) and stages bundles with plain local copies.
+
+One-time, from your workstation (on the VPN):
+
+```bash
+cp scripts/ris/env.ris.example .env.ris   # fill in LLM creds + the RDS password
+RIS_USER=<your-wustl-key> scripts/ris/deploy.sh
+```
+
+This rsyncs the repo to `<team storage>/twain-backend`, installs pixi + the
+default env there, and verifies connectivity (RDS :5432, LLM gateway, sbatch).
+Then start the runner in a tmux session on the login node:
+
+```bash
+ssh <your-wustl-key>@c2-login-001.ris.wustl.edu
+tmux new -s twain-runner
+bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/start_runner.sh
+```
+
+Detach with `Ctrl-B d`; the runner keeps running and auto-restarts on crashes.
+Redeploy code changes by re-running `deploy.sh` and restarting the loop — or
+turn on auto-update (below) and never do it by hand again.
+
+### On-demand extra workers (backlog behind a long run)
+
+The runner drives one job at a time, and EXECUTE holds it for as long as the
+Slurm job runs — so a multi-hour DFT run makes everyone else's jobs queue
+even though the cluster has free nodes. `scale_runners.sh` fixes that by
+keeping up to N one-shot workers alive (`runner.runner --once`: claim one
+job, drive it, exit) while a claimable backlog exists, then exiting once the
+queue drains. Make it automatic with a one-time cron install on the login
+node:
+
+```bash
+bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/scale_runners.sh --install-cron
+```
+
+Cron fires it every minute: an idle check costs ~2 seconds and logs nothing;
+when jobs stack up it becomes the supervisor until the backlog drains (a
+flock guard keeps it single-instance, so overlapping fires are no-ops).
+Activity logs to `scale-runners.log` in the deploy dir. It can also be run
+by hand (`scale_runners.sh [N]`) — same behavior, plus console output.
+
+Safe by design: job claiming is atomic (`FOR UPDATE SKIP LOCKED`) and
+per-session serialized, so workers never collide with the main runner or
+each other, and a killed worker's job is re-queued by the reaper when its
+lease expires. The default cap is 2 extra workers (set
+`TWAIN_MAX_EXTRA_RUNNERS` in the deploy dir's `.env` to change it); keep it
+small — the login node has a ~6 GB/user memory cap.
+
+### Auto-update from master (cron)
+
+GitHub's hosted Actions runners can't reach RIS (campus network only), so the
+cluster updates itself by *pulling*: a cron job polls `origin/master` every 10
+minutes and, when it moves, resets the deploy dir to it, refreshes the pixi
+env, and restarts the runner tmux session. The repo is public, so no
+credentials are needed. Updates are **deferred while a run is in flight**
+(any `claimed`/`running` row in the jobs table, or a Slurm job in the queue)
+and retried on the next cycle, so a run is never interrupted.
+
+One-time install on the login node:
+
+```bash
+bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/auto_update.sh --install-cron
+```
+
+On its first real run the script converts the rsync-deployed dir into a git
+clone in place (`.env` and logs are untracked and survive). Activity is logged
+to `twain-backend/auto-update.log`; remove the crontab line (`crontab -e`) to
+turn it off. Note the deploy then tracks **master only** — feature-branch
+testing on RIS still goes through `deploy.sh`, which will be overwritten at
+the next master merge.
+
+Notes and limits:
+- The runner itself is light (DB polling + LLM calls) and fits the login
+  node's 6 GB/user cap; all real computation goes to compute nodes via Slurm.
+- Jobs whose compute target is **local** would execute on the login node —
+  fine for light library runs, but heavy calculators should use the Slurm
+  target (the default here).
+- If the AWS ECS runner (`twain-runner` service) is also running, both
+  runners compete to claim jobs — whichever claims first wins. Scale the ECS
+  service to 0 if RIS should handle everything.
+
+### Which account should the runner run under?
+
+Today it runs under a personal WUSTL account, which is fine as a proof of
+concept but wrong long-term:
+
+- **Account lifecycle** — when that person graduates or their credentials
+  expire, the runner dies, and nobody else can read the chmod-600 `.env` or
+  restart their tmux session.
+- **Attribution** — every Slurm job from every teammate's UI run is submitted
+  as that one user; RIS admins investigating a misbehaving job come to them.
+- **Single point of restart** — only the account owner can redeploy, restart,
+  or rotate the DB password.
+
+Preferred fix, in order:
+
+1. **RIS service/lab account.** Ask the PI who owns the `compute2-mdan`
+   allocation to request a project-level account from RIS. Migration is just
+   re-running `deploy.sh` as that user (the code doesn't care whose account
+   it is) and moving the `.env` secrets.
+2. **Per-member runner instances.** Until then, any team member can run their
+   *own* runner: copy `scripts/ris/env.ris.example` to `.env.ris`, fill in
+   the LLM creds + RDS password, and run `deploy.sh` under their account.
+   Multiple runners are safe — they share the jobs queue and claiming is
+   atomic, so each job runs exactly once. This also removes the
+   one-person-restart problem.
 
 ## Test
 No DB or pixi env needed — the unit tests use in-memory fakes:

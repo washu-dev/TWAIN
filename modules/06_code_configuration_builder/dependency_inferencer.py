@@ -161,6 +161,20 @@ TOOL_REGISTRY: Dict[str, ToolDependencies] = {
     "mdtraj": ToolDependencies(Dependency("mdtraj", "1.11.1", "mdtraj")),
 }
 
+# Packages pip can never install on the execution host, KNOWN ahead of time.
+# This set is NOT the primary defense (planning also asks PyPI directly, which
+# catches any absent package without curation -- see statemachine's
+# ``_cluster_cannot_run``); it exists for the cases PyPI's index can't
+# reveal: a source distribution exists but can't build on a compute node
+# (gpaw needs a compiled MPI stack; xtb-python ships no wheels), plus it keeps
+# the known conda-forge/binary-only codes (psi4, qe, abinit, cp2k, nwchem,
+# dftbplus) blockable offline. A plan needing one of these is only runnable
+# where a pre-provisioned env (scripts/ris/envs/*.yml) already provides it.
+CONDA_ONLY_PACKAGES = frozenset({
+    "psi4", "xtb-python", "gpaw", "dftbplus", "qe", "abinit", "cp2k", "nwchem",
+})
+
+
 # Alternative spellings -> canonical registry key.
 _ALIASES: Dict[str, str] = {
     "scikit learn": "scikit-learn",
@@ -322,24 +336,6 @@ def is_available_on_pypi(
         return True
     releases = payload.get("releases") or {}
     return version in releases
-
-
-def check_dependencies(
-    tool_name: str,
-    *,
-    fetch: Optional[Callable[[str], dict]] = None,
-) -> Dict[str, Optional[bool]]:
-    """Check PyPI availability of every inferred dependency for a tool.
-
-    Returns ``{requirement_line: True/False/None}``. Best-effort: offline this
-    is all ``None``.
-    """
-    result: Dict[str, Optional[bool]] = {}
-    for dep in infer(tool_name):
-        result[dep.requirement_line()] = is_available_on_pypi(
-            dep.package, dep.version, fetch=fetch
-        )
-    return result
 
 
 if __name__ == "__main__":  # pragma: no cover - manual smoke of the module

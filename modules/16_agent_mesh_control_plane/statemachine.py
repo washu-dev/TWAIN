@@ -1,5 +1,10 @@
+import hashlib
+import inspect
+import io
 import json
 import logging
+import math
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +21,15 @@ logger = logging.getLogger(__name__)
 
 from intake.intent_spec import IntentSpec
 from result_interpreter.result_package import ResultPackage
+from result_interpreter.extractors.base import (ParsedField, ParsedOutput,
+                                                ParserError, get_parser)
+from result_interpreter.metric_normalizer import NormalizedResult, normalize
+from cross_validation.acceptance_judge import AcceptanceThresholds, cross_validate
+from cross_validation.baseline_validator import Prediction
+from self_correction.failure_classifier import RunEvidence
+from self_correction.reflection import reflect
+from self_correction.rerun_controller import RerunController
+from self_correction.strategies import CorrectionContext, build_plan
 from states import State, Context, GuardsBroken, InvalidTransition
 from crash_recovery import DataStorage
 from AgentInterface import AgentInterface
@@ -33,13 +47,19 @@ from method_discovery.calculator_registry import (
 from method_discovery import llm_discovery
 from method_discovery import library_requests as _libreq
 from PromptCompiler import PromptGenerator
-from code_gen.codegen_engine import SIM_ENV, CodegenEngine, canonical_tool_key, pixi_env_python
+from code_gen.codegen_engine import (SIM_ENV, CodegenEngine, canonical_tool_key,
+                                     mp_lookup_requested, pixi_env_python)
 from code_gen import dependency_inferencer as _depinf
 
 # Output-token budget for LLM code synthesis. A whole main.py runs well past the
 # gateway's small default (1024), so give it generous headroom -- a truncated
 # script compiles but has no entrypoint and silently produces nothing.
-_CODEGEN_MAX_TOKENS = 8192
+# A whole main.py has to fit: geometry + method + thermochemistry + CSV output
+# + argparse + a smoke path, on top of the header the prompt mandates. At 8192
+# a Psi4 thermochemistry script was cut off mid-body -- it still compiled, so
+# only the entrypoint check caught it, and BUILD then shipped the placeholder
+# scaffold (job 2569967).
+_CODEGEN_MAX_TOKENS = 16384
 
 
 def _module_importable(module: str) -> bool:
@@ -57,7 +77,364 @@ def _module_importable(module: str) -> bool:
         return False
 
 
+_CLUSTER_ENV_PKGS_CACHE: Optional[frozenset] = None
+
+
+def _cluster_env_packages() -> frozenset:
+    """Package names declared across the cluster env specs (scripts/ris/envs).
+
+    These YAML specs are the declarative source of truth for what the shared
+    Slurm environments contain (applied by provision_envs.sh), so they are also
+    the ground truth for "can the cluster run this conda-only library?" --
+    readable locally, no SSH round-trip. Parsed line-wise (``- pkg=ver`` under
+    ``dependencies:``) to avoid a YAML dependency; an unreadable/absent specs
+    dir yields the empty set, which simply means "nothing conda-only is
+    provisioned".
+    """
+    global _CLUSTER_ENV_PKGS_CACHE
+    if _CLUSTER_ENV_PKGS_CACHE is not None:
+        return _CLUSTER_ENV_PKGS_CACHE
+    pkgs = set()
+    specs_dir = twain_paths.REPO_ROOT / "scripts" / "ris" / "envs"
+    try:
+        for spec in sorted(specs_dir.glob("*.yml")):
+            in_deps = False
+            for raw in spec.read_text(encoding="utf-8").splitlines():
+                line = raw.split("#", 1)[0].rstrip()
+                if not line.strip():
+                    continue
+                if line.strip() == "dependencies:":
+                    in_deps = True
+                elif in_deps and line.lstrip().startswith("- "):
+                    name = re.split(r"[=<>!\s]", line.strip()[2:].strip(),
+                                    maxsplit=1)[0]
+                    if name:
+                        pkgs.add(name.lower())
+                elif not line.startswith(" "):
+                    in_deps = False
+    except OSError:
+        pkgs = set()
+    _CLUSTER_ENV_PKGS_CACHE = frozenset(pkgs)
+    return _CLUSTER_ENV_PKGS_CACHE
+
+
+_CLUSTER_ENV_NAMES_CACHE: Optional[frozenset] = None
+
+
+def _cluster_env_names() -> frozenset:
+    """Names of the pre-provisioned cluster envs (the spec filenames' stems).
+
+    ``scripts/ris/envs/psi4.yml`` provisions ``<envs_root>/psi4``, so the stems
+    are exactly the env directory names -- and each stem is the conda PACKAGE the
+    env exists to provide, which is what makes a library's package name the right
+    key for finding its env (see the candidate list in ``_slurm_adapter``).
+    """
+    global _CLUSTER_ENV_NAMES_CACHE
+    if _CLUSTER_ENV_NAMES_CACHE is not None:
+        return _CLUSTER_ENV_NAMES_CACHE
+    specs_dir = twain_paths.REPO_ROOT / "scripts" / "ris" / "envs"
+    try:
+        names = {spec.stem.lower() for spec in specs_dir.glob("*.yml")}
+    except OSError:
+        names = set()
+    _CLUSTER_ENV_NAMES_CACHE = frozenset(names)
+    return _CLUSTER_ENV_NAMES_CACHE
+
+
+# Cache of PyPI availability verdicts keyed by (package, version): a plan-time
+# network probe must not repeat per candidate per run. Values are True / False /
+# None (= could not determine; treated as available, the preflight and the job
+# remain the authority).
+_PYPI_VERDICTS: dict = {}
+
+
+def _pip_installable(dep) -> Optional[bool]:
+    """Whether PyPI can serve ``dep`` (cached; ``None`` = unknown/offline)."""
+    key = (dep.package.lower(), dep.version)
+    if key not in _PYPI_VERDICTS:
+        _PYPI_VERDICTS[key] = _depinf.is_available_on_pypi(dep.package, dep.version)
+    return _PYPI_VERDICTS[key]
+
+
+def _cluster_cannot_run(library: str) -> bool:
+    """Whether the Slurm cluster has no way to provide ``library``'s packages.
+
+    On the cluster a job only gets the pre-provisioned shared envs plus a pip
+    fallback -- so a library is runnable iff every package it needs is either
+    declared by a cluster env spec (scripts/ris/envs/*.yml) or genuinely
+    installable from PyPI. Anything else is guaranteed to die in
+    ``pip install`` after staging + a queue wait (observed with a Psi4 plan:
+    locally importable via pixi, absent from every cluster env, no PyPI
+    distribution). Callers gate on ``self.execute_slurm`` (the machine's own
+    routing flag) and reroute the plan to a runnable tool instead.
+
+    The verdict is derived, not curated: a package missing from the specs is
+    checked against the known conda-only set (covers "exists on PyPI but can't
+    build on a compute node", e.g. gpaw's sdist) and then against PyPI itself
+    (covers everything else, including tools added later and names the model
+    invented). Offline/ambiguous PyPI answers fail open -- the pre-submit
+    preflight still vets the final requirements before sbatch.
+    """
+    provided = _cluster_env_packages()
+    for dep in _depinf.import_names(library):
+        if dep.package.lower() in provided:
+            continue
+        if dep.package.lower() in _depinf.CONDA_ONLY_PACKAGES:
+            return True
+        if _pip_installable(dep) is False:
+            return True
+    return False
+
+
+# Formula tokens for counting atoms: an element symbol + optional multiplier.
+_FORMULA_TOKEN = re.compile(r"([A-Z][a-z]?)(\d*)")
+
+
+def _atom_count(system_descriptors) -> Optional[int]:
+    """Best-effort atom count of the run's target system, or None.
+
+    Prefers a resolved structure's explicit atom list (the exact simulation
+    cell); falls back to counting element multiplicities in the formula
+    (CaPt2 -> 3, C9H8O4 -> 21). Drives the suggested Slurm CPU request
+    (~1 CPU per atom), so a rough answer is fine and None just keeps the
+    generic default.
+    """
+    if not isinstance(system_descriptors, dict):
+        return None
+    structure = system_descriptors.get("structure")
+    if isinstance(structure, dict):
+        atoms = structure.get("atoms")
+        if isinstance(atoms, list) and atoms:
+            return len(atoms)
+    formula = system_descriptors.get("formula")
+    if not isinstance(formula, str):
+        crystal = system_descriptors.get("crystal")
+        formula = crystal.get("formula") if isinstance(crystal, dict) else None
+    if isinstance(formula, str) and formula.strip():
+        total = sum(int(count) if count else 1
+                    for symbol, count in _FORMULA_TOKEN.findall(formula) if symbol)
+        return total or None
+    return None
+
+
+# Core counts that divide a domain decomposition or k-point grid without an
+# awkward remainder. The suggestion snaps down to one of these.
+_PARALLEL_WIDTHS = (2, 4, 6, 8, 12, 16, 20, 24, 32, 40, 48, 56, 64)
+
+
+def _cores_per_atom() -> float:
+    """Cores to suggest per atom. ``TWAIN_CORES_PER_ATOM``, default 1.0.
+
+    Deliberately tunable: one core per atom is a serviceable default for
+    plane-wave DFT, not a law, and the right ratio depends on the method and the
+    machine. A non-positive or unparseable value falls back to the default.
+    """
+    try:
+        ratio = float(os.environ.get("TWAIN_CORES_PER_ATOM", "1.0"))
+    except (TypeError, ValueError):
+        return 1.0
+    return ratio if ratio > 0 else 1.0
+
+
+def _suggest_cpu_count(atoms: int, max_cpus: int) -> int:
+    """A parallel-friendly core count for an ``atoms``-atom system.
+
+    Scales with system size, snaps DOWN to a width that decomposes cleanly (so
+    21 atoms asks for 20 rather than 21), and clamps to [2, ``max_cpus``].
+    Snapping down rather than up keeps a queue request from exceeding what the
+    calculation can actually use.
+    """
+    ceiling = max(2, int(max_cpus))
+    raw = max(2, int(round(atoms * _cores_per_atom())))
+    if raw >= ceiling:
+        return ceiling
+    friendly = [w for w in _PARALLEL_WIDTHS if w <= raw and w <= ceiling]
+    return friendly[-1] if friendly else 2
+
+
+def _cluster_node_limits() -> dict:
+    """Per-node resource ceilings of the configured Slurm cluster.
+
+    Read from the cluster profile (configs/clusters/<name>.json); empty when
+    the profile is missing or carries no limits. Used to cap the suggested
+    CPU request -- the approval card shows the same numbers to the researcher.
+    """
+    try:
+        from execution_adapter.cluster_profile import ClusterProfile
+        profile = ClusterProfile.load(os.environ.get("TWAIN_SLURM_CLUSTER", "compute2"))
+    except Exception:
+        return {}
+    return {k: v for k, v in {
+        "cpu_count": profile.max_cpus_per_node,
+        "gpu_count": profile.max_gpus_per_node,
+        "ram": profile.max_ram_gb,
+    }.items() if v is not None}
+
+
+# Intake filter: one tiny LLM call classifying the RAW request before any
+# intent extraction. The intent schema force-fits `domain` into its enum
+# (materials/quantum), so an off-topic ask ("explain bitcoin") gets
+# misclassified rather than flagged -- it then dies much later, deep in the
+# pipeline, with a confusing "no engine could run this" error after burning
+# clarification rounds and planning calls. Asking the model directly, before
+# extraction, is the general check; any parse/agent failure fails OPEN so a
+# broken filter can never block real science.
+INTAKE_FILTER_PROMPT = """\
+You are the intake filter for TWAIN, an agent that plans and runs computational \
+chemistry and materials-science simulations (properties of molecules, crystals, \
+and materials via DFT, tight binding, ML surrogates, or database lookups).
+
+Classify the researcher's request below. Reply with EXACTLY one line and nothing else:
+SIMULATION -- if it plausibly asks to compute, simulate, estimate, or look up a \
+chemistry or materials property or system
+OFF_TOPIC: <subject> -- otherwise, where <subject> names what the request is \
+actually about in 1-3 words
+
+Request: {query}
+"""
+
+
+def _decline_message(category: str) -> str:
+    """The user-facing decline for an off-topic request (posted as the run's end)."""
+    return (
+        f"This doesn't look like a computational chemistry or materials-science "
+        f"request -- it reads as a question about {category}. TWAIN plans and "
+        f"runs simulations (properties of molecules, crystals, and materials), "
+        f"so nothing was planned or executed. If you did mean a simulation, "
+        f"start a new run describing the system (a material, molecule, or "
+        f"formula) and the property you want computed."
+    )
+
+
+# Stable lead-in for the "your best-fit engine can't run here" safety note.
+# The approval card keys off this exact prefix to offer a one-tap "request it
+# via GitHub issue" action, so change it in both places or not at all
+# (app/src/screens/ChatScreen.tsx).
+ENGINE_UNAVAILABLE_PREFIX = "ENGINE UNAVAILABLE ON THIS DEPLOYMENT: "
+
+
+# MPI jobs interleave per-rank output as 'rank=N LNN: <line>' (GPAW's rank
+# logger); stripped so a crash traceback parses like a plain one.
+_MPI_RANK_PREFIX = re.compile(r"^rank=\d+\s+L\d+:\s?", re.MULTILINE)
+
+
+def _runtime_traceback(result) -> Optional[str]:
+    """Extract the generated script's own crash traceback from a failed run.
+
+    This is the trigger for EXECUTE's general self-heal loop: whatever novel
+    mistake the synthesized code makes, it surfaces as a Python traceback in
+    the run's output -- no per-incident pattern needed. Returns the last
+    traceback block (capped), or None when repair can't help: dependency
+    errors / timeouts / setup failures have their own handling (hence only
+    ``failed`` status qualifies), and a crash whose frames never touch
+    ``main.py`` happened outside the code we can rewrite.
+    """
+    status = getattr(result, "status", None)
+    if (getattr(status, "value", None) or str(status)) != "failed":
+        return None
+    blob = ((getattr(result, "stdout", "") or "")
+            + "\n" + (getattr(result, "stderr", "") or ""))
+    blob = _MPI_RANK_PREFIX.sub("", blob)
+    marker = "Traceback (most recent call last):"
+    if marker not in blob:
+        return None
+    block = marker + blob.rsplit(marker, 1)[1]
+    block = "\n".join(block.splitlines()[:60])
+    if "main.py" not in block:
+        return None
+    return block
+
+
 _INTENT_MAP_CACHE: Optional[dict] = None
+
+
+# What a question is FOR, so the driver can label it and each gate can find its
+# own. Mirrored by runner.bridges (which maps these to message kinds) and by the
+# app, which keys its buttons off them.
+ASK_CLARIFY = "clarification"
+ASK_HEAVY_CONFIRM = "heavy_confirm"
+ASK_VALIDATION_GATE = "validation_gate"
+
+
+def _ask_accepts_purpose(ask) -> bool:
+    """Whether ``ask`` takes a ``purpose`` keyword (or **kwargs).
+
+    Probed rather than tried-and-caught: calling and catching TypeError would
+    re-invoke an ask that had already asked the researcher.
+    """
+    try:
+        params = inspect.signature(ask).parameters
+    except (TypeError, ValueError):
+        return False
+    if "purpose" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _json_safe(value):
+    """Replace non-finite floats with None so an artifact is valid JSON.
+
+    ``json.dump`` writes bare ``NaN``/``Infinity`` by default, which strict
+    readers reject: Starlette serializes API responses with ``allow_nan=False``,
+    so a single NaN anywhere in an artifact turns the whole report endpoint into
+    a 500 rather than degrading one field. Null is the honest JSON spelling of
+    "this number does not exist".
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+# Verdict ranking: a run is only as good as its worst check.
+_SEVERITY = {"accepted": 0, "needs_review": 1, "rejected": 2}
+
+
+def _as_float(cell):
+    """``cell`` as a finite float, or None when it is not a number."""
+    try:
+        value = float(str(cell).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _stamp_sample_count(normalized, parsed, primary_name: str):
+    """Record how many samples the primary metric was aggregated from.
+
+    One number that is the mean of many rows is a different claim from one
+    measured once, and validation has to tell them apart before comparing
+    against a single reference (see _ungradable_aggregate).
+    """
+    field = parsed.get(primary_name)
+    if field is not None:
+        normalized.metadata["primary_samples"] = len(field.values)
+    return normalized
+
+
+def _finite_fields(parsed):
+    """``parsed`` with non-finite samples dropped, or None if nothing survives.
+
+    A NaN is the absence of a measurement, not a measurement -- but it arrives
+    mixed in with real ones (one diverged row in a 200-row prediction CSV, a
+    diagnostic column that is NaN beside a perfectly good primary metric).
+    Discarding the whole field, or the whole output, would throw away every
+    valid sample alongside it, so only the non-finite points are dropped and a
+    field is removed only when it has no finite sample left at all.
+    """
+    kept = []
+    for fld in parsed.fields:
+        values = [v for v in fld.values if math.isfinite(v)]
+        if not values:
+            continue
+        kept.append(ParsedField(name=fld.name, values=values,
+                                unit=fld.unit, source=fld.source))
+    if not kept:
+        return None
+    return ParsedOutput(fields=kept, metadata=dict(parsed.metadata))
 
 
 def _intent_map() -> dict:
@@ -74,14 +451,62 @@ def _intent_map() -> dict:
     return _INTENT_MAP_CACHE
 
 
+# The linear "spine" of the pipeline, in order. These are the states a run can
+# be rewound to (the loop-only states REPAIR/CORRECT/REPLAN are never rewind
+# targets -- a rewind lands on the stage a researcher recognizes, and the machine
+# re-derives the loop states from there). ``rewind_to`` uses this order to decide
+# which stages count as "downstream" of the target.
+REWINDABLE_STATES: list[State] = [
+    State.INTAKE, State.CLARIFY, State.DECOMPOSE, State.DISCOVER, State.PLAN,
+    State.BUILD, State.EXECUTE, State.INTERPRET, State.VALIDATE, State.ACCEPT,
+]
+
+# What each stage *produces*, so a rewind can discard exactly that stage's (and
+# every later stage's) output and let the re-run regenerate it from the surviving
+# upstream artifacts. ``artifacts`` are keys in ``Context.artifacts``; ``flags``
+# are the guard fields on ``Context`` the stage sets. REPAIR's ``repair_report``
+# is folded into BUILD (it is regenerated whenever the bundle is), and EXECUTE
+# owns ``execution_result`` + the ``execution_status`` guard it sets from the run.
+# CORRECT's ``correction_plan`` folds into VALIDATE the same way REPAIR's does
+# into BUILD: it is re-derived from whatever the next validation concludes.
+_STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
+    State.INTAKE:    {"artifacts": ["intent_spec"], "flags": []},
+    State.CLARIFY:   {"artifacts": [], "flags": ["clarified"]},
+    State.DECOMPOSE: {"artifacts": ["goal_graph", "goal_graph_error"], "flags": []},
+    State.DISCOVER:  {"artifacts": ["discovery"], "flags": []},
+    State.PLAN:      {"artifacts": ["execution_plan"], "flags": []},
+    State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report",
+                                    "codegen_report"],
+                      "flags": ["plan_approved", "approved_plan"]},
+    State.EXECUTE:   {"artifacts": ["execution_result"],
+                      "flags": ["execution_status", "heavy_confirmed"]},
+    State.INTERPRET: {"artifacts": ["normalized_result"], "flags": []},
+    State.VALIDATE:  {"artifacts": ["validation_report", "correction_plan"],
+                      "flags": ["validation_result"]},
+    State.ACCEPT:    {"artifacts": [], "flags": []},
+}
+
+
 GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.INTAKE, State.CLARIFY): lambda c: True,
+    # Off-topic decline: intake refuses a request that isn't a chemistry /
+    # materials simulation ask (e.g. "explain bitcoin") and ends the run
+    # immediately -- nothing is clarified, planned, or executed.
+    (State.INTAKE, State.TERMINATE): lambda c: True,
     (State.CLARIFY, State.DECOMPOSE): lambda c: c.clarified,
     (State.CLARIFY, State.CLARIFY) : lambda c: True,
     (State.DECOMPOSE, State.DISCOVER): lambda c: True,
     (State.DISCOVER, State.PLAN): lambda c: True,
     (State.DECOMPOSE,State.INTAKE): lambda c: True,
-    (State.PLAN, State.BUILD): lambda c: c.plan_approved,
+    # PLAN->BUILD is unguarded on purpose: crossing it only *reaches* BUILD, the
+    # state a run parks in with the plan generated and awaiting the researcher's
+    # approval -- no bundle is built and nothing is executed until BUILD's handler
+    # runs on the way OUT. The real approval gate is the next edge (BUILD->REPAIR):
+    # a run cannot build/execute until ``plan_approved`` is set by an explicit
+    # approval (see StateMachine.approve_plan / Orchestrator.approve_plan). Keeping
+    # this edge open lets the driver pause at BUILD to ask; the guarded edges below
+    # then enforce the decision.
+    (State.PLAN, State.BUILD): lambda c: True,
     (State.BUILD, State.REPAIR): lambda c: c.plan_approved,
     (State.REPAIR, State.EXECUTE): lambda c: c.plan_approved,
     (State.EXECUTE, State.INTERPRET): lambda c: c.execution_status,
@@ -103,7 +528,9 @@ class StateMachine:
                  execute_keep_artifacts: bool = True, execute_timeout=None,
                  execution_adapter=None, verify_codegen: bool = False,
                  script_doctor=None, library_available=None, sim_available=None,
-                 library_request_tracker=None, auto_approve=False):
+                 library_request_tracker=None, auto_approve=False,
+                 execute_slurm: bool = False, slurm_cluster: str = None,
+                 should_abort=None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -137,6 +564,17 @@ class StateMachine:
         self.execute_keep_artifacts = execute_keep_artifacts
         self.execute_timeout = execute_timeout
         self._execution_adapter = execution_adapter
+        # HPC execution (Story 5.4): when on, EXECUTE submits the RunBundle to
+        # the Slurm cluster named by ``slurm_cluster`` (configs/clusters/<name>.json,
+        # default compute2) instead of running it locally/in Docker. Implies the
+        # run happens even though execute_locally may be off.
+        self.execute_slurm = execute_slurm
+        self.slurm_cluster = slurm_cluster or "compute2"
+        # Terminate seam: a zero-arg callable that returns True once the
+        # researcher asked to stop the run. The Slurm adapter polls it between
+        # squeue checks so a Terminate press scancels the cluster job instead
+        # of letting it burn its whole wall time.
+        self.should_abort = should_abort
         # When on, the REPAIR stage may call the LLM to repair the synthesized
         # calculator script and proactively scan it for latent bugs. Off by
         # default so offline/seeded/test runs make no network calls there; the
@@ -172,6 +610,9 @@ class StateMachine:
         self.auto_approve = auto_approve
         # Rounds of clarification Q&A run so far; bounds the CLARIFY self-loop.
         self._clarify_rounds = 0
+        # Bounds the VALIDATE -> CORRECT/REPLAN self-correction loop (Story 6.3):
+        # iteration cap + convergence check, with every stop carrying a reason.
+        self._rerun = RerunController()
         self.context = Context()
         self.current_state = State.INTAKE
         self.storage = DataStorage(data_path)
@@ -223,6 +664,81 @@ class StateMachine:
         self.current_state = next_state
         self.storage.commit(self.current_state,self.context)
 
+    def rewind_to(self, target: State) -> None:
+        """Rewind the machine to an earlier pipeline stage so it can be re-run.
+
+        "Rerun from CLARIFY" means: go back to CLARIFY and re-do it and everything
+        after it, keeping the work of the stages *before* it as input. So this
+        discards exactly the artifacts and guard flags that ``target`` and every
+        later stage produced (per :data:`_STAGE_OUTPUTS`), leaving the upstream
+        artifacts intact, resets the clarify-round counter, and points the machine
+        at ``target``. The next :meth:`run` re-enters ``target`` and re-derives
+        everything downstream.
+
+        The reset guard flags fall back to their :class:`Context` defaults; a
+        driver that seeds guards for a stubbed happy path (e.g. the runner's
+        ``execution_status``/``validation_result`` seed) should re-apply that seed
+        after rewinding -- see ``Orchestrator.rewind_to``. ``target`` must be one
+        of :data:`REWINDABLE_STATES`.
+        """
+        if target not in REWINDABLE_STATES:
+            raise InvalidTransition(
+                f"cannot rewind to {getattr(target, 'name', target)}; "
+                f"valid targets: {[s.name for s in REWINDABLE_STATES]}"
+            )
+        cutoff = REWINDABLE_STATES.index(target)
+        defaults = Context()  # fresh guard-flag defaults to reset downstream flags to
+        for state in REWINDABLE_STATES[cutoff:]:
+            outputs = _STAGE_OUTPUTS.get(state, {})
+            for key in outputs.get("artifacts", []):
+                self.context.artifacts.pop(key, None)
+            for flag in outputs.get("flags", []):
+                setattr(self.context, flag, getattr(defaults, flag))
+        # A rewind restarts the CLARIFY loop from scratch.
+        self._clarify_rounds = 0
+        # Likewise the correction loop: a rerun that inherited the finished run's
+        # iteration count would hit the cap immediately and refuse to correct.
+        self._rerun = RerunController(self._rerun.policy)
+        self.current_state = target
+        self.storage.commit(self.current_state, self.context)
+
+    def approve_plan(self, approved: bool = True) -> None:
+        """Record the researcher's plan-approval decision (the BUILD/EXECUTE gate).
+
+        Sets ``plan_approved`` and persists it, so the guarded ``BUILD->REPAIR`` /
+        ``REPAIR->EXECUTE`` transitions may proceed. Until this is called (or the
+        context is seeded), ``plan_approved`` is False and those guards hold the
+        run at the approval gate -- nothing is built or executed. This is the
+        engine-level enforcement point for "no execution without an approved plan".
+        """
+        self.context.plan_approved = approved
+        # Remember WHAT was approved, so a later re-plan can tell whether this
+        # decision still covers it (see _plan_fingerprint).
+        self.context.approved_plan = self._plan_fingerprint() if approved else None
+        self.storage.commit(self.current_state, self.context)
+
+    def _plan_fingerprint(self) -> Optional[str]:
+        """A digest of the parts of the plan an approval is actually about.
+
+        The card shows the method and the resources, so those are what the
+        decision covers; rationales, cost estimates and timestamps can change
+        without invalidating it.
+        """
+        plan = self._load_artifact("execution_plan")
+        if not plan:
+            return None
+        method = plan.get("selected_method") or {}
+        material = {
+            "tool_name": method.get("tool_name"),
+            "calculator": method.get("calculator"),
+            "calculator_import": method.get("calculator_import"),
+            "libraries": sorted(str(l) for l in method.get("libraries") or []),
+            "requested_property": plan.get("requested_property"),
+            "slurm_request": plan.get("slurm_request"),
+        }
+        blob = json.dumps(material, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
     # ---- intake / clarify collaborators ----------------------------------
 
 
@@ -233,7 +749,7 @@ class StateMachine:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         path = self.artifacts_dir / f"{name}_{self.run_id}.json"
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
+            json.dump(_json_safe(data), f, indent=2, default=str)
         return str(path)
 
     _WELCOME = (
@@ -242,14 +758,23 @@ class StateMachine:
         "'predict the aqueous solubility of aspirin'): "
     )
 
-    def _ask_user(self, message: str) -> str:
+    def _ask_user(self, message: str, purpose: str = ASK_CLARIFY) -> str:
         """Get input from the researcher: ``self.ask`` if injected, else stdin.
 
         Injecting ``ask`` (a ``message -> answer`` callable) lets the orchestrator
         and tests drive intake/clarify non-interactively; the stdin fallback keeps
         the standalone CLI experience.
+
+        ``purpose`` names the gate asking (see the ``ASK_*`` constants). The web
+        driver records it as the message kind so each gate can recognise its own
+        question instead of assuming the most recent one must be its own -- an
+        assumption that silently swallowed answers once a question could be left
+        unanswered. Passed only to an ``ask`` that accepts it, so single-argument
+        callables (the CLI, older test doubles) keep working.
         """
         if callable(self.ask):
+            if _ask_accepts_purpose(self.ask):
+                return self.ask(message, purpose=purpose)
             return self.ask(message)
         return input(message)
 
@@ -258,13 +783,13 @@ class StateMachine:
 
         ``agent`` may be a plain ``prompt -> str`` callable (what the orchestrator
         and tests inject) or an ``AgentInterface``-style object whose
-        ``callAgent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
+        ``call_agent`` returns ``{"content": [{"text": ...}]}`` (the live LLM).
         ``call_kwargs`` (e.g. ``max_tokens``) are forwarded only to the
-        ``callAgent`` form; a plain callable is invoked with just the prompt.
+        ``call_agent`` form; a plain callable is invoked with just the prompt.
         """
         agent = self.agent
-        if hasattr(agent, "callAgent"):
-            resp = agent.callAgent(prompt, **call_kwargs)
+        if hasattr(agent, "call_agent"):
+            resp = agent.call_agent(prompt, **call_kwargs)
         else:
             resp = agent(prompt)
         if isinstance(resp, str):
@@ -287,6 +812,24 @@ class StateMachine:
             return text[start:end + 1]
         return text
 
+    def _agent_json(self, prompt: str, *, max_tokens: int = 4096,
+                    retries: int = 1) -> dict:
+        """Call the agent and parse its JSON reply, retrying on a bad payload.
+
+        Intent specs routinely exceed the agent's default 1024-token response
+        cap, which truncates the JSON mid-string (JSONDecodeError: unterminated
+        string) -- so JSON calls get an explicit larger budget, fence/prose
+        stripping, and one clean retry before the error propagates.
+        """
+        last_error = None
+        for _ in range(retries + 1):
+            text = self._agent_text(prompt, max_tokens=max_tokens)
+            try:
+                return json.loads(self._extract_json_object(text))
+            except json.JSONDecodeError as exc:
+                last_error = exc
+        raise last_error
+
     @staticmethod
     def _system_kind(intent: dict) -> str:
         """The target system's representation: 'crystal', 'surface', or 'molecule'.
@@ -304,36 +847,94 @@ class StateMachine:
             return "crystal"
         return "molecule"
 
-    def _is_confident(self, intent: dict) -> bool:
-        """True when every *relevant* confidence score meets the threshold.
+    def _relevant_scores(self, intent: dict) -> dict:
+        """Confidence scores that apply to the chosen system representation.
 
-        Scores that don't apply to the chosen system representation are ignored,
-        so a crystal is never gated on a (meaningless) ``SMILES_confidence`` and a
-        molecule isn't gated on ``phase``/``structure`` confidence. Without this,
-        a solid-state request loops in CLARIFY forever asking for a SMILES it can
-        never sensibly provide.
+        Scores that don't apply are dropped -- a crystal is never gated on a
+        (meaningless) ``SMILES_confidence`` and a molecule isn't gated on
+        ``phase``/``structure`` confidence -- so both the confidence gate and the
+        clarification questions ignore them. Without this, a solid-state request
+        loops in CLARIFY forever asking for a SMILES it can never sensibly provide.
         """
         scores = (intent.get("metadata") or {}).get("confidence_scores") or {}
-        if not scores:
-            return False
         if self._system_kind(intent) in ("crystal", "surface"):
             irrelevant = {"smiles_confidence", "name_confidence"}
         else:
             irrelevant = {"phase_confidence", "structure_confidence"}
-        relevant = {k: v for k, v in scores.items() if k.lower() not in irrelevant}
+        return {k: v for k, v in scores.items() if k.lower() not in irrelevant}
+
+    def _is_confident(self, intent: dict) -> bool:
+        """True when every *relevant* confidence score meets the threshold."""
+        relevant = self._relevant_scores(intent)
         if not relevant:
             return False
         return all(value >= self.confidence_threshold for value in relevant.values())
+
+    @staticmethod
+    def _score_field_name(score_key: str) -> str:
+        """Human-readable field a confidence score refers to.
+
+        ``SMILES_confidence`` -> ``SMILES``, ``phase_confidence`` -> ``phase``. The
+        trailing ``_confidence`` (schema convention) is stripped; anything else is
+        returned unchanged.
+        """
+        if score_key.lower().endswith("_confidence"):
+            return score_key[: -len("_confidence")]
+        return score_key
+
+    def _uncertain_fields(self, intent: dict) -> list:
+        """Relevant fields below the confidence threshold, most-uncertain first.
+
+        Exactly what CLARIFY should ask about: targeting only genuine gaps keeps
+        the questions few and stops clarify re-interrogating fields intake already
+        resolved. Returns the human-readable field names (see ``_score_field_name``).
+        """
+        relevant = self._relevant_scores(intent)
+        low = sorted(
+            (k for k, v in relevant.items() if v < self.confidence_threshold),
+            key=lambda k: relevant[k],
+        )
+        return [self._score_field_name(k) for k in low]
 
     def intake(self) -> State:
         schema = str(twain_paths.SCHEMAS_DIR / "intent_spec.schema.json")
         # A pre-supplied request (orchestrator/UI/test) skips the interactive
         # prompt; otherwise fall back to asking on stdin.
         query = self._request if self._request else self._ask_user(self._WELCOME)
+        # Decline off-topic asks HERE, before intent extraction: one cheap
+        # classification of the raw request beats a late, confusing engine
+        # failure after clarification and planning were already paid for.
+        category = self._off_topic_category(query)
+        if category:
+            message = _decline_message(category)
+            self.context.artifacts["declined"] = self._write_artifact(
+                "declined", {"category": category, "message": message})
+            logger.info("[intake] declined off-topic request (%s)", category)
+            return State.TERMINATE
         prompt = self.prompt_generator.json_schema_prompt(schema, query)
-        intent = json.loads(self._agent_text(prompt))
+        intent = self._agent_json(prompt)
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
         return State.CLARIFY
+
+    def _off_topic_category(self, query) -> Optional[str]:
+        """What an off-topic request is actually about, or None when in-domain.
+
+        One short LLM call on the raw request (see ``INTAKE_FILTER_PROMPT``).
+        Fails OPEN -- no agent, an errored call, or an unparseable verdict all
+        mean "proceed": the filter exists to save the researcher from a slow
+        confusing failure, never to block real work.
+        """
+        if not str(query or "").strip():
+            return None
+        try:
+            verdict = str(self._agent_text(
+                INTAKE_FILTER_PROMPT.format(query=query))).strip()
+        except Exception:  # noqa: BLE001 -- fail open, whatever broke
+            return None
+        if not verdict.upper().startswith("OFF_TOPIC"):
+            return None
+        category = verdict.split(":", 1)[1].strip() if ":" in verdict else ""
+        return category or "something other than a simulation"
 
     def clarify(self) -> State:
         """Raise IntentSpec confidence to the threshold, then mark clarified.
@@ -355,12 +956,26 @@ class StateMachine:
             return State.DECOMPOSE
 
         text = json.dumps(intent)
-        questions = self._agent_text(self.prompt_generator.clarification_prompt(text))
+        # Target only the fields intake left genuinely uncertain, so the model asks
+        # about real gaps (and stays terse) instead of re-interrogating the request.
+        uncertain = self._uncertain_fields(intent)
+        questions = self._agent_text(
+            self.prompt_generator.clarification_prompt(text, uncertain_fields=uncertain)
+        ).strip()
+
+        # If the model finds nothing worth asking (or replies "No questions."), don't
+        # pester the researcher with an empty prompt -- proceed on the best-effort
+        # spec. The bounded loop below still caps genuine Q&A rounds.
+        if not questions or questions.lower().rstrip(".!") == "no questions":
+            logger.info("[clarify] no clarifying questions needed; proceeding.")
+            self.context.clarified = True
+            return State.DECOMPOSE
+
         answer = self._ask_user(
-            f"Answer the following questions about your request:\n{questions}\n> "
+            f"I need a little more detail before continuing:\n{questions}",
+            ASK_CLARIFY,
         )
-        text = self._agent_text(self.prompt_generator.modify_json_schema(text, answer))
-        intent = json.loads(text)
+        intent = self._agent_json(self.prompt_generator.modify_json_schema(text, answer))
         self.context.artifacts["intent_spec"] = self._write_artifact("intent_spec", intent)
         self._clarify_rounds += 1
         if self._is_confident(intent):
@@ -437,7 +1052,7 @@ class StateMachine:
         default budget -- too small a budget truncates the JSON mid-object.
         """
         schema = str(twain_paths.SCHEMAS_DIR / "goal_graph.schema.json")
-        prompt = self.promptGenerator.goalGraphPrompt(
+        prompt = self.prompt_generator.goal_graph_prompt(
             schema, json.dumps(intent), self.run_id
         )
         self._last_decomposition_raw = self._agent_text(prompt, max_tokens=4096)
@@ -525,7 +1140,15 @@ class StateMachine:
         ...) and probes it. Returns True/False, or None when it genuinely can't
         tell -- callers treat None as "trust the ranking" rather than dropping a
         candidate on a probe glitch. Injectable via ``library_available``.
+
+        Under Slurm execution the local probe is not enough: a conda-only
+        library can be importable here (pixi installs it from conda-forge) yet
+        unrunnable on the cluster, where jobs only get pre-provisioned envs +
+        a pip fallback. :func:`_cluster_cannot_run` grounds against the
+        declarative env specs (+ PyPI) and vetoes such candidates outright.
         """
+        if self.execute_slurm and _cluster_cannot_run(name):
+            return False
         if self._library_available is not None:
             return self._library_available(name)
         deps = _depinf.import_names(name)
@@ -752,13 +1375,61 @@ class StateMachine:
 
     def _primary_goal_id(self) -> str:
         """Resolve the goal id the plan targets (the execution goal), with fallback."""
-        graph = self._load_artifact("goal_graph")
-        if graph and graph.get("goals"):
-            for goal in graph["goals"]:
-                if goal.get("category") == "execution":
-                    return goal["id"]
-            return graph["goals"][0]["id"]
+        goal = self._primary_goal()
+        if goal is not None:
+            return goal["id"]
         return f"goal-{self.run_id}"
+
+    def _primary_goal(self) -> Optional[dict]:
+        """The goal the plan targets: the execution goal, else the first goal."""
+        graph = self._load_artifact("goal_graph")
+        if not graph or not graph.get("goals"):
+            return None
+        goals = graph["goals"]
+        return next((g for g in goals if g.get("category") == "execution"), goals[0])
+
+    @staticmethod
+    def _describe_system(sd: dict) -> str:
+        """Human label for the target material, e.g. 'Ag (Silver), fcc crystal'."""
+        if not sd:
+            return "the target system"
+        crystal = sd.get("crystal") or {}
+        formula = sd.get("formula") or crystal.get("formula")
+        name = crystal.get("name") or sd.get("name")
+        label = formula or name or "the target system"
+        if name and formula and name.lower() != formula.lower():
+            label = f"{formula} ({name})"
+        qualifiers = " ".join(x for x in [crystal.get("phase"), sd.get("kind")] if x)
+        if qualifiers and label != "the target system":
+            return f"{label}, {qualifiers}"
+        return label
+
+    def _compose_plan_summary(
+        self, intent: dict, requested_property: Optional[str],
+        libraries: list, calc_entry, recommendation,
+    ) -> str:
+        """Plain-language description of what this run will do (for the approval gate)."""
+        prop = requested_property
+        if not prop:
+            for metric in intent.get("acceptance_metrics", []) or []:
+                if isinstance(metric, dict) and metric.get("metric_name"):
+                    prop = metric["metric_name"]
+                    break
+        prop = prop or "the requested property"
+
+        system = self._describe_system(intent.get("system_descriptors") or {})
+        toolset = " + ".join(libraries) if libraries else "the selected tools"
+        calc = f" with the {calc_entry.name} calculator" if calc_entry is not None else ""
+
+        parts = [f"Compute {prop} for {system} using {toolset}{calc}."]
+        goal = self._primary_goal()
+        purpose = (goal or {}).get("purpose")
+        if purpose:
+            parts.append(f"Goal: {purpose}")
+        reasoning = getattr(recommendation, "reasoning", None) if recommendation is not None else None
+        if reasoning:
+            parts.append(f"Approach: {reasoning}")
+        return " ".join(parts)
 
     def decompose(self) -> State:
         """Turn the clarified IntentSpec into a validated GoalGraph artifact.
@@ -862,10 +1533,32 @@ class StateMachine:
         ranked = rank_candidates(entries, query, top_k=None)  # full ranking
         if not ranked:
             return State.BUILD
+        # Engines this deployment's cluster can't run, noted BEFORE the veto
+        # filters them out: the researcher deserves to hear "your best-fit
+        # engine exists but isn't provisioned here" on the approval card (and
+        # can then ask the team to provision it via a GitHub issue), rather
+        # than a silent substitution. Only candidates that OUTRANK the best
+        # runnable one are noted -- anything ranked below it would have lost
+        # anyway, and naming it is just noise.
+        cluster_blocked = []
+        if self.execute_slurm:
+            for c in ranked:
+                if not _cluster_cannot_run(c.entry.id):
+                    break
+                cluster_blocked.append(c.entry.name)
         # Ground the toolset in what's installed: drop any candidate library that
         # isn't importable in the run interpreter, so both the deterministic pick
         # (ranked[0]) and the LLM's candidate slate are guaranteed runnable here.
         ranked, dropped_uninstalled, preempted_uninstalled = self._installed_candidates(ranked)
+        # Cluster-vetoed names get their own dedicated note below; keep them out
+        # of the generic "not installed" note so the reason stays truthful. They
+        # are kept out of the install requests for the same reason: the library is
+        # not missing from the preset set, it just has no provisioned cluster env,
+        # so a 'LibraryAddition' issue asking to install it would be wrong.
+        dropped_uninstalled = [n for n in dropped_uninstalled
+                               if n not in cluster_blocked]
+        preempted_uninstalled = [n for n in preempted_uninstalled
+                                 if n not in cluster_blocked]
 
         # Software the researcher named explicitly. An installed one is honoured --
         # promoted to the top of the ranking and offered to the LLM as a preference
@@ -910,10 +1603,28 @@ class StateMachine:
                 f": {recommendation.reasoning}" if recommendation.reasoning else "")
             pending_requests += [(n, _libreq.SOURCE_LLM, why) for n in missing_named]
             driver = (recommendation.calculator_library or "").lower()
+            # Resolve the model's primary library to a known candidate so the
+            # cluster veto is reported under its clean registry name; an
+            # unlisted/invented name falls through as-is.
+            picked = self._candidate_by_name(ranked, recommendation.libraries[0])
+            primary_key = picked.entry.id if picked else recommendation.libraries[0]
+            rec_calc = find_calculator(recommendation.calculator)
             if not installed_named or installed_named[0].lower() != recommendation.libraries[0].lower():
                 # The model's *primary* isn't installed here -- don't plan around
                 # something the run can't import; fall back to the deterministic,
-                # installed pick.
+                # installed pick. When the block was the CLUSTER veto (not a local
+                # install gap), that's the model's best-fit engine being passed
+                # over: note it for the researcher.
+                if self.execute_slurm and _cluster_cannot_run(primary_key):
+                    cluster_blocked.append(
+                        picked.entry.name if picked else recommendation.libraries[0])
+                recommendation = None
+            elif (rec_calc is not None and self.execute_slurm
+                  and _cluster_cannot_run(rec_calc.id)):
+                # The model attached a calculator the cluster can't run (conda-
+                # only, not in any provisioned env spec); fall back to the
+                # deterministic pick, which filters those out.
+                cluster_blocked.append(rec_calc.name)
                 recommendation = None
             elif driver and driver in {n.lower() for n in missing_named}:
                 # The calculator can't be driven without its driver library, so the
@@ -931,8 +1642,10 @@ class StateMachine:
                               + (f" with {recommendation.calculator}" if recommendation.calculator else "")
                               + (f": {recommendation.reasoning}" if recommendation.reasoning else ""))
         else:
-            libraries, calc_entry, calculator_library = self._select_toolset(
-                ranked, requested_property, domain, platform=platform)
+            libraries, calc_entry, calculator_library, blocked_calcs = (
+                self._select_toolset(
+                    ranked, requested_property, domain, platform=platform))
+            cluster_blocked.extend(blocked_calcs)
             primary = ranked[0]
             selection_note = None
 
@@ -967,6 +1680,18 @@ class StateMachine:
             execution_plan.safety_notes.append(
                 "Discovery skipped candidate(s) not installed in the run "
                 "environment: " + ", ".join(merely_skipped))
+        if cluster_blocked:
+            blocked = list(dict.fromkeys(cluster_blocked))
+            picked_desc = calc_entry.name if calc_entry is not None else libraries[0]
+            execution_plan.safety_notes.append(
+                f"{ENGINE_UNAVAILABLE_PREFIX}{', '.join(blocked)} would fit this "
+                f"request but cannot run on this deployment's cluster -- the "
+                f"package(s) are not in any provisioned environment and pip "
+                f"cannot install them there. Proceeding with {picked_desc} "
+                f"instead. If you need {blocked[0]}, submit a GitHub issue "
+                f"asking the team to provision it (an env spec in "
+                f"scripts/ris/envs/ plus one provision_envs.sh run); otherwise "
+                f"approving this plan runs {picked_desc}.")
         if dropped_unrunnable:
             execution_plan.safety_notes.append(
                 f"Dropped from the toolset (no build in the '{SIM_ENV}' environment "
@@ -1000,6 +1725,21 @@ class StateMachine:
                     f"for property '{requested_property}'")
             if calc_entry.heavy:
                 note += " (heavy run -- confirm before executing)"
+                # The generic 10-minute wall default gets a real DFT run killed
+                # at the short partition's limit; give heavy calculators room
+                # (still editable on the approval card). max_time is hours.
+                from plan_synthesizer.plan_synthesizer import HEAVY_WALL_MINUTES
+                heavy_hours = HEAVY_WALL_MINUTES / 60.0
+                if execution_plan.slurm_request.max_time < heavy_hours:
+                    execution_plan.slurm_request.max_time = heavy_hours
+                    rationale = dict(execution_plan.slurm_rationale or {})
+                    rationale["max_time"] = (
+                        f"TWAIN's suggestion: {heavy_hours:g} h, raised from the "
+                        f"generic default because {calc_entry.name} is a heavy "
+                        f"calculation that the short-queue limit would kill. "
+                        f"Lower it if you know this run is quick."
+                    )
+                    execution_plan.slurm_rationale = rationale
             if calc_entry.needs_external_data:
                 note += " (needs external parameter data to run)"
             execution_plan.safety_notes.append(note)
@@ -1048,10 +1788,71 @@ class StateMachine:
                     f"(runner/README.md), and TWAIN will run it in the linux-64 container.")
         execution_plan.target_system = intent.get("system_descriptors") or None
         execution_plan.requested_property = requested_property
+        # Suggest a CPU count from the system size, and say so on the card. This
+        # is a starting point, not a rule: cores-per-atom is a rough proxy for
+        # how much parallelism a calculation can use, so the ratio is tunable
+        # (TWAIN_CORES_PER_ATOM) and the result is rounded to a width that
+        # divides a domain decomposition sensibly rather than landing on an
+        # awkward count like 21. Floored at 2 (k-point/domain parallelism needs a
+        # partner), capped at the node's cores, and editable on the approval card.
+        atoms = _atom_count(intent.get("system_descriptors"))
+        if atoms:
+            max_cpus = _cluster_node_limits().get("cpu_count") or 64
+            cores = _suggest_cpu_count(atoms, max_cpus)
+            execution_plan.slurm_request.cpu_count = cores
+            execution_plan.slurm_rationale = {
+                "cpu_count": (
+                    f"TWAIN's suggestion: {cores} cores for a {atoms}-atom system "
+                    f"(about {_cores_per_atom():g} per atom, rounded to a "
+                    f"parallel-friendly width, capped at the node's {max_cpus}). "
+                    f"A rough proxy for available parallelism -- change it freely."
+                ),
+            }
+        # A Materials Project retrieval is credential-gated: without MP_API_KEY
+        # in the runner's environment the generated lookup script cannot run.
+        # Say so ON THE APPROVAL CARD, before any build or queue time is spent.
+        if (mp_lookup_requested(intent.get("objective"))
+                and not os.environ.get("MP_API_KEY")):
+            execution_plan.safety_notes.append(
+                "The objective asks to RETRIEVE data from the Materials Project, "
+                "but MP_API_KEY is not set in the runner's environment -- the "
+                "lookup will fail until it is added to the deployment's .env "
+                "(free key: https://materialsproject.org/api).")
+        execution_plan.summary = self._compose_plan_summary(
+            intent, requested_property, libraries, calc_entry, recommendation)
 
         self.context.artifacts["execution_plan"] = self._write_artifact(
             "execution_plan", asdict(execution_plan))
+        self._revoke_approval_if_plan_changed()
         return State.BUILD
+
+    def _revoke_approval_if_plan_changed(self) -> None:
+        """Withdraw a standing approval when this plan is not the approved one.
+
+        A re-plan can land on a different method, and running that on the old
+        decision spends the researcher's compute on a plan they never saw. But it
+        usually lands on the SAME method, and re-asking then was doubling the
+        approval card on every rejected run -- so only a real change re-opens it.
+        """
+        if not self.context.plan_approved:
+            return
+        current = self._plan_fingerprint()
+        if current is None:
+            return
+        if self.context.approved_plan is None:
+            # The approval was seeded rather than recorded (the runner seeds one
+            # for unattended runs, and checkpoints written before this field
+            # existed carry none), so there is nothing to compare against.
+            # Adopt this plan as the approved one: revoking a decision we cannot
+            # show has been invalidated would strand the run at the gate.
+            self.context.approved_plan = current
+            return
+        if current == self.context.approved_plan:
+            return
+        self.context.plan_approved = False
+        self.context.approved_plan = None
+        logger.info("[plan] the re-planned method or resources differ from what "
+                    "was approved; the new plan needs approval before it runs.")
 
     @staticmethod
     def _candidate_by_name(ranked, name):
@@ -1103,7 +1904,8 @@ class StateMachine:
     def _select_toolset(self, ranked, requested_property, domain, platform=None):
         """Assemble a compatible toolset from the discovery ranking.
 
-        Returns ``(libraries, calculator_entry_or_None, calculator_library_or_None)``.
+        Returns ``(libraries, calculator_entry_or_None,
+        calculator_library_or_None, cluster_blocked_calculator_names)``.
         ``libraries[0]`` is the primary (discovery's #1). If the property needs a
         calculator, the best covering one that is *available on this platform* is
         attached: preferring a calculator compatible with the primary, else
@@ -1112,21 +1914,37 @@ class StateMachine:
         together. Fully data-driven -- no tool is forced, and a calculator with no
         build for the current platform (e.g. GPAW on a Mac) is never chosen.
         ``platform`` defaults to the current platform.
+
+        Under Slurm execution, a calculator whose packages pip can't install
+        and no cluster env spec provides (e.g. QE/Abinit binaries) would die
+        in the job's install step -- those are never attached. The ones that
+        OUTRANKED the best runnable calculator (i.e. were passed over) are
+        returned by name so the caller can tell the researcher on the
+        approval card instead of substituting silently.
         """
         primary = ranked[0].entry
         libraries = [primary.name]
         if not requested_property:
-            return libraries, None, None
+            return libraries, None, None, []
         if platform is None:
             platform = current_platform()
         covering = calculators_for_property(requested_property, domain=domain, platform=platform)
+        blocked = []
+        if self.execute_slurm:
+            # Report only calculators that outrank the best runnable one (they
+            # are the "passed over" engines); anything below would lose anyway.
+            for c in covering:
+                if not _cluster_cannot_run(c.id):
+                    break
+                blocked.append(c.name)
+            covering = [c for c in covering if not _cluster_cannot_run(c.id)]
         if not covering:
-            return libraries, None, None
+            return libraries, None, None, blocked
 
         # 1) a covering calculator compatible with the primary library
         for calc in covering:
             if calc.supports_library(primary.name):
-                return libraries, calc, primary.name
+                return libraries, calc, primary.name, blocked
 
         # 2) none compatible with the primary -> pair the best covering calculator
         #    with a library it supports (preferring one discovery ranked), and use
@@ -1135,7 +1953,7 @@ class StateMachine:
         bridge = self._pick_compatible_library(ranked, calc)
         if bridge and bridge.lower() != primary.name.lower():
             libraries.append(bridge)
-        return libraries, calc, bridge
+        return libraries, calc, bridge, blocked
 
     @staticmethod
     def _pick_compatible_library(ranked, calc):
@@ -1194,20 +2012,55 @@ class StateMachine:
         # its data -- e.g. DFTB+ (semiempirical; .skf files fetched into DFTB_PREFIX).
         method = plan.get("selected_method") or {}
         calc_name = method.get("calculator")
+        # The engine's own binary, when it is an external program driven through
+        # ASE. None for a calculator that IS a python package (GPAW), where the
+        # import check already proves the environment can run it.
+        calc_executable = None
+        # Which pseudopotential library the engine needs, when it ships none
+        # (Quantum ESPRESSO, ABINIT). Set means the bundle carries twain_pseudo.py
+        # and codegen resolves filenames + cutoffs through it.
+        pseudo_library = None
         if calc_name:
             ce = find_calculator(calc_name)
             if ce is None:
                 smoke_compute = False
-            elif ce.smoke_can_compute is not None:
-                smoke_compute = ce.smoke_can_compute
             else:
-                smoke_compute = not ce.heavy and not ce.needs_external_data
+                calc_executable = ce.executable
+                pseudo_library = ce.pseudo_library
+                if ce.smoke_can_compute is not None:
+                    smoke_compute = ce.smoke_can_compute
+                else:
+                    smoke_compute = not ce.heavy and not ce.needs_external_data
         else:
             smoke_compute = True
-        bundle = CodegenEngine().generate(
-            plan, intent=intent,
-            agent=lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS),
-            smoke_compute=smoke_compute)
+        engine = CodegenEngine()
+        try:
+            bundle = engine.generate(
+                plan, intent=intent,
+                agent=lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS),
+                smoke_compute=smoke_compute,
+                # So the smoke gate rejects an env that has the ASE bindings but
+                # not the engine binary, instead of the run dying mid-calculation
+                # with "command not found" after a queue wait.
+                calculator_executable=calc_executable,
+                # So a pseudopotential filename is looked up in the installed
+                # library rather than written from memory -- an invented .UPF name
+                # is either a crash after a queue wait or, worse, a real file for
+                # different physics.
+                pseudo_library=pseudo_library,
+                # A run that is going to EXECUTE must not fall back to the
+                # placeholder scaffold: it loads the tool, writes a stub and
+                # exits 0, so the job, the scheduler and TWAIN all report success
+                # having computed nothing. Planning-only runs keep the fallback --
+                # there the bundle is a deliverable to read, not to run.
+                require_synthesis=(self.execute_locally or self.execute_slurm))
+        finally:
+            # Recorded either way: on success it says which attempt produced the
+            # script, and on failure why each attempt was rejected -- the thing
+            # that was missing when a scaffolded run reached the cluster.
+            if engine.last_synthesis is not None:
+                self.context.artifacts["codegen_report"] = self._write_artifact(
+                    "codegen_report", engine.last_synthesis)
         bundle_dir = Path(self.artifacts_dir) / f"run_bundle_{self.run_id}"
         bundle.write(bundle_dir)
         self.context.artifacts["run_bundle"] = str(bundle_dir)
@@ -1250,17 +2103,7 @@ class StateMachine:
         if not calc_import and not is_synthesized:
             return State.EXECUTE
 
-        from code_gen.script_doctor import ScriptDoctor
-        # Smoke-run in the interpreter the bundle will actually run in: the sim env
-        # for a calculator run, else the default interpreter -- a library-only run
-        # (e.g. PySCF) resolves there, not in sim.
-        smoke_python = pixi_env_python(SIM_ENV) if calc_import else sys.executable
-        doctor = self._script_doctor or ScriptDoctor(
-            agent=(lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS))
-            if self.verify_codegen else None,
-            brief=self._repair_brief(plan, method),
-            sim_python=smoke_python,
-        )
+        doctor = self._make_script_doctor(plan, method, calc_import)
         original = main_path.read_text(encoding="utf-8")
         report = doctor.heal(original)
         if report.source and report.source != original:
@@ -1269,6 +2112,23 @@ class StateMachine:
             "repair_report", report.to_dict())
         self._log_repair(report)
         return State.EXECUTE
+
+    def _make_script_doctor(self, plan: dict, method: dict, calc_import):
+        """The ScriptDoctor both REPAIR and EXECUTE's self-heal loop use.
+
+        Smoke-runs in the interpreter the bundle will actually run in: the sim
+        env for a calculator run, else the default interpreter -- a
+        library-only run (e.g. PySCF) resolves there, not in sim. The LLM
+        repair channel is attached only when ``verify_codegen`` is on.
+        """
+        from code_gen.script_doctor import ScriptDoctor
+        smoke_python = pixi_env_python(SIM_ENV) if calc_import else sys.executable
+        return self._script_doctor or ScriptDoctor(
+            agent=(lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS))
+            if self.verify_codegen else None,
+            brief=self._repair_brief(plan, method),
+            sim_python=smoke_python,
+        )
 
     def _bundle_config(self, bundle_dir) -> dict:
         """Read the built bundle's config.yaml (empty dict if absent/unreadable).
@@ -1302,6 +2162,10 @@ class StateMachine:
             "material_desc": CodegenEngine._material_desc(material),
             "acceptance": plan.get("acceptance_metrics") or [],
             "output_file": "results.csv",
+            # The researcher's own words: lets checks that enforce fast defaults
+            # (e.g. primitive cell) stand down when the researcher explicitly
+            # asked for the expensive variant (conventional cell, supercell, ...).
+            "objective": (intent or {}).get("objective") or plan.get("objective") or "",
         }
 
     def _log_repair(self, report) -> None:
@@ -1332,7 +2196,7 @@ class StateMachine:
         ``execution_status`` is set from the run so the EXECUTE->INTERPRET guard
         reflects what actually happened.
         """
-        if not self.execute_locally:
+        if not (self.execute_locally or self.execute_slurm):
             return State.INTERPRET
 
         bundle_dir = self.context.artifacts.get("run_bundle")
@@ -1358,6 +2222,20 @@ class StateMachine:
 
         adapter = self._execution_adapter
         docker_route = False
+        slurm_route = False
+        if adapter is None and self.execute_slurm:
+            # HPC route (Story 5.4): stage the bundle to the cluster, submit via
+            # sbatch with the plan's resource request, poll to completion, and
+            # fetch outputs back. Takes precedence over local/Docker -- the
+            # researcher explicitly opted into the cluster.
+            adapter = self._build_slurm_adapter()
+            if adapter is None:
+                return self._skip_execution(
+                    bundle_dir, status="skipped_missing_dependency",
+                    note=f"Not run on the cluster: no usable profile for "
+                         f"'{self.slurm_cluster}' (configs/clusters/). ",
+                    how_to=self._how_to_run(bundle_dir))
+            slurm_route = True
         if adapter is None:
             # Route non-native engines (no build for this host, e.g. GPAW on a
             # Mac) into the linux-64 runner container; everything else runs in the
@@ -1401,19 +2279,35 @@ class StateMachine:
                 # dir so results are discoverable and scoped to this run.
                 adapter = LocalExecutionAdapter(workspace_root=str(self.artifacts_dir))
 
-        result = adapter.execute(
-            bundle_dir,
+        run_kwargs = dict(
             # The sim env / Docker image already ship the whole stack, so never
-            # pip-install into a venv there; that only applies to default-interpreter runs.
-            install_deps=self.execute_install_deps and run_python is None and not docker_route,
+            # pip-install into a venv there; that only applies to default-interpreter
+            # runs -- and to Slurm jobs, whose compute nodes have no TWAIN env at all
+            # (the job builds a venv from the bundle's requirements.txt).
+            install_deps=slurm_route or (self.execute_install_deps
+                                         and run_python is None and not docker_route),
             keep_artifacts=self.execute_keep_artifacts,
             run_smoke=True,
             timeout=self.execute_timeout,
-            # Docker fixes the interpreter via the image; native uses run_python
-            # (None => the adapter's default interpreter).
-            python_executable=None if docker_route else run_python,
+            # Docker/Slurm fix the interpreter via the image/job; native uses
+            # run_python (None => the adapter's default interpreter).
+            python_executable=None if (docker_route or slurm_route) else run_python,
             run_id=self.run_id,  # names the workdir exec_<session_id> for traceability
         )
+        # Self-heal loop: a run that crashes with a Python traceback inside the
+        # generated script gets repaired against that traceback and re-executed
+        # (bounded). The static checks catch the failure modes we've already
+        # seen; this catches the ones we haven't -- the run's own error is the
+        # ground truth, whatever the mistake was.
+        attempts = 1 + self._runtime_repair_budget()
+        for attempt in range(1, attempts + 1):
+            result = adapter.execute(bundle_dir, **run_kwargs)
+            if result.succeeded or attempt >= attempts:
+                break
+            failure = _runtime_traceback(result)
+            if failure is None or not self._heal_runtime_failure(
+                    bundle_dir, failure, attempt):
+                break
         self.context.artifacts["execution_result"] = self._write_artifact(
             "execution_result", result.to_dict()
         )
@@ -1425,6 +2319,52 @@ class StateMachine:
             raise self._execution_error(result, bundle_dir)
         return State.INTERPRET
 
+    def _runtime_repair_budget(self) -> int:
+        """How many repair-and-re-execute rounds a failed run may consume.
+
+        Each round costs a full execution (on Slurm: staging + a queue wait),
+        so the default is small; ``TWAIN_RUNTIME_REPAIR_ATTEMPTS=0`` disables
+        the loop entirely.
+        """
+        try:
+            return max(0, int(os.getenv("TWAIN_RUNTIME_REPAIR_ATTEMPTS", "2")))
+        except ValueError:
+            return 2
+
+    def _heal_runtime_failure(self, bundle_dir, failure: str, attempt: int) -> bool:
+        """Repair ``main.py`` against the real run's traceback; True if rewritten.
+
+        Only LLM-synthesized bundles are eligible (deterministic templates
+        don't invent API calls) and only when the LLM repair channel is on
+        (``verify_codegen``). The ScriptDoctor re-verifies the fix (static
+        checks + smoke where possible), so a failed repair leaves the bundle
+        untouched and the caller stops retrying.
+        """
+        plan = self._load_artifact("execution_plan") or {}
+        method = plan.get("selected_method") or {}
+        calc_import = method.get("calculator_import")
+        is_synthesized = self._bundle_config(bundle_dir).get("template") == "llm_synthesized"
+        if not calc_import and not is_synthesized:
+            return False
+        main_path = Path(bundle_dir) / "main.py"
+        if not main_path.is_file():
+            return False
+        doctor = self._make_script_doctor(plan, method, calc_import)
+        if doctor.agent is None:
+            return False
+        fixed = doctor.repair_runtime(
+            main_path.read_text(encoding="utf-8"), failure)
+        if not fixed:
+            logger.info("[execute] the run crashed in the generated script, and "
+                        "automatic repair could not produce a better one; "
+                        "surfacing the failure.")
+            return False
+        main_path.write_text(fixed, encoding="utf-8")
+        logger.info("[execute] the run crashed in the generated script; repaired "
+                    "it against the runtime traceback and re-executing "
+                    "(repair round %d).", attempt)
+        return True
+
     def _selected_calculator(self):
         """The CalculatorEntry the plan selected (or None for a plain run)."""
         plan = self._load_artifact("execution_plan")
@@ -1432,6 +2372,118 @@ class StateMachine:
             return None
         name = (plan.get("selected_method") or {}).get("calculator")
         return find_calculator(name)
+
+    def _build_slurm_adapter(self):
+        """A SlurmExecutionAdapter wired from the cluster profile + the plan.
+
+        Resources come from the plan's ``slurm_request`` (synthesized during
+        PLAN); connection details from the profile, overridable via
+        ``TWAIN_SLURM_HOST`` (empty string => run sbatch locally, i.e. the
+        process is already on a login node) and ``TWAIN_SLURM_USER``. Returns
+        None when the profile can't be loaded, so execute() can skip gracefully
+        with guidance instead of crashing.
+        """
+        from execution_adapter.cluster_profile import ClusterProfile
+        from execution_adapter.slurm_execution_adapter import SlurmExecutionAdapter
+        from plan_synthesizer.execution_plan import SlurmRequest
+        from plan_synthesizer.plan_synthesizer import MIN_RAM_GB, MIN_WALL_MINUTES
+        try:
+            profile = ClusterProfile.load(self.slurm_cluster)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"[execute] cluster profile '{self.slurm_cluster}' unusable: {exc}")
+            return None
+        request = None
+        plan = self._load_artifact("execution_plan") or {}
+        raw = plan.get("slurm_request")
+        if isinstance(raw, dict):
+            try:
+                # Plan contract: ram is GB, max_time is hours (plan_synthesizer /
+                # schema examples). The Slurm adapter expects MB + minutes.
+                ram_gb = max(MIN_RAM_GB, int(raw.get("ram") or MIN_RAM_GB))
+                max_hours = float(raw.get("max_time") or (MIN_WALL_MINUTES / 60.0))
+                request = SlurmRequest(
+                    cpu_count=int(raw.get("cpu_count") or 8),
+                    gpu_count=int(raw.get("gpu_count") or 0),
+                    max_time=max(MIN_WALL_MINUTES, max_hours * 60.0),
+                    ram=ram_gb * 1024,
+                )
+            except (TypeError, ValueError):
+                request = None  # malformed plan request -> adapter default
+        # Pre-provisioned cluster envs to try, in order, before falling back to a
+        # venv + pip: conda-only packages (GPAW needs libxc, Psi4 and NWChem have
+        # no PyPI distribution at all) cannot be pip-built on a compute node, so
+        # the env that ships them has to be a candidate or the run is doomed.
+        #
+        # Derived from the WHOLE toolset and via each library's conda PACKAGE name,
+        # which is how the specs are keyed. Both parts are load-bearing:
+        #
+        #   * Whole toolset, not just calculator + tool_name. A library-only plan
+        #     still needs its conda-only member: quacc+ASE+Psi4 has calculator=None
+        #     and tool_name="quacc", so Psi4 sat in `libraries` and the only env
+        #     with psi4 was never probed. The job fell through to pip, which
+        #     correctly refuses a conda-only package, and died at the smoke gate
+        #     with "MISSING DEPENDENCY: psi4" (Slurm job 2580169).
+        #   * Package name, not the display name lowercased. "NWChem" -> "nwchem"
+        #     happens to work, but "Quantum ESPRESSO" -> "quantum espresso" and
+        #     "DFTB+" -> "dftb+" name no env at all, so those two engines could
+        #     never have been selected however well provisioned they were.
+        env_pythons = []
+        if profile.envs_root:
+            method = plan.get("selected_method") or {}
+            provisioned = _cluster_env_names()
+            names = []
+            wanted = ([method.get("calculator")]
+                      + list(method.get("libraries") or [])
+                      + [method.get("tool_name")])
+            for entry in wanted:
+                if not isinstance(entry, str) or not entry.strip():
+                    continue
+                for dep in _depinf.import_names(entry.strip()):
+                    package = dep.package.lower()
+                    if package in provisioned and package not in names:
+                        names.append(package)
+            # Always last: it exists but carries only the common stack, so it must
+            # never shadow an engine env (see the adapter's candidate probe).
+            names.append("default")
+            env_pythons = [f"{profile.envs_root}/{n}/bin/python" for n in names]
+
+        host = os.environ.get("TWAIN_SLURM_HOST")  # None => profile login node
+        return SlurmExecutionAdapter(
+            profile,
+            request=request,
+            host=host,
+            user=os.environ.get("TWAIN_SLURM_USER"),
+            workspace_root=str(self.artifacts_dir),
+            env_pythons=env_pythons,
+            # Poll for as long as the job may legitimately run (its wall time)
+            # plus queue headroom -- otherwise a 4-hour DFT run outlives the
+            # adapter's default 2-hour wait and EXECUTE reports a bogus timeout.
+            max_wait=self.slurm_wait_budget(),
+            # Terminate button: checked between polls; scancels the job.
+            should_abort=self.should_abort,
+        )
+
+    # Extra polling headroom on top of the job's wall time: covers time spent
+    # pending in the Slurm queue plus staging/accounting latency.
+    SLURM_QUEUE_MARGIN_SECONDS = 30 * 60
+
+    def slurm_wait_budget(self) -> float:
+        """Seconds EXECUTE should wait on a Slurm job: wall time + queue margin.
+
+        Read from the plan's ``slurm_request`` (max_time is hours). Also used by
+        the orchestrator to stretch the EXECUTE stage timeout so the stage
+        doesn't abort while the adapter is still legitimately polling.
+        """
+        from execution_adapter.slurm_execution_adapter import DEFAULT_MAX_WAIT
+        from plan_synthesizer.plan_synthesizer import MIN_WALL_MINUTES
+        plan = self._load_artifact("execution_plan") or {}
+        raw = plan.get("slurm_request") or {}
+        try:
+            hours = float(raw.get("max_time") or (MIN_WALL_MINUTES / 60.0))
+        except (TypeError, ValueError):
+            hours = MIN_WALL_MINUTES / 60.0
+        return max(DEFAULT_MAX_WAIT,
+                   hours * 3600.0 + self.SLURM_QUEUE_MARGIN_SECONDS)
 
     def _confirm_heavy_execution(self) -> bool:
         """Ask the researcher before running a heavy calculation; True to proceed.
@@ -1443,6 +2495,15 @@ class StateMachine:
         """
         calculator = self._selected_calculator()
         if calculator is None or not calculator.heavy:
+            return True
+        # Already agreed to for this engine in this run. A correction or re-plan
+        # loop comes back through EXECUTE, and re-asking there is noise: the
+        # researcher consented to spending compute on this calculation, and the
+        # answer they gave has not changed. Keyed on the engine, so a re-plan
+        # that lands on a DIFFERENT heavy calculator still asks.
+        if self.context.heavy_confirmed == calculator.name:
+            logger.info("[execute] the heavy %s run was already confirmed for "
+                        "this run; not asking again.", calculator.name)
             return True
         # Unattended mode: the researcher opted into automatic runs, so proceed
         # without asking (approving the plan already authorized this execution).
@@ -1467,9 +2528,13 @@ class StateMachine:
         answer = self._ask_user(
             f"The plan builds a {calculator.name} calculation, a heavy DFT run that "
             f"can take several minutes {where}. The "
-            f"generated script is ready either way.\nRun it now? [y/N]: "
+            f"generated script is ready either way.\nRun it now? [y/N]: ",
+            ASK_HEAVY_CONFIRM,
         )
-        return str(answer).strip().lower() in {"y", "yes", "run", "now", "1", "true"}
+        confirmed = str(answer).strip().lower() in {"y", "yes", "run", "now", "1", "true"}
+        if confirmed:
+            self.context.heavy_confirmed = calculator.name
+        return confirmed
 
     def _can_prompt(self) -> bool:
         """Whether we can actually ask the researcher a question right now."""
@@ -1601,27 +2666,821 @@ class StateMachine:
         except Exception:  # noqa: BLE001 - standalone use: plain error with the text
             return RuntimeError(f"{message} -- {hint}")
 
-    def interpret(self) -> State:
-        return State.VALIDATE
-    def validate(self) -> State:
-        """Route on the cross-validation verdict recorded in the context.
+    def _no_result_error(self, result: dict, hints: list) -> Exception:
+        """Build the error for a run that exited cleanly but delivered nothing.
 
-        ``accepted`` -> ACCEPT, ``rejected`` -> REPLAN, ``needs_review`` -> CORRECT
-        -- the three targets the guard table already allows out of VALIDATE. The
-        verdict itself is produced upstream (interpret()/cross-validation); this
-        handler only routes on it. Defaults to ACCEPT when the verdict is unset so
-        a seeded happy-path run still terminates (the VALIDATE->ACCEPT guard then
-        confirms the verdict is truly ``accepted`` before committing).
+        Exit code 0 is not the contract -- the printed result is. A script
+        whose output holds no finite value for the requested metric (every
+        field NaN, the metric missing, or nothing parseable at all) computed
+        nothing the researcher asked for, so failing with the output in hand
+        beats reporting a hollow success.
         """
+        metric = hints[0]
+        tail = "\n".join((result.get("stdout") or "").strip().splitlines()[-12:])
+        message = (f"the run finished, but its output contains no finite value "
+                   f"for '{metric}' -- every parseable result was missing, NaN, "
+                   f"or non-numeric, so there is nothing to validate or deliver")
+        hint = ("This usually means the simulation diverged or its analysis "
+                "failed silently. Last output lines:\n" + tail)
+        try:
+            from error_handler import ConfigError
+            return ConfigError(message, hint=hint)
+        except Exception:  # noqa: BLE001 - standalone use: plain error with the text
+            return RuntimeError(f"{message} -- {hint}")
+
+    # ---- interpret / validate / correct (Epic 6) ---------------------------
+
+    # Metric names that map onto a differently-named baseline property. Baseline
+    # lookup is already case-insensitive, so a metric literally named "logS"
+    # matches without help; only different spellings need an entry here.
+    _BASELINE_PROPERTY_ALIASES = {
+        "solubility": "logS",
+        "aqueous_solubility": "logS",
+        "aqueous solubility": "logS",
+        "log_s": "logS",
+        # The plan names the metric after the property AND its unit, which is
+        # what the generated scripts print; the baseline DB keys on the property
+        # alone, so this run missed aspirin's own -1.72 literature value.
+        "aqueous_solubility_logs": "logS",
+        "aqueous_solubility_log_mol_per_l": "logS",
+        "solubility_logs": "logS",
+        "logs": "logS",
+    }
+
+    def interpret(self) -> State:
+        """Extract normalized metrics from the executed run's output (Story 6.1).
+
+        Reads the ``execution_result`` artifact and pulls numeric metrics out of
+        the run's stdout / output files with the pluggable parsers (json, csv,
+        log), then normalizes them into one primary + secondary metric view with
+        per-metric uncertainty. The result is persisted as the
+        ``normalized_result`` artifact for cross-validation. Runs where nothing
+        was actually executed (seeded pipelines, deferred/skipped heavy runs)
+        no-op through to VALIDATE, which then routes on whatever verdict the
+        context was seeded with.
+        """
+        # INTERPRET owns ``normalized_result``, so it must clear the previous
+        # pass's before deciding: on a correction loop whose rerun was skipped
+        # or deferred, leaving it in place lets VALIDATE re-grade the earlier
+        # run's numbers and report them as this run's result.
+        self.context.artifacts.pop("normalized_result", None)
+        result = self._load_artifact("execution_result")
+        if not result or not result.get("succeeded"):
+            return State.VALIDATE
+        normalized = self._normalize_run_output(result)
+        if normalized is None:
+            hints = self._metric_hints()
+            if hints:
+                # The researcher asked for a specific quantity and the run --
+                # exit code notwithstanding -- never produced a finite value
+                # for it. Delivering that as a clean success hands them NaN;
+                # failing with the output in hand is the honest outcome.
+                raise self._no_result_error(result, hints)
+            logger.info("[interpret] no numeric metrics could be extracted from "
+                        "the run output; delivering without validation.")
+            return State.VALIDATE
+        payload = normalized.to_dict()
+        # A benchmark table's per-row identities, so VALIDATE can compare each
+        # system against its OWN literature value instead of grading the mean.
+        entities = self._per_entity_rows(result)
+        if entities:
+            payload["entities"] = entities
+            logger.info("[interpret] %d systems in the result table",
+                        len(entities))
+        self.context.artifacts["normalized_result"] = self._write_artifact(
+            "normalized_result", payload)
+        metric = normalized.primary_metric
+        unit = f" {metric.unit}" if metric.unit else ""
+        logger.info("[interpret] %s = %.6g%s +/- %.2g (%s)", metric.name,
+                    metric.value, unit, metric.uncertainty,
+                    metric.uncertainty_method)
+        return State.VALIDATE
+
+    def _metric_hints(self) -> list:
+        """Names the researcher's ask suggests for the primary metric, in order
+        of specificity: the plan's canonical property, then the acceptance-metric
+        names from the plan and the intent."""
+        hints = []
+        plan = self._load_artifact("execution_plan") or {}
+        if plan.get("requested_property"):
+            hints.append(str(plan["requested_property"]))
+        intent = self._load_artifact("intent_spec") or {}
+        for source in (plan, intent):
+            for metric in source.get("acceptance_metrics") or []:
+                if isinstance(metric, dict) and metric.get("metric_name"):
+                    hints.append(str(metric["metric_name"]))
+        return hints
+
+    @staticmethod
+    def _pick_metric(names, hints):
+        """Match a parsed/normalized field to a requested name, tolerantly:
+        exact (case-insensitive) first, then substring either way (so the hint
+        "logS_MAE" still finds a field named "logS")."""
+        lower = {str(n).lower(): n for n in names}
+        for hint in hints:
+            match = lower.get(str(hint).lower())
+            if match is not None:
+                return match
+        for hint in hints:
+            h = str(hint).lower()
+            for name in names:
+                n = str(name).lower()
+                if h in n or n in h:
+                    return name
+        return None
+
+    @staticmethod
+    def _stdout_json(stdout: str) -> Optional[str]:
+        """The last JSON object printed to stdout, or None.
+
+        Generated scripts are told to print their metric summary as a single
+        JSON line at the end, so single lines are scanned first; a script that
+        pretty-prints (``json.dumps(..., indent=2)``) spans lines, so the tail
+        starting at the last line-initial ``{`` is tried as a block too."""
+        text = stdout or ""
+        # A top-level array is not a metric summary, and its elements sit at
+        # line-initial '{' when it is pretty-printed -- without this, one of
+        # them would be picked up as though it were the summary.
+        if text.lstrip().startswith("["):
+            return None
+        # Every offset a JSON object could start at: index 0 (a summary that IS
+        # the whole of stdout, which the generic template prints) plus every
+        # line-initial '{'.
+        offsets = set()
+        if text.lstrip().startswith("{"):
+            offsets.add(text.index("{"))
+        found = text.find("\n{")
+        while found != -1:
+            offsets.add(found + 1)
+            found = text.find("\n{", found + 1)
+        # Latest first: the summary is printed last, and raw_decode stops at the
+        # end of the object, so trailing text on the same line is harmless.
+        # Trying earlier candidates in turn means a later line that only looks
+        # like JSON -- a Python dict repr, a truncated object -- cannot bury a
+        # valid summary printed above it.
+        for offset in sorted(offsets, reverse=True):
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(text[offset:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return json.dumps(obj)
+        return None
+
+    def _output_candidates(self, result: dict):
+        """(parser_name, content) candidates from the run, most structured first:
+        the JSON summary on stdout, then CSV output files from the run's workdir,
+        then raw stdout via the key=value log parser."""
+        candidates = []
+        stdout = result.get("stdout") or ""
+        blob = self._stdout_json(stdout)
+        if blob:
+            candidates.append(("json", blob))
+        out_dir = result.get("artifacts_dir")
+        if out_dir and Path(out_dir).is_dir():
+            # Prefer files the templates name for results (results.csv,
+            # predictions.csv) over incidental CSVs.
+            csvs = sorted(
+                Path(out_dir).glob("*.csv"),
+                key=lambda p: (("result" not in p.name and "predict" not in p.name), p.name),
+            )
+            for path in csvs[:3]:
+                try:
+                    candidates.append(("csv", path.read_text(encoding="utf-8")))
+                except OSError:
+                    continue
+        if stdout:
+            candidates.append(("log", stdout))
+        return candidates
+
+    def _normalize_run_output(self, result: dict) -> Optional[NormalizedResult]:
+        """Parse + normalize the run's output, preferring a candidate that
+        actually contains the requested metric. None when nothing matching
+        could be extracted.
+
+        The whatever-parsed-first fallback only applies when the researcher
+        named NO metric: with hints in hand and no output matching them, the
+        run plainly never produced the requested quantity, and normalizing a
+        bookkeeping column instead (``n_criteria`` from the generic scaffold
+        was the concrete case) hands validate() a fake primary metric to grade.
+        Delivering without validation -- and saying so -- is the honest result.
+
+        Non-finite fields never count as a match: a run that prints
+        ``"aqueous_solubility_logS": NaN`` has NOT produced the requested
+        quantity, whatever the field is called.
+        """
+        hints = self._metric_hints()
+        first_fallback = None  # parsed output when the researcher named no metric
+        for parser_name, content in self._output_candidates(result):
+            try:
+                parsed = get_parser(parser_name).parse(content)
+            except (ParserError, ValueError):
+                continue
+            finite = _finite_fields(parsed)
+            if finite is None:
+                continue
+            primary = self._pick_metric(finite.field_names(), hints)
+            if primary is not None:
+                return _stamp_sample_count(normalize(finite, primary=primary),
+                                           finite, primary)
+            if first_fallback is None:
+                first_fallback = finite
+        if hints or first_fallback is None:
+            return None
+        return _stamp_sample_count(normalize(first_fallback), first_fallback,
+                                   first_fallback.fields[0].name)
+
+    # Header names that identify WHICH system a row is about, most specific
+    # first. A benchmark table pairs one of these with the metric column.
+    _ENTITY_COLUMNS = ("molecule", "compound", "name", "system", "material",
+                       "formula", "smiles", "id")
+
+    def _per_entity_rows(self, result: dict) -> list:
+        """One (entity, metric, value) row per system in a benchmark table.
+
+        Averaging the metric column and comparing that mean against ONE
+        molecule's reference can land inside the tolerance and falsely ACCEPT
+        (see _ungradable_aggregate). Identifiers live in a text column that the
+        numeric parser drops, so the table is re-read here. Empty for a
+        single-system run.
+        """
+        import csv as _csv
+        rows = []
+        for parser_name, content in self._output_candidates(result):
+            if parser_name != "csv":
+                continue
+            try:
+                reader = _csv.DictReader(io.StringIO(content))
+                records = list(reader)
+            except (_csv.Error, ValueError):
+                continue
+            if len(records) < 2 or not reader.fieldnames:
+                continue
+            headers = {str(h).strip().lower(): h for h in reader.fieldnames if h}
+            entity_col = next((headers[c] for c in self._ENTITY_COLUMNS
+                               if c in headers), None)
+            if entity_col is None:
+                continue
+            numeric = [h for h in reader.fieldnames
+                       if h and h != entity_col
+                       and all(_as_float(r.get(h)) is not None for r in records)]
+            if not numeric:
+                continue
+            metric_col = self._pick_metric(numeric, self._metric_hints()) or numeric[0]
+            for record in records:
+                entity = str(record.get(entity_col) or "").strip()
+                value = _as_float(record.get(metric_col))
+                if entity and value is not None and math.isfinite(value):
+                    rows.append({"entity": entity, "metric": metric_col,
+                                 "value": value})
+            if rows:
+                return rows
+        return rows
+
+    def validate(self) -> State:
+        """Cross-validate the interpreted result and route on the verdict (6.2).
+
+        With a ``normalized_result`` artifact present, every extracted metric
+        becomes a prediction for the run's molecule and is compared against the
+        literature baseline DB (configs/baselines.json); the acceptance judge
+        grades the agreement into accepted / needs_review / rejected and the
+        ``validation_report`` artifact records the full comparison. When no
+        baseline covers this molecule, the plan's own acceptance criteria
+        (target +/- tolerance) are the reference instead; with no reference at
+        all the result is delivered as-is, with the report saying so.
+
+        Verdicts that ask for another pass (needs_review -> CORRECT, rejected ->
+        REPLAN) are gated by the bounded rerun controller (Story 6.3): once the
+        iteration cap is hit or the loop stops improving, the result is
+        delivered anyway -- flagged for the researcher in the report -- rather
+        than looping forever.
+
+        Runs with nothing interpreted (seeded / skipped / deferred) keep the
+        previous behavior: route on whatever verdict the context carries,
+        defaulting to ACCEPT so a planning-only run still terminates.
+        """
+        # CORRECT's plan belongs to the pass that produced it (see _STAGE_OUTPUTS):
+        # left in place, a run that ends accepted still ships a diagnosis of what
+        # supposedly went wrong.
+        self.context.artifacts.pop("correction_plan", None)
+        normalized = self._load_artifact("normalized_result")
+        if normalized is not None:
+            self.context.validation_result = self._cross_validate(normalized)
+        elif self.context.artifacts.get("validation_report"):
+            self.context.validation_result = self._stop_unproductive_loop()
         verdict = self.context.validation_result
         if verdict == "rejected":
+            # Whether the re-planned run needs a fresh approval is decided by
+            # plan() once the new plan exists and can be compared with the
+            # approved one -- withdrawing it here re-asks even when the replan
+            # lands on exactly the same method, which is pure noise.
             return State.REPLAN
         if verdict == "needs_review":
             return State.CORRECT
         return State.ACCEPT
+
+    def _stop_unproductive_loop(self) -> str:
+        """End a correction loop whose rerun produced nothing to grade.
+
+        The bounded gate only runs when there IS a result, so a pass that comes
+        back empty would route on the previous verdict -- back into
+        CORRECT/REPLAN, forever, without advancing the counter meant to stop it.
+        Nothing new was measured, so deliver the last graded result flagged.
+        Only reachable once a report exists, so a seeded verdict is never
+        overridden.
+        """
+        report = self._load_artifact("validation_report")
+        if report is None:
+            # The path is in the context but the file is gone or unreadable.
+            # Writing a rerun-only stub here would REPLACE the real report with
+            # one carrying no comparison and no rationale, so leave it alone.
+            logger.info("[validate] the previous validation report is unreadable; "
+                        "delivering on the verdict already on record (%s).",
+                        self.context.validation_result)
+            return "accepted"
+        verdict = report.get("acceptance_status") or self.context.validation_result
+        report["rerun"] = {
+            "decision": "stop",
+            "stop_reason": "no_new_result",
+            "reason": ("The corrected run produced no result to grade, so "
+                       "another identical round cannot improve on it."),
+            "final_verdict": verdict,
+            "disposition": "delivered_for_researcher_review",
+        }
+        self.context.artifacts["validation_report"] = self._write_artifact(
+            "validation_report", report)
+        logger.info("[validate] the corrected run produced nothing to grade; "
+                    "delivering the previous result flagged for review "
+                    "(verdict on record: %s).", verdict)
+        return "accepted"
+
+    def _accept_or_loop(self, normalized: dict, artifact: dict) -> bool:
+        """Ask whether to rerun (True) or accept this result as it stands (False).
+
+        A failing verdict has three very different causes and the grader cannot
+        tell them apart: the generated code is wrong (the aspirin solubility run
+        computed a partition constant and called it a solubility), or the method
+        is systematically offset from the reference and the run is as good as
+        that method gets (PBE puts silicon's gap near 0.6 eV against an
+        experimental 1.17 -- a textbook DFT underestimate, not a failure), or the
+        reference is not comparable at all. Only the first is worth another
+        calculation. A researcher can see which it is in seconds, so they are
+        asked before the compute is spent, and the answer is recorded.
+
+        Unattended runs keep looping automatically. When there is no way to ask,
+        the result is accepted rather than rerun: spending an unattended DFT
+        calculation on an unreviewed guess is the worse default.
+        """
+        if self.auto_approve:
+            return True
+        if not self._can_prompt():
+            logger.info("[validate] no interactive input available; accepting the "
+                        "flagged result rather than rerunning unattended.")
+            return False
+        answer = self._ask_user(
+            self._accept_or_loop_prompt(normalized, artifact), ASK_VALIDATION_GATE)
+        text = str(answer).strip().lower()
+        # Only an explicit ask for another pass spends the compute. "yes" is NOT
+        # one: at a question offering two named choices it most likely means "yes,
+        # accept", so treating it as a rerun would do the opposite of what was
+        # meant. Anything unrecognized accepts, matching the headless default.
+        if text in {"rerun", "re-run", "loop", "retry", "again", "r", "improve"}:
+            return True
+        logger.info("[validate] the researcher accepted the flagged result.")
+        return False
+
+    def _accept_or_loop_prompt(self, normalized: dict, artifact: dict) -> str:
+        """The question posed at the accept-or-rerun gate.
+
+        States what was computed, what it was compared against and where that
+        reference came from -- the researcher cannot judge a verdict without
+        knowing whether the target is an experimental number, a value the plan
+        proposed, or nothing comparable at all.
+        """
+        metric = normalized.get("primary_metric") or {}
+        unit = f" {metric['unit']}" if metric.get("unit") else ""
+        value = metric.get("value")
+        shown = f"{value:.6g}{unit}" if isinstance(value, (int, float)) else "n/a"
+        method = ((self._load_artifact("execution_plan") or {})
+                  .get("selected_method") or {})
+        engine = method.get("calculator") or method.get("tool_name") or "the plan's method"
+        comparisons = (artifact.get("cross_validation") or {}).get("comparisons") or []
+        if comparisons:
+            reference = (f"literature values from the baseline database "
+                         f"({len(comparisons)} compared)")
+        elif artifact.get("gap_basis") == "tolerance_multiples":
+            reference = ("the target this run's own plan proposed, which was not "
+                         "taken from a measurement")
+        else:
+            reference = "no comparable reference"
+        return (
+            f"Validation says {artifact.get('acceptance_status')}: "
+            f"{artifact.get('rationale')}\n"
+            f"  computed: {metric.get('name', 'result')} = {shown} (via {engine})\n"
+            f"  compared against: {reference}\n"
+            f"Bear in mind a method can be right and still miss a reference it was "
+            f"never meant to reproduce (a DFT functional against an experimental "
+            f"value, say). Rerunning costs another full calculation.\n"
+            f"Accept this result, or rerun to try improving it? [accept/rerun]: "
+        )
+
+    def _run_molecule(self) -> Optional[str]:
+        """The molecule/material this run is about (baseline DB lookup key)."""
+        plan = self._load_artifact("execution_plan") or {}
+        intent = self._load_artifact("intent_spec") or {}
+        material = CodegenEngine._material_brief(plan, intent)
+        return material.get("name") or material.get("formula")
+
+    def _normalized_metrics(self, normalized: dict) -> list:
+        """All metric dicts (primary first) from a normalized_result artifact."""
+        metrics = []
+        if isinstance(normalized.get("primary_metric"), dict):
+            metrics.append(normalized["primary_metric"])
+        metrics.extend(m for m in normalized.get("secondary_metrics") or []
+                       if isinstance(m, dict))
+        # Non-finite secondaries (a NaN diagnostic next to a finite primary)
+        # would poison the baseline comparison, so they never become predictions.
+        return [m for m in metrics
+                if m.get("name") and isinstance(m.get("value"), (int, float))
+                and not isinstance(m.get("value"), bool)
+                and math.isfinite(m["value"])]
+
+    def _baseline_property(self, name) -> str:
+        """A metric name as the baseline DB spells the property."""
+        text = str(name)
+        return self._BASELINE_PROPERTY_ALIASES.get(text.strip().lower(), text)
+
+    def _predictions(self, normalized: dict, molecule: str) -> list:
+        """Adapt the interpreted result into baseline-DB predictions.
+
+        A benchmark table becomes one prediction per system, each matched to its
+        own literature value -- which is also what lets the validator compute
+        RMSE and a correlation, both undefined for a single point.
+        """
+        entities = normalized.get("entities")
+        if isinstance(entities, list) and entities:
+            return [
+                Prediction(molecule=str(row["entity"]),
+                           property=self._baseline_property(row.get("metric")),
+                           value=float(row["value"]))
+                for row in entities
+                if isinstance(row, dict) and row.get("entity")
+                and isinstance(row.get("value"), (int, float))
+            ]
+        predictions = []
+        for m in self._normalized_metrics(normalized):
+            predictions.append(Prediction(
+                molecule=molecule, property=self._baseline_property(m["name"]),
+                value=float(m["value"]), unit=m.get("unit"),
+                uncertainty=m.get("uncertainty")))
+        return predictions
+
+    def _cross_validate(self, normalized: dict) -> str:
+        """Grade the normalized result and return the verdict to route on.
+
+        Writes the ``validation_report`` artifact (schema shape + the full
+        comparison detail and, when the rerun gate fires, the loop decision).
+        The returned verdict may differ from the report's ``acceptance_status``
+        in exactly one case: the rerun controller stopped the correction loop,
+        so the flagged result is delivered (routed as accepted) with the true
+        verdict and stop reason preserved in the report.
+        """
+        molecule = self._run_molecule()
+        predictions = self._predictions(normalized, molecule) if molecule else []
+        thresholds = self._acceptance_thresholds()
+        result, verdict, report = cross_validate(
+            predictions,
+            thresholds=thresholds,
+            report_id=f"val-{self.run_id}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        artifact = asdict(report)
+        artifact["rationale"] = verdict.rationale
+        artifact["cross_validation"] = result.to_dict()
+        artifact["thresholds"] = asdict(thresholds)
+        status = verdict.status
+        gap = result.mean_relative_error
+        # How ``gap`` should be read downstream: a fraction of the literature
+        # value, or a multiple of the tolerance the researcher set. correct()
+        # needs the distinction to turn it into a calibrated-range signal.
+        basis = "relative_error"
+        ungraded = self._ungradable_aggregate(normalized, result)
+        if ungraded is not None:
+            status, artifact["rationale"], gap = ungraded, self._AGGREGATE_NOTE, None
+            artifact["acceptance_status"] = status
+        elif not result.comparisons:
+            # No literature baseline covers this molecule/property: judge
+            # against the plan's own acceptance criteria instead of parking
+            # every novel system in needs_review.
+            status, rationale, gap = self._acceptance_fallback(normalized)
+            artifact["acceptance_status"] = status
+            artifact["rationale"] = rationale
+            basis = "tolerance_multiples"
+        else:
+            # A matching baseline must not silently retire the researcher's own
+            # acceptance criteria: both are checked and the stricter wins, so a
+            # result that agrees with the literature but misses the tolerance
+            # they asked for is not reported as a clean pass.
+            own_status, own_rationale, _ = self._acceptance_fallback(normalized)
+            if _SEVERITY.get(own_status, 0) > _SEVERITY.get(status, 0):
+                status = own_status
+                artifact["acceptance_status"] = status
+                artifact["rationale"] = (
+                    f"{artifact['rationale']} Held to the run's own acceptance "
+                    f"criteria, which are stricter: {own_rationale}")
+        artifact["gap"] = gap
+        artifact["gap_basis"] = basis
+        logger.info("[validate] %s -- %s", status, artifact["rationale"])
+        # Ask the researcher before spending another calculation. Deliberately
+        # BEFORE _gate_rerun: everything above only reads, so if this suspends
+        # for the answer the re-entry re-grades identically and no metric has
+        # been recorded twice (which would read as 0% improvement -> converged).
+        if status != "accepted" and not self._accept_or_loop(normalized, artifact):
+            artifact["rerun"] = {
+                "decision": "stop",
+                "stop_reason": "researcher_accepted",
+                "reason": "The researcher accepted this result as it stands.",
+                "iteration": self._rerun.iteration,
+                "final_verdict": status,
+                "disposition": "accepted_by_researcher",
+            }
+            self.context.artifacts["validation_report"] = self._write_artifact(
+                "validation_report", artifact)
+            return "accepted"
+        self._restore_rerun_budget()
+        final = self._gate_rerun(status, gap, artifact)
+        self.context.artifacts["validation_report"] = self._write_artifact(
+            "validation_report", artifact)
+        return final
+
+    _AGGREGATE_NOTE = (
+        "This run produced results for several systems, but the output does not "
+        "say which row belongs to which system, so the values were averaged into "
+        "one number. A mean cannot be checked against a single system's "
+        "literature value -- agreement here would not mean the run is right. "
+        "Add an identifying column (molecule, formula or SMILES) to the results "
+        "table and re-run to have each system validated against its own "
+        "reference."
+    )
+
+    def _ungradable_aggregate(self, normalized: dict, result) -> Optional[str]:
+        """``"needs_review"`` when the result is a mean nothing can check, else None.
+
+        Errors in opposite directions cancel, so an averaged benchmark can score
+        ~0% against one molecule's reference while every prediction is badly
+        wrong. Identified rows are graded individually instead; unidentified ones
+        cannot honestly be graded at all.
+        """
+        if normalized.get("entities"):
+            return None
+        samples = (normalized.get("metadata") or {}).get("primary_samples")
+        if not isinstance(samples, int) or samples < 2:
+            return None
+        if not result.comparisons:
+            return None
+        return "needs_review"
+
+    def _acceptance_thresholds(self) -> AcceptanceThresholds:
+        """The agreement thresholds to grade against.
+
+        Story 6.2's 15%/30% by default, overridable per deployment via
+        ``TWAIN_ACCEPT_BELOW`` / ``TWAIN_REVIEW_BELOW`` (fractions) and per run
+        via ``acceptance_thresholds`` on the plan. Malformed values fall back to
+        the defaults rather than failing the run.
+        """
+        plan = (self._load_artifact("execution_plan") or {})
+        configured = plan.get("acceptance_thresholds")
+        configured = configured if isinstance(configured, dict) else {}
+        defaults = AcceptanceThresholds()
+        values = {}
+        for field_name, env in (("accept_below", "TWAIN_ACCEPT_BELOW"),
+                                ("review_below", "TWAIN_REVIEW_BELOW")):
+            raw = configured.get(field_name, os.environ.get(env))
+            try:
+                values[field_name] = float(raw)
+            except (TypeError, ValueError):
+                values[field_name] = getattr(defaults, field_name)
+        try:
+            return AcceptanceThresholds(**values)
+        except ValueError:  # e.g. accept_below > review_below
+            logger.info("[validate] ignoring incoherent acceptance thresholds "
+                        "%s; using the defaults.", values)
+            return defaults
+
+    def _acceptance_fallback(self, normalized: dict):
+        """Judge against the plan's acceptance criteria (target +/- tolerance).
+
+        Returns ``(status, rationale, gap)`` where gap is the worst relative
+        miss (drives the rerun controller's convergence check). Within tolerance
+        -> accepted; within twice the tolerance -> needs_review; beyond that ->
+        rejected. With no criteria matching an extracted metric there is nothing
+        to judge, so the result is delivered as-is (accepted) and the rationale
+        says exactly that.
+        """
+        plan = self._load_artifact("execution_plan") or {}
+        criteria = [c for c in plan.get("acceptance_metrics") or []
+                    if isinstance(c, dict) and c.get("metric_name") is not None]
+        metrics = self._normalized_metrics(normalized)
+        by_name = {str(m["name"]): m for m in metrics}
+
+        checked, worst_status, worst_gap = [], "accepted", None
+        for criterion in criteria:
+            match = self._pick_metric(list(by_name), [criterion["metric_name"]])
+            if match is None:
+                continue
+            try:
+                value = float(by_name[match]["value"])
+                target = float(criterion.get("target_value", 0.0))
+                tolerance = abs(float(criterion.get("tolerance", 0.0)))
+            except (TypeError, ValueError):
+                continue  # malformed criterion -> nothing to judge against
+            miss = abs(value - target)
+            if miss <= tolerance:
+                status = "accepted"
+            elif tolerance and miss <= 2 * tolerance:
+                status = "needs_review"
+            else:
+                status = "rejected"
+            checked.append(
+                f"{criterion['metric_name']}: {value:.4g} vs target {target:.4g} "
+                f"+/- {tolerance:.4g} -> {status}")
+            if _SEVERITY[status] > _SEVERITY[worst_status]:
+                worst_status = status
+            rel_miss = miss / tolerance if tolerance else miss
+            worst_gap = rel_miss if worst_gap is None else max(worst_gap, rel_miss)
+
+        if not checked:
+            return ("accepted",
+                    "No literature baseline or matching acceptance criterion "
+                    "covers this result; delivered without external validation.",
+                    None)
+        return (worst_status,
+                "Judged against the plan's acceptance criteria (no literature "
+                "baseline): " + "; ".join(checked),
+                worst_gap)
+
+    def _restore_rerun_budget(self) -> None:
+        """Rehydrate the correction budget from the last validation report.
+
+        ``_rerun`` is in-memory but a run spans job slices, so each pass would
+        otherwise start at zero and the iteration cap could never be reached --
+        the loop would run until the orchestrator's backstop failed the run,
+        the abort the cap exists to replace. Only restores when this process has
+        counted nothing yet, so a multi-pass run keeps its live counter.
+        """
+        if self._rerun.iteration or self._rerun.metric_history:
+            return
+        previous = (self._load_artifact("validation_report") or {}).get("rerun")
+        if not isinstance(previous, dict):
+            return
+        iteration = previous.get("iteration")
+        if isinstance(iteration, int) and iteration > 0:
+            self._rerun.iteration = min(iteration, self._rerun.policy.max_iterations)
+        history = previous.get("metric_history")
+        if isinstance(history, list):
+            self._rerun.metric_history = [
+                float(v) for v in history
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(v)
+            ]
+
+    def _gate_rerun(self, status: str, gap: Optional[float], artifact: dict) -> str:
+        """Bound the correction loop (Story 6.3) and return the routing verdict.
+
+        Accepted results pass straight through. For needs_review/rejected, the
+        rerun controller decides whether another correction pass is worthwhile
+        (iteration cap, convergence, cost-benefit). When it says stop, the
+        flagged result is delivered -- routed as accepted so the run terminates
+        -- with the true verdict, stop reason and disposition recorded in the
+        validation report.
+        """
+        if status == "accepted":
+            return status
+        if gap is not None:
+            self._rerun.record_metric(gap)
+        # There is no per-iteration cost model yet, so the cost-benefit arm of
+        # the controller is inert (cost 0) and the loop is bounded by the
+        # iteration cap and the convergence check. A gap we could not measure
+        # still earns one pass rather than being scored as "no benefit".
+        decision = self._rerun.decide(
+            expected_benefit=gap if gap is not None else 1.0,
+            estimated_cost=0.0)
+        if decision.should_rerun:
+            self._rerun.begin_iteration()
+            artifact["rerun"] = {
+                "decision": "rerun",
+                "iteration": self._rerun.iteration,
+                # Carried so the next slice -- a different process, with a fresh
+                # controller -- can restore the budget instead of starting over.
+                "metric_history": list(self._rerun.metric_history),
+                "reason": decision.reason,
+            }
+            return status
+        artifact["rerun"] = {
+            "decision": "stop",
+            "stop_reason": decision.stop_reason,
+            "iteration": self._rerun.iteration,
+            "metric_history": list(self._rerun.metric_history),
+            "reason": decision.reason,
+            "final_verdict": status,
+            "disposition": "delivered_for_researcher_review",
+        }
+        logger.info("[validate] %s", decision.reason)
+        logger.info("[validate] Delivering the result flagged for review "
+                    "(verdict on record: %s).", status)
+        return "accepted"
+
     def accept(self) -> State:
         return State.TERMINATE
+
     def correct(self) -> State:
+        """Diagnose the marginal validation and record a CorrectionPlan (6.3).
+
+        Builds run evidence from the validation report, classifies the failure
+        mode, and writes the proposed corrections as the ``correction_plan``
+        artifact -- the auditable record of what the system thinks went wrong
+        and what it would change. Proposals are recorded, not yet auto-applied
+        to the execution plan; the rerun controller (see validate()) bounds how
+        many times this loop can come back around. Always returns BUILD, the
+        only transition the guard table allows out of CORRECT.
+        """
+        report = self._load_artifact("validation_report") or {}
+        cross = report.get("cross_validation") or {}
+        gap = report.get("gap")
+        if gap is None:
+            gap = cross.get("mean_relative_error")
+        context = CorrectionContext(
+            validation_report_id=str((report.get("metadata") or {}).get("ID") or ""),
+            iteration_count=self._rerun.iteration,
+            gap=gap,
+            next_candidate=self._next_discovery_candidate(),
+            iteration_allowance=max(
+                1, self._rerun.policy.max_iterations - self._rerun.iteration),
+            plan_id=f"corr-{self.run_id}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        # No scorer in failure_classifier reads relative_error, so the mode is
+        # UNKNOWN and the generic plan below is the honest outcome. Deriving a
+        # mode from the gap would mean dividing by the run's numerical-precision
+        # uncertainty, making the diagnosis track how tightly the script
+        # converged rather than the science. The real signals (rejected input,
+        # diverged loss, OOD score) belong to the stages that can observe them.
+        reflection = reflect(RunEvidence(relative_error=gap), context)
+        plan = reflection.correction_plan
+        if plan is None:
+            # UNKNOWN failure mode -- no strategy owns it. Record an honest
+            # generic plan: try the next-ranked discovery tool when one exists,
+            # otherwise rerun unchanged to confirm reproducibility, and escalate
+            # if that doesn't move the needle.
+            if context.next_candidate:
+                correction = {
+                    "modification_type": "switch_model",
+                    "target": "model",
+                    "new_value": context.next_candidate,
+                    "rationale": "No specific failure signal fired; the next-ranked "
+                                 "discovery candidate is the best untried lever.",
+                }
+            else:
+                correction = {
+                    "modification_type": "relax_constraints",
+                    "target": "param",
+                    "new_value": {"action": "rerun_unchanged"},
+                    "rationale": "No specific failure signal fired and no alternative "
+                                 "tool is available; rerun to confirm reproducibility "
+                                 "before escalating.",
+                }
+            plan = build_plan(
+                reflection.diagnosis.explanation
+                or "No diagnostic signal fired; failure mode undetermined.",
+                [correction],
+                "Escalate to the researcher with the validation report.",
+                context,
+                primary_metric_delta=0.0,
+                confidence=reflection.diagnosis.confidence,
+            )
+        plan["diagnosis_detail"] = reflection.diagnosis.to_dict()
+        self.context.artifacts["correction_plan"] = self._write_artifact(
+            "correction_plan", plan)
+        proposals = ", ".join(
+            str(c.get("modification_type"))
+            for c in plan.get("proposed_corrections", []))
+        logger.info("[correct] diagnosis: %s (confidence %s); proposed: %s. "
+                    "Rerunning the build (iteration %s/%s).",
+                    reflection.diagnosis.mode.value,
+                    reflection.diagnosis.confidence, proposals,
+                    self._rerun.iteration, self._rerun.policy.max_iterations)
         return State.BUILD
+
+    def _next_discovery_candidate(self) -> Optional[str]:
+        """The highest-ranked discovery candidate that isn't the tool just used."""
+        discovery = self._load_artifact("discovery") or {}
+        plan = self._load_artifact("execution_plan") or {}
+        current = str((plan.get("selected_method") or {}).get("tool_name") or "").lower()
+        for candidate in discovery.get("candidates") or []:
+            name = candidate.get("name") or candidate.get("id")
+            if name and str(name).lower() != current:
+                return str(name)
+        return None
+
     def replan(self) -> State:
         return State.PLAN

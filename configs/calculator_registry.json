@@ -21,7 +21,9 @@
         "total_energy",
         "forces",
         "dft",
-        "electronic_structure"
+        "electronic_structure",
+        "bulk_modulus",
+        "elastic_constants"
       ],
       "input_kinds": [
         "bulk_crystal",
@@ -78,7 +80,8 @@
       ],
       "license": "LGPL-3.0-only",
       "needs_external_data": true,
-      "smoke_can_compute": true
+      "smoke_can_compute": true,
+      "executable": "dftb+"
     },
     {
       "id": "emt",
@@ -129,7 +132,9 @@
         "total_energy",
         "forces",
         "dft",
-        "electronic_structure"
+        "electronic_structure",
+        "bulk_modulus",
+        "elastic_constants"
       ],
       "input_kinds": [
         "bulk_crystal",
@@ -147,7 +152,9 @@
         "linux-64"
       ],
       "needs_external_data": true,
-      "license": "GPL-2.0-or-later"
+      "license": "GPL-2.0-or-later",
+      "executable": "pw.x",
+      "pseudo_library": "sssp"
     },
     {
       "id": "abinit",
@@ -168,7 +175,9 @@
         "total_energy",
         "forces",
         "dft",
-        "electronic_structure"
+        "electronic_structure",
+        "bulk_modulus",
+        "elastic_constants"
       ],
       "input_kinds": [
         "bulk_crystal",
@@ -185,7 +194,9 @@
         "linux-64"
       ],
       "needs_external_data": true,
-      "license": "GPL-3.0-or-later"
+      "license": "GPL-3.0-or-later",
+      "executable": "abinit",
+      "pseudo_library": "pseudodojo"
     },
     {
       "id": "cp2k",
@@ -205,7 +216,9 @@
         "dft",
         "electronic_structure",
         "band_gap",
-        "molecular_dynamics"
+        "molecular_dynamics",
+        "bulk_modulus",
+        "elastic_constants"
       ],
       "input_kinds": [
         "bulk_crystal",
@@ -223,7 +236,8 @@
         "linux-64"
       ],
       "needs_external_data": true,
-      "license": "GPL-2.0-or-later"
+      "license": "GPL-2.0-or-later",
+      "executable": "cp2k.ssmp"
     },
     {
       "id": "nwchem",
@@ -259,7 +273,8 @@
         "osx-arm64"
       ],
       "needs_external_data": false,
-      "license": "ECL-2.0"
+      "license": "ECL-2.0",
+      "executable": "nwchem"
     },
     {
       "id": "xtb",
