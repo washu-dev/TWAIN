@@ -11,7 +11,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { apiClient, Conversation, Message } from '@/api/client';
+import { apiClient, Conversation, Message, RunIssue } from '@/api/client';
+import { ReportIssueModal } from '@/components/ReportIssueModal';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -33,6 +34,11 @@ export const ChatScreen: React.FC = () => {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Reporting a problem with *this* run. Available for as long as the run window
+  // is open — mid-run (when a stall or a wrong plan is what you want to report)
+  // and after it ends alike.
+  const [reporting, setReporting] = useState(false);
+  const [reportedIssues, setReportedIssues] = useState<RunIssue[]>([]);
   const scrollRef = useRef<ScrollView>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -90,6 +96,24 @@ export const ChatScreen: React.FC = () => {
     scrollRef.current?.scrollToEnd({ animated: true });
   }, [conversation?.messages?.length]);
 
+  // Show what has already been reported for this run, so a second report is a
+  // deliberate choice rather than an accidental duplicate.
+  useEffect(() => {
+    if (!conversationId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const issues = await apiClient.listRunIssues(conversationId);
+        if (!cancelled) setReportedIssues(issues);
+      } catch {
+        // Non-essential: the report button still works without this.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
+
   const handleSend = async () => {
     const text = input.trim();
     if (!text || busy) return;
@@ -141,7 +165,18 @@ export const ChatScreen: React.FC = () => {
         <Text style={styles.title} numberOfLines={1}>
           {conversation?.title ?? 'New simulation'}
         </Text>
-        <View style={{ width: 48 }} />
+        {/* Only meaningful once a run exists — there is nothing to attach before that. */}
+        {conversationId ? (
+          <TouchableOpacity
+            onPress={() => setReporting(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Report an issue with this run"
+          >
+            <Text style={styles.report}>Report</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={{ width: 48 }} />
+        )}
       </View>
 
       {conversation && <StateStepper current={conversation.current_state} status={status} />}
@@ -166,7 +201,24 @@ export const ChatScreen: React.FC = () => {
         )}
       </ScrollView>
 
+      {reportedIssues.length > 0 && (
+        <Text style={styles.reportedNote}>
+          {reportedIssues.length === 1 ? '1 issue' : `${reportedIssues.length} issues`} reported for
+          this run
+          {reportedIssues[0].issue_number ? ` (latest: #${reportedIssues[0].issue_number})` : ''}.
+        </Text>
+      )}
+
       {error && <Text style={styles.error}>{error}</Text>}
+
+      {conversationId && (
+        <ReportIssueModal
+          visible={reporting}
+          conversationId={conversationId}
+          onClose={() => setReporting(false)}
+          onSubmitted={(issue) => setReportedIssues((prev) => [issue, ...prev])}
+        />
+      )}
 
       {awaitingApproval ? (
         <View style={styles.approvalBar}>
@@ -295,6 +347,13 @@ const styles = StyleSheet.create({
   },
   back: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', width: 48 },
   title: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
+  report: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', width: 56, textAlign: 'right' },
+  reportedNote: {
+    fontSize: 12,
+    color: C.textSecondary,
+    paddingHorizontal: Spacing.three,
+    paddingBottom: Spacing.one,
+  },
   stepper: { maxHeight: 62, backgroundColor: C.backgroundElement, flexGrow: 0 },
   stepperContent: { alignItems: 'center', paddingHorizontal: Spacing.three, gap: Spacing.three },
   step: { alignItems: 'center', gap: 4, paddingVertical: Spacing.two },

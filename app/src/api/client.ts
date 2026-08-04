@@ -47,6 +47,53 @@ export interface ArtifactContent {
   content: string;
 }
 
+// ── Reporting an issue from the run window ───────────────────────────────────
+// Mirrors api/github_issues.CATEGORY_LABELS: each category triages under its own
+// GitHub label. 'library' deliberately reuses the pipeline's LibraryAddition tag.
+export type IssueCategory = 'bug' | 'library' | 'result' | 'other';
+
+// 'queued' means the report was saved against the run but no issue was filed —
+// the deployment has no GitHub credentials. 'failed' means GitHub refused it.
+export type RunIssueStatus = 'created' | 'queued' | 'failed';
+
+export interface RunIssue {
+  id: number;
+  category: IssueCategory;
+  title: string;
+  description: string;
+  status: RunIssueStatus;
+  issue_number: number | null;
+  issue_url: string | null;
+  error: string | null;
+  created_at: string;
+}
+
+/** The run snapshot that will be attached to an issue. Shape: api/run_issues.collect_run_context. */
+export interface RunContext {
+  run_id: string;
+  title: string | null;
+  status: string | null;
+  current_state: string | null;
+  selected_method: { libraries?: string[]; calculator?: string | null } | null;
+  requested_property: string | null;
+  safety_notes: string[];
+  library_requests: { library?: string; status?: string; issue_url?: string | null }[];
+  execution_result: Record<string, unknown> | string | null;
+  errors: { event_type: string; payload: unknown; created_at: string }[];
+  recent_messages: { role: string; kind: string; state: string | null; content: string }[];
+  artifacts: ArtifactMeta[];
+  truncated: boolean;
+}
+
+export interface IssueContext {
+  run_context: RunContext;
+  /** False when the deployment has no GitHub token — the form says so up front. */
+  github_configured: boolean;
+  repo: string | null;
+  categories: IssueCategory[];
+  submitted: RunIssue[];
+}
+
 export interface Report {
   conversation: Conversation;
   final_state: string;
@@ -129,6 +176,27 @@ class APIClient {
   // match the API's {name:path} route.
   async getArtifact(id: string, name: string): Promise<ArtifactContent> {
     const response = await this.client.get(`/api/conversations/${id}/artifacts/${name}`);
+    return response.data.data;
+  }
+
+  // ── Reporting an issue from the run window ─────────────────────────────────
+  /** What would be attached to an issue for this run — shown before submitting. */
+  async getIssueContext(id: string): Promise<IssueContext> {
+    const response = await this.client.get(`/api/conversations/${id}/issue-context`);
+    return response.data.data;
+  }
+
+  /** File a GitHub issue about this run; the run's data is attached server-side. */
+  async submitRunIssue(
+    id: string,
+    issue: { category: IssueCategory; title: string; description: string },
+  ): Promise<RunIssue> {
+    const response = await this.client.post(`/api/conversations/${id}/issues`, issue);
+    return response.data.data;
+  }
+
+  async listRunIssues(id: string): Promise<RunIssue[]> {
+    const response = await this.client.get(`/api/conversations/${id}/issues`);
     return response.data.data;
   }
 }

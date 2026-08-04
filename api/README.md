@@ -86,6 +86,58 @@ Returns:
 }
 ```
 
+### Report an issue about a run
+
+A researcher can report a problem from the run window without leaving TWAIN; the
+run's own data is attached server-side, so a maintainer never has to ask what was
+being run. See `github_issues.py` (labels + issue body) and `run_issues.py` (the
+snapshot + the local record).
+
+```
+GET  /api/conversations/{id}/issue-context   # exactly what would be attached, + whether GitHub is configured
+POST /api/conversations/{id}/issues          # {category, title, description} -> files the issue
+GET  /api/conversations/{id}/issues          # what has already been reported for this run
+```
+
+`category` is one of `bug | library | result | other` and maps to a GitHub label
+(`BugReport`, `LibraryAddition`, `ResultDiscrepancy`, `RunReport`); every issue
+also carries `RunReport`. `library` deliberately reuses the tag the pipeline uses
+when discovery reaches for an uninstalled library, so both kinds of request
+triage as one list.
+
+The response `status` is:
+
+| status | meaning |
+|---|---|
+| `created` | the issue was filed; `issue_url` points at it |
+| `queued` | no GitHub credentials in this deployment — the report is saved against the run, nothing was filed |
+| `failed` | GitHub refused or was unreachable; `error` says why. The report is still saved |
+
+Configuration (all optional — without them the endpoints work and record
+locally):
+
+| Env var | Effect |
+|---|---|
+| `TWAIN_GITHUB_TOKEN` | PAT used to file issues (falls back to `GITHUB_TOKEN`). Needs read+write on Issues for the repo |
+| `TWAIN_GITHUB_REPO` | `owner/repo` the issues go to. Required — there is no git remote inside the container |
+| `TWAIN_RUN_ISSUES=0` | force off, so a staging deployment can't post to the tracker |
+
+To enable it on ECS, put the PAT in Secrets Manager and add it to
+`ecs-task-definition.json` (`TWAIN_GITHUB_REPO` is already in `environment`):
+
+```json
+"secrets": [
+  {
+    "name": "TWAIN_GITHUB_TOKEN",
+    "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/github/TWAIN_GITHUB_TOKEN"
+  }
+]
+```
+
+The secret must exist before deploying — ECS fails the task if a referenced
+secret is missing, which is why the entry is documented here rather than
+committed.
+
 ## Running Tests
 
 ```bash
@@ -104,6 +156,8 @@ api/
 ├── __init__.py           # Package init
 ├── main.py               # FastAPI app and endpoints
 ├── database.py           # Database connection logic
+├── github_issues.py      # Filing run reports as GitHub issues (labels, body)
+├── run_issues.py         # The run snapshot attached to a report + its local record
 ├── .env                  # Database credentials (not in git)
 ├── requirements.txt      # Python dependencies
 ├── test_api.py           # Test suite

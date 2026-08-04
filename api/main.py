@@ -9,6 +9,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import conversations as convo
+import github_issues
+import run_issues
 from auth import AdminUser, CurrentUser
 from database import list_users, query_greetings, set_user_role
 
@@ -202,6 +204,89 @@ async def get_report(conversation_id: str, user: CurrentUser):
             "artifacts": convo.list_artifacts(conversation_id),
         }
     }
+
+
+# ── Report an issue from the run window ───────────────────────────────────────
+class SubmitRunIssue(BaseModel):
+    category: Literal["bug", "library", "result", "other"] = "other"
+    title: str
+    description: str
+
+
+@app.get("/api/conversations/{conversation_id}/issue-context")
+async def get_issue_context(conversation_id: str, user: CurrentUser):
+    """Preview exactly what would be attached to an issue filed against this run.
+
+    Submitting publishes the run's data to the issue tracker, so the run window
+    shows this first — the user consents to a snapshot they can actually see,
+    not to a description of one. Also reports whether GitHub is configured, so
+    the form can say up front whether an issue will really be filed.
+    """
+    conversation = _require_own_conversation(conversation_id, user)
+    return {
+        "data": {
+            "run_context": run_issues.collect_run_context(conversation),
+            "github_configured": github_issues.issues_enabled(),
+            "repo": github_issues.resolve_repo(),
+            "categories": list(github_issues.CATEGORIES),
+            "submitted": run_issues.list_issues(conversation_id),
+        }
+    }
+
+
+@app.post("/api/conversations/{conversation_id}/issues")
+async def submit_run_issue(conversation_id: str, body: SubmitRunIssue, user: CurrentUser):
+    """File a GitHub issue about this run, with the run's own data attached.
+
+    The submission is recorded locally whether or not GitHub could be reached, so
+    a report is never silently lost; the returned ``status`` distinguishes
+    ``created`` from ``queued`` (no credentials configured) and ``failed``.
+    """
+    conversation = _require_own_conversation(conversation_id, user)
+    title = github_issues.clean_title(body.title)
+    description = body.description.strip()[: github_issues.MAX_DESCRIPTION]
+    if not title:
+        raise HTTPException(status_code=422, detail="title must not be empty.")
+    if not description:
+        raise HTTPException(status_code=422, detail="description must not be empty.")
+    if run_issues.count_issues(conversation_id) >= run_issues.MAX_ISSUES_PER_RUN:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"This run already has {run_issues.MAX_ISSUES_PER_RUN} reported issues. "
+                "Comment on an existing issue instead."
+            ),
+        )
+
+    context = run_issues.collect_run_context(conversation)
+    if github_issues.issues_enabled():
+        result = github_issues.GitHubIssueClient().create_issue(
+            title=title,
+            body=github_issues.render_issue_body(
+                context, category=body.category, description=description, reporter=user
+            ),
+            labels=github_issues.labels_for(body.category),
+        )
+    else:
+        # Recorded, not filed: the deployment has no issue-tracker credentials.
+        result = {
+            "status": "queued", "issue_number": None, "issue_url": None,
+            "error": "No GitHub credentials are configured for this deployment, so the "
+                     "report was saved against the run but no issue was filed.",
+        }
+    recorded = run_issues.record_issue(
+        conversation_id, user.get("id"), category=body.category, title=title,
+        description=description, run_context=context, result=result,
+    )
+    return {"data": recorded}
+
+
+@app.get("/api/conversations/{conversation_id}/issues")
+async def list_run_issues(conversation_id: str, user: CurrentUser):
+    """Issues already reported against this run, newest first."""
+    _require_own_conversation(conversation_id, user)
+    items = run_issues.list_issues(conversation_id)
+    return {"data": items, "count": len(items)}
 
 
 @app.get("/api/conversations/{conversation_id}/artifacts")
