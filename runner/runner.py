@@ -30,6 +30,7 @@ Usage::
     pixi run python -m runner.runner --once     # process at most one job (dev/CI)
 """
 import argparse
+import logging
 import os
 import threading
 import time
@@ -80,6 +81,10 @@ DEFAULT_MAX_ATTEMPTS = _env_int("TWAIN_JOB_MAX_ATTEMPTS", 3)
 
 SUPPORTED_JOB_KINDS = ("start", "resume", "rerun")
 
+# The pipeline's end state. A run parked here is finished: there is no work left
+# for a slice to do, and nothing new to tell the researcher.
+TERMINAL_STATE = "TERMINATE"
+
 
 def _state_name(state_obj) -> str:
     """Normalize a State enum (real engine) or bare string (tests) to its name."""
@@ -114,6 +119,16 @@ def _cancel_check(db: RunnerDB, session_id: str):
 
 
 def _finalize_cancelled(db: RunnerDB, session_id: str, notifier=None) -> None:
+    # Idempotent: a terminate request is *sticky* (the control message stays in
+    # the transcript forever), so every later job for this session also ends up
+    # here -- and each one used to re-post "Run terminated" and re-email the
+    # owner. 'cancelled' is only ever written below, so seeing it means this run
+    # was already settled and there is nothing new to say.
+    try:
+        if db.conversation_status(session_id) == "cancelled":
+            return
+    except Exception as exc:  # noqa: BLE001 -- a read blip must not skip the teardown
+        print(f"[runner] status read failed for {session_id}: {exc}")
     db.set_conversation_status(session_id, "cancelled")
     db.add_assistant_message(
         session_id,
@@ -154,8 +169,18 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
     (e.g. an already-approved plan, or unattended mode) without a second job.
     A terminate request surfaces as RunCancelled from ``orch.run`` and propagates
     to ``process_job``, which records the cancellation.
+
+    A run already parked at TERMINATE has nothing left to drive, so this returns
+    straight away. Driving it anyway is what turned every redundant slice on a
+    finished run -- a resume enqueued by a late reply, a job the reaper re-queued
+    -- into another "run has finished" email and another summary in the
+    transcript. (A ``rerun`` rewinds the run *before* this is called, so it is
+    not parked at TERMINATE and still reports its new outcome.)
     """
     build_state = _state_name(engine.STATE_BUILD)
+    if engine.current_state_name(orch) == TERMINAL_STATE:
+        print(f"[runner] run {session_id} is already finished; nothing to drive")
+        return
     while True:
         state = engine.current_state_name(orch)
 
@@ -521,6 +546,16 @@ def run_loop(
 
 
 def main() -> None:
+    # The notify path reports through ``logging`` (runner.notifications), and
+    # nothing in the service configured it -- so every INFO line it wrote, up to
+    # and including "this is the address I emailed", went nowhere and the email
+    # path was unobservable in the runner log. Configure it at the entry point
+    # only, so importing the runner still leaves a host app's logging alone.
+    level = logging.getLevelName(os.getenv("TWAIN_LOG_LEVEL", "INFO").strip().upper())
+    logging.basicConfig(
+        level=level if isinstance(level, int) else logging.INFO,  # typo => INFO, not a crash
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     parser = argparse.ArgumentParser(description="TWAIN pipeline runner")
     parser.add_argument("--once", action="store_true", help="process at most one job then exit")
     parser.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS,
