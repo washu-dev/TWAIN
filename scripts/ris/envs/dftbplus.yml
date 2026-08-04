@@ -1,0 +1,43 @@
+# Shared cluster env: twain-envs/dftbplus -- semiempirical DFTB (fast screening).
+#
+# This file is the source of truth for what the env contains; apply it with
+# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
+# manual drift is exactly what these specs exist to prevent).
+#
+# dftbplus ships only through conda-forge, so without this spec planning vetoes
+# DFTB+ outright (statemachine's _cluster_cannot_run, which reads these files)
+# and silently reroutes to a full-DFT tool -- paying hours of SCF for a screening
+# question DFTB+ answers in seconds.
+#
+# openmpi is explicit for the same reason as in gpaw.yml: DFTB+ has an MPI build
+# and the Slurm payload auto-detects the env's mpirun to run one rank per
+# allocated CPU.
+#
+# NOTE: dftbplus must NOT be added to default.yml. It pins tblite <0.4, which
+# cannot coexist with default.yml's xtb-python (see the same conflict documented
+# in pixi.toml's [feature.sim.dependencies]) -- hence a dedicated env.
+#
+# NOTE: DFTB+ ships the binary WITHOUT parameters. It needs a Slater-Koster .skf
+# set for every element pair it meets, found via DFTB_PREFIX; without them a run
+# aborts with "SK file ... not found" on the first energy evaluation. The files
+# come from scripts/ris/fetch_data.sh (the cluster counterpart of
+# runner/fetch_slako.sh) and DFTB_PREFIX is exported by the activate.d hook that
+# provision_envs.sh writes -- which is what makes the Slurm payload's
+# twain_use_env() pick it up, exactly as NWChem's basis library works.
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - dftbplus
+  - openmpi
+  - ase
+  # pymatgen + spglib for the periodic side, rdkit for SMILES -> 3D on the
+  # molecular side: DFTB+'s registry input_kinds covers both, and the job's
+  # smoke probe rejects an env missing ANY bundle import -- a missing companion
+  # is what sent an NWChem run to twain-envs/default (job 2573801, exit 127).
+  - pymatgen
+  - spglib
+  - rdkit
+  - numpy
+  - pandas
+  - pyyaml

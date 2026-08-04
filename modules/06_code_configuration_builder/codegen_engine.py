@@ -206,6 +206,18 @@ def extract_valid_source(raw, calculator_import: Optional[str] = None) -> Option
     return validate_source(raw, calculator_import)[0]
 
 
+_BUNDLE_HELPERS = Path(__file__).resolve().parent / "bundle_helpers"
+
+
+def _pseudo_helper_source() -> str:
+    """Source of ``twain_pseudo.py``, copied verbatim into a bundle.
+
+    Read from disk rather than templated: it is a real module, imported directly
+    by its unit tests, so what a run executes is exactly what the tests cover.
+    """
+    return (_BUNDLE_HELPERS / "twain_pseudo.py").read_text(encoding="utf-8")
+
+
 def _first_metric_name(plan: dict) -> Optional[str]:
     """The first acceptance metric's name, or None.
 
@@ -325,6 +337,34 @@ _SMOKE_LOAD_ONLY = (
     "is unmistakable. Building the real structure and loading the calculator here is what "
     "surfaces a broken builder or wrong API before a costly run. Downloading the tool's "
     "own model weights / parameter files is allowed; do not use the network otherwise."
+)
+
+
+# Spliced into BOTH synthesis prompts, unconditionally. Not gated on the toolset:
+# the two rival spin channels are an ASE-wide design split, so any engine list
+# here would protect only the engines already known to have bitten us -- and the
+# ground-state multiplicity of an open-shell reference is a correctness issue for
+# every electronic-structure run, not a per-engine quirk.
+_SPIN_GUIDANCE = (
+    "- OPEN-SHELL SPECIES -- get the spin state right, and state it exactly ONCE. "
+    "Atoms and radicals are usually NOT closed-shell singlets: an O atom and a C "
+    "atom are 3P triplets (multiplicity 3), O2 is a 3Sigma-g- triplet (3), an N "
+    "atom is 4S (4). A singlet stands in silently for any of these and corrupts "
+    "every energy difference built on it.\n"
+    "- ASE has two rival ways to convey that spin state and each calculator reads "
+    "only one: GPAW, Quantum ESPRESSO, ABINIT and DFTB+ read the Atoms object's "
+    "initial magnetic moments, while Psi4, CP2K, NWChem and xTB read an explicit "
+    "count keyword (`multiplicity`, `mult`, `uhf`). If BOTH are set the loser is "
+    "discarded with no warning -- ASE's Psi4 goes further and overwrites your "
+    "`reference` with 'uhf' and your `multiplicity` with None whenever the atoms "
+    "carry moments, and `ase.build.molecule` puts moments on exactly the "
+    "open-shell species that need a multiplicity. That pairing turned a CO2 heat "
+    "of formation of -393.5 into -1072 kJ/mol. So pick the channel your "
+    "calculator actually reads and neutralize the other: passing a count, first "
+    "call `atoms.set_initial_magnetic_moments([0.0] * len(atoms))` (a no-op when "
+    "they were already zero) and pass `reference=`/unrestricted explicitly; "
+    "relying on moments, set them yourself and pass no count keyword. Never let "
+    "the two disagree, and never leave which one wins to the calculator.\n"
 )
 
 
@@ -480,7 +520,7 @@ so the module still imports where they are not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{database_note}{smoke_instruction}
+{spin_note}{pseudo_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "calculator", "property", and "output_file". Write the same \
 metrics as one CSV row to --output.
@@ -556,7 +596,7 @@ imports where it is not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{database_note}{smoke_instruction}
+{spin_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "property", and "output_file"; print each metric WITH its \
 physical unit, and for any fitted or derived value also print a fit-quality / \
@@ -704,18 +744,26 @@ class RunBundle:
     tool_name: str
     template_name: str
     entrypoint: str = "main.py"
+    # twain_pseudo.py, present only for an engine that ships no pseudopotentials
+    # (Quantum ESPRESSO, ABINIT). Copied verbatim rather than generated, so the
+    # element -> filename lookup that keeps a hallucinated pseudopotential out of
+    # a run is version-controlled and unit-tested instead of re-derived per plan.
+    pseudo_helper_py: Optional[str] = None
 
     def files(self) -> Dict[str, str]:
         """Map of filename -> contents for the bundle."""
-        return {
+        files = {
             "main.py": self.main_py,
             "config.yaml": self.config_yaml,
             "requirements.txt": self.requirements_txt,
             "inline_tests.py": self.inline_tests_py,
         }
+        if self.pseudo_helper_py is not None:
+            files["twain_pseudo.py"] = self.pseudo_helper_py
+        return files
 
     def write(self, dest: Union[str, Path]) -> Path:
-        """Write all four files into ``dest`` (created if needed); return it."""
+        """Write every bundle file into ``dest`` (created if needed); return it."""
         dest = Path(dest)
         dest.mkdir(parents=True, exist_ok=True)
         for name, content in self.files().items():
@@ -825,7 +873,8 @@ class CodegenEngine:
     def generate(self, plan, *, intent: Optional[dict] = None, agent=None,
                  smoke_compute: bool = False,
                  require_synthesis: bool = False,
-                 calculator_executable: Optional[str] = None) -> RunBundle:
+                 calculator_executable: Optional[str] = None,
+                 pseudo_library: Optional[str] = None) -> RunBundle:
         """Build a :class:`RunBundle` from an ExecutionPlan.
 
         ``plan`` may be an ``ExecutionPlan`` dataclass, a plain dict, or a path
@@ -859,6 +908,7 @@ class CodegenEngine:
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
                 require_synthesis=require_synthesis,
                 calculator_executable=calculator_executable,
+                pseudo_library=pseudo_library,
             )
         # Library-only run. Prefer a dedicated, tested template when one fits the
         # tool (Pymatgen/ASE/RDKit). Otherwise, if the plan asks for a real property
@@ -952,7 +1002,8 @@ class CodegenEngine:
                                   calculator_import, calculator_library,
                                   *, intent, agent, smoke_compute: bool = False,
                                   require_synthesis: bool = False,
-                                  calculator_executable: Optional[str] = None) -> RunBundle:
+                                  calculator_executable: Optional[str] = None,
+                                  pseudo_library: Optional[str] = None) -> RunBundle:
         generated_at = (plan.get("metadata") or {}).get("timestamp", "") or ""
         acceptance = plan.get("acceptance_metrics", []) or []
         requested_property = plan.get("requested_property") or "the requested property"
@@ -988,6 +1039,10 @@ class CodegenEngine:
             # When True, the generated --smoke path runs the real (tiny) computation
             # so an API/keyword error is caught in REPAIR, not at the real run.
             "smoke_compute": smoke_compute,
+            # "sssp"/"pseudodojo" for an engine shipping no pseudopotentials:
+            # switches the prompt to resolve filenames and cutoffs through the
+            # bundle's twain_pseudo.py instead of writing them out.
+            "pseudo_library": pseudo_library,
         }
 
         # The script is written by the LLM from the discovered toolset + material
@@ -1046,6 +1101,7 @@ class CodegenEngine:
             inline_tests_py=inline_tests_py,
             tool_name=driver,
             template_name=template_name,
+            pseudo_helper_py=(_pseudo_helper_source() if pseudo_library else None),
         )
 
     def _render_generic_fallback(self, brief, generated_at, acceptance) -> str:
@@ -1184,6 +1240,54 @@ class CodegenEngine:
                 "calculation.\n")
         else:
             database_note = ""
+        # A plane-wave engine that ships no pseudopotentials (Quantum ESPRESSO,
+        # ABINIT). The filenames are unguessable but look guessable -- silicon's
+        # SSSP file is Si.pbe-n-rrkjus_psl.1.0.0.UPF while the equally plausible
+        # Si.pbe-n-kjpaw_psl.1.0.0.UPF (oxygen's naming scheme) does not exist --
+        # and a wrong one either dies hours into a queued job or names a real file
+        # for different physics. Same for the cutoffs. So the bundle carries
+        # twain_pseudo.py and the model is told to look both up through it.
+        if brief.get("pseudo_library") == "sssp":
+            pseudo_note = (
+                "- PSEUDOPOTENTIALS -- never write a pseudopotential filename or "
+                "an energy cutoff yourself. The bundle contains `twain_pseudo.py`, "
+                "which reads the installed SSSP library's own manifest. Use it "
+                "verbatim: `from twain_pseudo import espresso_pseudopotentials, "
+                "espresso_cutoffs, pseudo_dir`, then `pseudos = "
+                "espresso_pseudopotentials(atoms)`, `ecutwfc, ecutrho = "
+                "espresso_cutoffs(atoms)` (both already in Ry), and build the "
+                "profile as `EspressoProfile(command='pw.x', "
+                "pseudo_dir=pseudo_dir())`. Pass `pseudopotentials=pseudos` and "
+                "those cutoffs into the Espresso calculator's input data. Do NOT "
+                "hardcode a .UPF name, do NOT invent ecutwfc/ecutrho, and do NOT "
+                "wrap these calls in try/except -- if the library cannot supply an "
+                "element the run MUST fail loudly rather than substitute another "
+                "pseudopotential.\n")
+        elif brief.get("pseudo_library") == "pseudodojo":
+            pseudo_note = (
+                "- PSEUDOPOTENTIALS -- never write a pseudopotential filename or "
+                "an energy cutoff yourself. The bundle contains `twain_pseudo.py`, "
+                "which reads the installed PseudoDojo table's own manifest. Use it "
+                "verbatim: `from twain_pseudo import abinit_pp_paths, abinit_ecut`, "
+                "then build the profile as `AbinitProfile(command='abinit', "
+                "pp_paths=abinit_pp_paths(atoms))` and take `ecut = "
+                "abinit_ecut(atoms)` (Hartree, PseudoDojo's recommended hint -- ASE's "
+                "Abinit takes ecut in eV, so pass `ecut * 27.2114`). Do NOT hardcode "
+                "a .psp8 name, do NOT invent ecut, and do NOT wrap these calls in "
+                "try/except -- if the table cannot supply an element the run MUST "
+                "fail loudly rather than substitute another pseudopotential.\n"
+                "- ABINIT keyword requirements, all three verified against ABINIT "
+                "10.0.3 with this pseudopotential table: pass `pps='psp8'` (without "
+                "it ASE searches for LDA/FHI-format files and aborts with \"Could "
+                "not find lda pseudopotential fhi\" even though the .psp8 files are "
+                "right there), pass `xc='PBE'` (the table is PBE; an LDA functional "
+                "with PBE pseudopotentials is silently inconsistent physics), and "
+                "pass `chksymbreak=0` (ASE writes a shifted Monkhorst-Pack grid, "
+                "which ABINIT rejects for symmetric cells like diamond with \"the k "
+                "point grid is not symmetric\"; note ASE's Abinit does NOT accept a "
+                "dict for `kpts`, so a gamma-centred grid is not an alternative).\n")
+        else:
+            pseudo_note = ""
         return template.format(
             property=brief["property"],
             material_desc=brief["material_desc"],
@@ -1198,6 +1302,9 @@ class CodegenEngine:
             smoke_instruction=smoke_instruction,
             structure_note=structure_note,
             database_note=database_note,
+            # Ignored by the library-only template, which has no such placeholder.
+            pseudo_note=pseudo_note,
+            spin_note=_SPIN_GUIDANCE,
         )
 
     @staticmethod

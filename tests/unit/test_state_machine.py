@@ -994,11 +994,36 @@ class TestSlurmClusterGrounding:
         assert "xtb-python" in pkgs
         assert "gpaw" in pkgs
         assert "psi4" in pkgs
-        assert "cp2k" not in pkgs  # no spec -> stays cluster-blocked
+        # Only what a spec actually declares: openmm is in pixi's sim env but no
+        # cluster spec carries it, so it must not appear here.
+        assert "openmm" not in pkgs
+
+    def test_every_conda_only_engine_has_an_env_spec(self):
+        """No conda-only engine may be left without a spec.
+
+        A missing spec is invisible: _cluster_cannot_run vetoes the engine at
+        planning time and the plan is quietly rerouted to a different tool, so the
+        researcher gets a less appropriate method with no error anywhere. Adding a
+        conda-only package to the registry therefore obliges you to add its spec.
+        """
+        provided = SM._cluster_env_packages()
+        missing = sorted(p for p in SM._depinf.CONDA_ONLY_PACKAGES if p not in provided)
+        assert not missing, (
+            f"conda-only packages with no scripts/ris/envs spec: {missing} -- "
+            f"plans needing them will be silently rerouted")
 
     def test_conda_only_library_without_env_spec_is_blocked(self):
-        # cp2k is a conda-only binary code with no env spec: unrunnable.
+        # Simulated rather than taken from the real specs: every conda-only engine
+        # now HAS a spec (see the test above), so the only way to exercise the veto
+        # is to stand in an inventory that lacks one. The fixture resets the cache.
+        SM._CLUSTER_ENV_PKGS_CACHE = frozenset({"ase", "numpy", "pandas"})
         assert SM._cluster_cannot_run("cp2k") is True
+
+    def test_engines_with_a_spec_are_runnable_on_the_cluster(self):
+        # The four engines provisioned for RIS: a spec is exactly what flips the
+        # veto, so each must now plan as runnable.
+        for library in ("DFTB+", "Quantum ESPRESSO", "ABINIT", "CP2K"):
+            assert SM._cluster_cannot_run(library) is False, library
 
     def test_conda_only_library_covered_by_a_spec_is_allowed(self):
         # These need conda-only packages, but a spec provisions each: xtb via
@@ -1013,6 +1038,9 @@ class TestSlurmClusterGrounding:
     def test_library_importable_vetoes_blocked_candidates(self, tmp_path):
         # The veto beats even an injected "it's installed here" answer: local
         # importability is irrelevant when the cluster can't run the library.
+        # Inventory simulated for the same reason as above -- every conda-only
+        # engine now ships a spec.
+        SM._CLUSTER_ENV_PKGS_CACHE = frozenset({"ase", "numpy", "pandas"})
         m = _make_machine(tmp_path)
         m.execute_slurm = True
         m._library_available = lambda name: True
@@ -1235,3 +1263,59 @@ class TestExecuteSelfHeals:
             m.execute()
         assert len(m._execution_adapter.calls) == 1
         assert m._script_doctor.failures == []
+
+
+class TestClusterEngineDataIsProvisioned:
+    """Every engine needing external data must have both a spec and a data hook.
+
+    These two files have to agree, and nothing at run time notices when they
+    don't: a spec with no hook produces an env holding the binary but no way to
+    find its parameters, which surfaces on the compute node as "SK file not found"
+    or "cannot open ...UPF" -- indistinguishable from a broken install, after a
+    queue wait. The registry knows which engines need data; assert the shell
+    scripts cover each one.
+    """
+
+    RIS = Path(__file__).resolve().parents[2] / "scripts" / "ris"
+
+    def _entries_needing_data(self):
+        from method_discovery.calculator_registry import load_calculators
+        return [c for c in load_calculators() if c.needs_external_data]
+
+    def test_each_data_engine_has_an_env_spec(self):
+        specs = {p.stem for p in (self.RIS / "envs").glob("*.yml")}
+        # Env spec names follow the conda package, which is what the payload's
+        # candidate list is built from (statemachine's env_pythons).
+        expected = {"dftbplus": "DFTB+", "qe": "Quantum ESPRESSO",
+                    "abinit": "ABINIT", "cp2k": "CP2K"}
+        missing = sorted(env for env in expected if env not in specs)
+        assert not missing, f"engines needing data with no env spec: {missing}"
+
+    def test_each_data_engine_has_a_hook_case_in_provision_envs(self):
+        provision = (self.RIS / "provision_envs.sh").read_text()
+        for env, var in (("dftbplus", "DFTB_PREFIX"),
+                         ("qe", "ESPRESSO_PSEUDO"),
+                         ("abinit", "ABINIT_PP_PATH"),
+                         ("cp2k", "CP2K_DATA_DIR")):
+            assert f"{env})" in provision, f"no write_data_hook case for {env}"
+            assert var in provision, f"{env}'s hook does not export {var}"
+
+    def test_the_payload_sources_activate_hooks(self):
+        """The hook mechanism only works because the Slurm payload sources them.
+
+        This is load-bearing: it is what lets a data variable reach the engine
+        without any per-engine code in the execution adapter.
+        """
+        adapter = (Path(__file__).resolve().parents[2] / "modules"
+                   / "08_execution_adapter" / "slurm_execution_adapter.py").read_text()
+        assert "etc/conda/activate.d" in adapter
+
+    def test_pseudopotential_engines_are_fetchable(self):
+        """A pseudo_library value must correspond to a set fetch_data.sh knows."""
+        from method_discovery.calculator_registry import load_calculators
+        fetch = (self.RIS / "fetch_data.sh").read_text()
+        for calc in load_calculators():
+            if calc.pseudo_library:
+                assert f"fetch_{calc.pseudo_library}" in fetch, (
+                    f"{calc.name} wants the '{calc.pseudo_library}' library but "
+                    f"fetch_data.sh has no fetch_{calc.pseudo_library} function")

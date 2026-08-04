@@ -1,0 +1,45 @@
+# Shared cluster env: twain-envs/abinit -- ABINIT plane-wave DFT (solids).
+#
+# This file is the source of truth for what the env contains; apply it with
+# scripts/ris/provision_envs.sh (never hand-edit the env on the cluster --
+# manual drift is exactly what these specs exist to prevent).
+#
+# abinit ships only through conda-forge, so without this spec planning vetoes
+# ABINIT outright (statemachine's _cluster_cannot_run, which reads these files)
+# and reroutes to a pip-installable tool.
+#
+# MPI is explicit for the same reason as in gpaw.yml: abinit is MPI-parallel and
+# the Slurm payload auto-detects the env's mpirun to run one rank per allocated
+# CPU. Note the flavour: unlike every other engine here, conda-forge builds abinit
+# against MPICH, not OpenMPI. Asking for openmpi makes the environment
+# unsolvable -- every abinit build requires `mpi =1.0 mpich`, so the two MPI
+# implementations conflict and micromamba refuses the spec outright. mpich's
+# mpirun satisfies the payload's detection just the same.
+#
+# NOTE: ABINIT ships NO pseudopotentials. It needs one per element, fetched by
+# scripts/ris/fetch_data.sh (pinned PseudoDojo set) and found through
+# ABINIT_PP_PATH, which the activate.d hook provision_envs.sh writes exports.
+#
+# As with qe.yml that variable is not sufficient by itself: ASE 3.29 takes the
+# search path as a CONSTRUCTOR argument -- ``AbinitProfile(command="abinit",
+# pp_paths=[...])``. Generated code must never spell pseudopotential filenames
+# itself; it resolves them at run time from what is actually on disk -- see the
+# bundle's twain_pseudo.py, emitted deterministically by
+# pseudo_helper_generator.py, so a hallucinated filename cannot reach a run.
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - abinit
+  - mpich
+  - ase
+  # pymatgen + spglib do the crystal-structure prep; rdkit rides along because the
+  # job's smoke probe rejects an env missing ANY bundle import, and a rejected env
+  # falls through to one without the engine -- how an NWChem run ended up in
+  # twain-envs/default (job 2573801, exit 127).
+  - pymatgen
+  - spglib
+  - rdkit
+  - numpy
+  - pandas
+  - pyyaml

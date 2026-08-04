@@ -152,7 +152,9 @@
         "linux-64"
       ],
       "needs_external_data": true,
-      "license": "GPL-2.0-or-later"
+      "license": "GPL-2.0-or-later",
+      "executable": "pw.x",
+      "pseudo_library": "sssp"
     },
     {
       "id": "abinit",
@@ -192,7 +194,9 @@
         "linux-64"
       ],
       "needs_external_data": true,
-      "license": "GPL-3.0-or-later"
+      "license": "GPL-3.0-or-later",
+      "executable": "abinit",
+      "pseudo_library": "pseudodojo"
     },
     {
       "id": "cp2k",
@@ -232,7 +236,8 @@
         "linux-64"
       ],
       "needs_external_data": true,
-      "license": "GPL-2.0-or-later"
+      "license": "GPL-2.0-or-later",
+      "executable": "cp2k.ssmp"
     },
     {
       "id": "nwchem",

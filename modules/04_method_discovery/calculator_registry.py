@@ -202,6 +202,13 @@ class CalculatorEntry:
     # with "nwchem: command not found". None for a calculator that IS a python
     # package (GPAW), where the import check is already sufficient.
     executable: Optional[str] = None
+    # Which pseudopotential library a run needs, for plane-wave engines that ship
+    # none ("sssp" for Quantum ESPRESSO, "pseudodojo" for ABINIT). Set means the
+    # bundle gets twain_pseudo.py and the codegen prompt is told to resolve
+    # filenames and cutoffs through it -- a pseudopotential filename is
+    # unguessable yet looks guessable, and inventing one either crashes hours into
+    # a queued job or names a real file for different physics.
+    pseudo_library: Optional[str] = None
 
     def covers(self, property_key: str) -> bool:
         """Whether this calculator can compute ``property_key`` (case-insensitive)."""

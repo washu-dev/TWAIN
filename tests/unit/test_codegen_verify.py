@@ -775,3 +775,252 @@ class TestEngineBinaryIsGated:
 
         tests = (Path(m.context.artifacts["run_bundle"]) / "inline_tests.py").read_text()
         assert 'REQUIRED_EXECUTABLES = ["nwchem"]' in tests
+
+
+
+def _pseudo_source() -> str:
+    """The helper's source as shipped -- the bundle must match it byte for byte."""
+    from pathlib import Path
+    return (Path(eng.__file__).resolve().parent
+            / "bundle_helpers" / "twain_pseudo.py").read_text(encoding="utf-8")
+
+
+# ── plane-wave engines get the resolver, and the prompt is told to use it ─────
+
+class TestPseudopotentialWiring:
+    """QE and ABINIT ship no pseudopotentials, so the bundle carries the resolver.
+
+    The registry decides (``pseudo_library``); codegen must not have to recognise
+    engine names, and an engine with its own basis sets (NWChem) or bundled
+    datasets (GPAW) must not pay for a helper it cannot use.
+    """
+
+    def _plan(self, calculator, calc_import):
+        return {
+            "selected_method": {"tool_name": "ASE", "libraries": ["ASE"],
+                                "calculator": calculator,
+                                "calculator_import": calc_import,
+                                "calculator_library": "ASE"},
+            "requested_property": "total_energy",
+            "metadata": {"timestamp": "t", "goal_id": "g", "candidate_rank": 1},
+            "acceptance_metrics": [{"metric_name": "total_energy",
+                                    "target_value": -1.0, "tolerance": 0.1}],
+            "compute_estimate": {"cpu_hours": 1.0}, "cost_estimate": {"min_cost": 0.1},
+            "safety_notes": [],
+            "target_system": {"crystal": {"formula": "Si", "name": "silicon"}},
+        }
+
+    def test_the_registry_carries_the_library_per_engine(self):
+        from method_discovery.calculator_registry import find_calculator
+        assert find_calculator("Quantum ESPRESSO").pseudo_library == "sssp"
+        assert find_calculator("ABINIT").pseudo_library == "pseudodojo"
+        # Ships its own basis sets / bundled datasets -- nothing to resolve.
+        assert find_calculator("NWChem").pseudo_library is None
+        assert find_calculator("GPAW").pseudo_library is None
+
+    def test_the_engine_binaries_are_the_ones_actually_installed(self):
+        """Observed in the provisioned RIS envs, not guessed from the engine name."""
+        from method_discovery.calculator_registry import find_calculator
+        assert find_calculator("Quantum ESPRESSO").executable == "pw.x"
+        assert find_calculator("ABINIT").executable == "abinit"
+        # The glibc-pinned cp2k=2024.2 nompi build ships ONLY cp2k.ssmp -- not
+        # ASE's default cp2k.psmp, and not the documented cp2k_shell.
+        assert find_calculator("CP2K").executable == "cp2k.ssmp"
+        assert find_calculator("DFTB+").executable == "dftb+"
+
+    def test_a_qe_bundle_carries_the_resolver(self):
+        engine = CodegenEngine()
+        bundle = engine.generate(
+            self._plan("Quantum ESPRESSO", "ase.calculators.espresso"),
+            agent=lambda p: ("import ase\ndef main():\n    print('ok')\n"
+                             "if __name__ == '__main__':\n    main()\n"),
+            pseudo_library="sssp")
+        assert "twain_pseudo.py" in bundle.files()
+        assert "espresso_pseudopotentials" in bundle.files()["twain_pseudo.py"]
+
+    def test_an_engine_with_its_own_basis_sets_does_not(self):
+        engine = CodegenEngine()
+        bundle = engine.generate(
+            self._plan("NWChem", "ase.calculators.nwchem"),
+            agent=lambda p: ("import ase\ndef main():\n    print('ok')\n"
+                             "if __name__ == '__main__':\n    main()\n"))
+        assert "twain_pseudo.py" not in bundle.files()
+
+    def test_the_helper_is_written_into_the_bundle_directory(self, tmp_path):
+        engine = CodegenEngine()
+        bundle = engine.generate(
+            self._plan("ABINIT", "ase.calculators.abinit"),
+            agent=lambda p: ("import ase\ndef main():\n    print('ok')\n"
+                             "if __name__ == '__main__':\n    main()\n"),
+            pseudo_library="pseudodojo")
+        dest = bundle.write(tmp_path / "b")
+        written = (dest / "twain_pseudo.py").read_text()
+        # Copied verbatim, so a run executes exactly what the helper's tests cover.
+        assert written == _pseudo_source()
+        compile(written, "twain_pseudo.py", "exec")
+
+    def test_the_prompt_forbids_writing_a_filename(self):
+        engine = CodegenEngine()
+        captured = []
+
+        def agent(prompt):
+            captured.append(prompt)
+            return ("import ase\ndef main():\n    print('ok')\n"
+                    "if __name__ == '__main__':\n    main()\n")
+
+        engine.generate(self._plan("Quantum ESPRESSO", "ase.calculators.espresso"),
+                        agent=agent, pseudo_library="sssp")
+        prompt = captured[0]
+        assert "espresso_pseudopotentials" in prompt
+        assert "espresso_cutoffs" in prompt
+        assert "never write a pseudopotential filename" in prompt
+        # It must not be given a filename to copy, and must not be invited to
+        # swallow a resolver failure.
+        assert ".UPF" not in prompt.replace("hardcode a .UPF name", "")
+        assert "do NOT wrap these calls in try/except" in prompt
+
+    def test_abinit_gets_its_own_api_not_espresso_s(self):
+        engine = CodegenEngine()
+        captured = []
+        engine.generate(
+            self._plan("ABINIT", "ase.calculators.abinit"),
+            agent=lambda p: (captured.append(p) or
+                             "import ase\ndef main():\n    print('ok')\n"
+                             "if __name__ == '__main__':\n    main()\n"),
+            pseudo_library="pseudodojo")
+        assert "abinit_pp_paths" in captured[0]
+        assert "abinit_ecut" in captured[0]
+        assert "espresso_pseudopotentials" not in captured[0]
+
+    def test_no_pseudo_note_leaks_into_an_ordinary_prompt(self):
+        engine = CodegenEngine()
+        captured = []
+        engine.generate(
+            self._plan("NWChem", "ase.calculators.nwchem"),
+            agent=lambda p: (captured.append(p) or
+                             "import ase\ndef main():\n    print('ok')\n"
+                             "if __name__ == '__main__':\n    main()\n"))
+        assert "PSEUDOPOTENTIALS" not in captured[0]
+
+
+# ── an open-shell spin state stated twice, in two rival channels ──────────────
+
+class TestAmbiguousSpinStateGuard:
+    """ASE takes the spin state two ways and each calculator reads only one.
+
+    Magnetic moments on the Atoms object (GPAW, Quantum ESPRESSO, ABINIT, DFTB+)
+    versus an explicit count keyword (Psi4/CP2K `multiplicity`, NWChem `mult`,
+    xTB `uhf`). State both and the loser is dropped silently.
+
+    Found via a CO2 heat of formation that came back -1072 kJ/mol against a
+    -393.5 target: the script asked for multiplicity 3 on its C and O references
+    and ASE's Psi4 threw that away because `ase.build.molecule` had put magnetic
+    moments on them, so the atoms converged as singlets. Measured at
+    b3lyp/sto-3g that is +313 kJ/mol on an O atom and +226 on a C atom. The check
+    is written against the two-channel split rather than against Psi4, so the
+    engines that have not bitten yet are covered too.
+    """
+
+    def _script(self, body):
+        return ("from ase.build import molecule\n"
+                "def run():\n"
+                "    atoms = molecule('O')\n"
+                f"{body}"
+                "    return atoms.get_potential_energy()\n"
+                "if __name__ == '__main__':\n    run()\n")
+
+    # ---- the count channel, across the engines that read it ----------------
+    def test_psi4_multiplicity_is_flagged(self):
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.calc = Psi4(method='b3lyp', multiplicity=3, reference='uks')\n"))
+
+    def test_cp2k_multiplicity_is_flagged(self):
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.calc = CP2K(multiplicity=3, uks=True)\n"))
+
+    def test_nwchem_mult_in_a_nested_dict_is_flagged(self):
+        """NWChem takes it inside an input mapping, not as a call keyword."""
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.calc = NWChem(dft={'mult': 3, 'xc': 'b3lyp'})\n"))
+
+    def test_xtb_unpaired_electron_count_is_flagged(self):
+        """xTB counts unpaired electrons, so open shell is uhf != 0."""
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.calc = XTB(method='GFN2-xTB', uhf=2)\n"))
+
+    def test_quaccs_spelling_is_flagged(self):
+        assert sd._ambiguous_spin_specification(self._script(
+            "    e = static_job(atoms, spin_multiplicity=3)\n"))
+
+    def test_a_computed_multiplicity_is_flagged(self):
+        """`multiplicity=mult` is exactly the ambiguity, not an exemption."""
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.calc = Psi4(multiplicity=mult)\n"))
+
+    # ---- the magmom channel, which must stay idiomatic ---------------------
+    def test_the_gpaw_idiom_is_not_flagged(self):
+        """GPAW reads the moments; spinpol is a switch, not a rival count."""
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.set_initial_magnetic_moments([2.0])\n"
+            "    atoms.calc = GPAW(xc='PBE', spinpol=True)\n")) == []
+
+    def test_a_switch_keyword_alone_is_not_flagged(self):
+        for switch in ("spinpol=True", "nspin=2", "uks=True", "unrestricted=True"):
+            assert sd._ambiguous_spin_specification(self._script(
+                f"    atoms.calc = C({switch})\n")) == [], switch
+
+    def test_reconciling_the_moments_clears_the_finding(self):
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.set_initial_magnetic_moments([0.0] * len(atoms))\n"
+            "    atoms.calc = Psi4(multiplicity=3, reference='uks')\n")) == []
+
+    # ---- closed shell is not a conflict -----------------------------------
+    def test_a_closed_shell_multiplicity_is_not_flagged(self):
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.calc = Psi4(multiplicity=1)\n")) == []
+
+    def test_a_zero_unpaired_electron_count_is_not_flagged(self):
+        """uhf=0 is closed shell -- the sentinel differs from multiplicity's."""
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.calc = XTB(uhf=0)\n")) == []
+
+    def test_no_spin_specification_at_all_is_not_flagged(self):
+        assert sd._ambiguous_spin_specification(self._script(
+            "    atoms.calc = Psi4(method='b3lyp')\n")) == []
+
+    def test_syntactically_broken_source_does_not_raise(self):
+        assert sd._ambiguous_spin_specification("def f(:\n  pass") == []
+
+    # ---- wiring ------------------------------------------------------------
+    def test_the_diagnostic_explains_both_channels(self):
+        script = ("import matgl\n" + self._script(
+            "    atoms.calc = Psi4(multiplicity=3, reference='uks')\n"))
+        diags = [d for d in ScriptDoctor(brief=_brief()).static_diagnostics(script)
+                 if d.source == "ambiguous-spin-state"]
+        assert diags, "the static pass did not surface the finding"
+        assert diags[0].severity == "error"
+        for expected in ("initial magnetic moments", "set_initial_magnetic_moments",
+                         "GPAW", "Psi4", "wrong spin state".upper()):
+            assert expected in diags[0].message, expected
+
+    def test_every_prompt_carries_the_spin_rule(self):
+        """Unconditional: not gated on an engine list that would date instantly.
+
+        The run that exposed this was library-only (calculator null, toolset
+        quacc/ASE/Psi4), so a calculator-template-only rule would have missed it.
+        """
+        engine = CodegenEngine()
+        for library, calculator in (("quacc", None), ("Psi4", None),
+                                    ("ASE", "GPAW"), ("Pymatgen", "MatGL")):
+            prompt = engine._codegen_prompt({
+                "library": library, "library_import": library.lower(),
+                "also_available": ["ASE"], "calculator": calculator,
+                "calculator_import": "x" if calculator else None,
+                "property": "energy", "material": {}, "material_desc": "CO2",
+                "structure": None, "acceptance": [{"metric_name": "e"}],
+                "output_file": "results.csv", "objective": None,
+                "smoke_compute": False, "pseudo_library": None,
+            })
+            assert "state it exactly ONCE" in prompt, (library, calculator)
+            assert "3P triplets" in prompt, (library, calculator)
+            assert "set_initial_magnetic_moments" in prompt, (library, calculator)

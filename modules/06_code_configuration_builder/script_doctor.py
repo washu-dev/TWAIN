@@ -406,6 +406,26 @@ class ScriptDoctor:
                 'numbers and raises TypeError at calculator init. For a '
                 'frozen-occupations band-structure pass use '
                 '{"name": "fixed-uniform"} instead.', line))
+        for line in _ambiguous_spin_specification(source):
+            diags.append(Diagnostic(
+                "ambiguous-spin-state", "error",
+                "states an open-shell spin state as an explicit count "
+                "(multiplicity / mult / uhf) without reconciling the other "
+                "channel, the Atoms object's initial magnetic moments. ASE "
+                "calculators read one or the other -- GPAW, Quantum ESPRESSO, "
+                "ABINIT and DFTB+ take the magnetic moments; Psi4, CP2K, NWChem "
+                "and xTB take the count -- and when both are present the loser is "
+                "discarded SILENTLY, converging the WRONG SPIN STATE with no "
+                "warning and plausible-looking forces. ASE's Psi4 even overwrites "
+                "reference with 'uhf' and multiplicity with None when the atoms "
+                "carry moments, and ase.build.molecule sets moments on exactly the "
+                "open-shell species that need a multiplicity: that combination put "
+                "a CO2 heat of formation at -1072 vs a -393.5 kJ/mol target. Fix: "
+                "state the spin ONCE for each species. If the calculator reads the "
+                "count, clear the moments first with "
+                "`atoms.set_initial_magnetic_moments([0.0] * len(atoms))`; if it "
+                "reads the moments, set them explicitly and drop the count "
+                "keyword. Either way make it explicit in the source.", line))
         for line in _signature_probe_calls(source):
             diags.append(Diagnostic(
                 "signature-probe", "error",
@@ -819,6 +839,87 @@ def _fixed_occupations_without_numbers(source: str) -> List[int]:
                 and "numbers" not in keys):
             lines.append(node.lineno)
     return lines
+
+
+# Keywords that state the spin state as an explicit COUNT, i.e. that duplicate
+# what initial magnetic moments encode: a multiplicity (Psi4, CP2K), NWChem's
+# ``mult``, or a count of unpaired electrons (xTB's ``uhf``, ``nopen``). The value
+# meaning "closed shell" differs, hence the pair.
+_SPIN_COUNT_KEYS = {
+    "multiplicity": 1, "spin_multiplicity": 1, "mult": 1,   # 2S+1
+    "uhf": 0, "nopen": 0,                                   # unpaired electrons
+}
+# Deliberately NOT included: ``spinpol``, ``nspin``, ``uks``, ``unrestricted``,
+# ``reference``. Those switch spin polarization on and are the CORRECT companion
+# to magnetic moments rather than a competing statement of the spin count, so
+# flagging them would punish the idiomatic GPAW/QE/ABINIT spelling.
+
+
+def _ambiguous_spin_specification(source: str) -> List[int]:
+    """Lines stating an open-shell spin state twice, in two rival channels.
+
+    ASE calculators take the spin state one of two ways, and which one they read
+    is engine-specific:
+
+    * from the Atoms object -- ``atoms.set_initial_magnetic_moments(...)``, used
+      by GPAW, Quantum ESPRESSO (``starting_magnetization`` is derived from the
+      magmoms), ABINIT and DFTB+;
+    * from an explicit count keyword -- Psi4's and CP2K's ``multiplicity``,
+      NWChem's ``mult``, xTB's ``uhf``.
+
+    When a script states it BOTH ways, one statement is silently discarded, and
+    there is no general rule for which: ASE's Psi4 goes as far as overwriting
+    ``reference`` with ``'uhf'`` and ``multiplicity`` with ``None`` whenever the
+    atoms carry magmoms (``Psi4.calculate``), so the SCF then converges to a
+    multiplicity-1 state while the script says 3. Nothing warns, nothing raises,
+    and the geometry and forces all look reasonable.
+
+    That is not hypothetical and it is not cheap. A CO2 heat-of-formation run
+    computed its C and O atomic references as singlets this way and reported
+    dHf = -1072 kJ/mol against a -393.5 target (run 103d9c1b); measured at
+    b3lyp/sto-3g the discarded multiplicity is worth +313 kJ/mol on an O atom and
+    +226 on a C atom, and ``ase.build.molecule`` assigns magmoms to precisely the
+    open-shell species that need a multiplicity.
+
+    So: flagged when an open-shell spin COUNT is specified and the script never
+    reconciles the magnetic-moment channel. Deliberately conservative about which
+    engine is in play -- naming engines here would only catch the ones already
+    known to bite, and the remedy (state the spin once, explicitly) is a single
+    line that is a harmless no-op when the moments were already zero.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    # Touching the magmom channel at all counts as reconciling it: the author has
+    # made a deliberate choice between the two mechanisms, which is the ask.
+    if "set_initial_magnetic_moments" in source or "initial_magmoms" in source:
+        return []
+
+    def open_shell(key: str, value) -> bool:
+        """Whether ``value`` states an open shell for spin keyword ``key``."""
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, int):
+            # A computed value (e.g. multiplicity=mult) could be either; treat it
+            # as open-shell, since the ambiguity is exactly what is being flagged.
+            return not isinstance(value, ast.Constant)
+        return value.value != _SPIN_COUNT_KEYS[key]
+
+    lines: List[int] = []
+    for node in ast.walk(tree):
+        # Keyword form: Psi4(multiplicity=3), static_job(spin_multiplicity=3).
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg in _SPIN_COUNT_KEYS and open_shell(kw.arg, kw.value):
+                    lines.append(node.lineno)
+                    break
+        # Mapping form: NWChem's nested input dict, {"mult": 2}.
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (isinstance(key, ast.Constant) and key.value in _SPIN_COUNT_KEYS
+                        and open_shell(key.value, value)):
+                    lines.append(node.lineno)
+                    break
+    return sorted(set(lines))
 
 
 def _signature_probe_calls(source: str) -> List[int]:

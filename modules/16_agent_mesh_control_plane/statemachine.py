@@ -1803,12 +1803,17 @@ class StateMachine:
         # ASE. None for a calculator that IS a python package (GPAW), where the
         # import check already proves the environment can run it.
         calc_executable = None
+        # Which pseudopotential library the engine needs, when it ships none
+        # (Quantum ESPRESSO, ABINIT). Set means the bundle carries twain_pseudo.py
+        # and codegen resolves filenames + cutoffs through it.
+        pseudo_library = None
         if calc_name:
             ce = find_calculator(calc_name)
             if ce is None:
                 smoke_compute = False
             else:
                 calc_executable = ce.executable
+                pseudo_library = ce.pseudo_library
                 if ce.smoke_can_compute is not None:
                     smoke_compute = ce.smoke_can_compute
                 else:
@@ -1825,6 +1830,11 @@ class StateMachine:
                 # not the engine binary, instead of the run dying mid-calculation
                 # with "command not found" after a queue wait.
                 calculator_executable=calc_executable,
+                # So a pseudopotential filename is looked up in the installed
+                # library rather than written from memory -- an invented .UPF name
+                # is either a crash after a queue wait or, worse, a real file for
+                # different physics.
+                pseudo_library=pseudo_library,
                 # A run that is going to EXECUTE must not fall back to the
                 # placeholder scaffold: it loads the tool, writes a stub and
                 # exits 0, so the job, the scheduler and TWAIN all report success
