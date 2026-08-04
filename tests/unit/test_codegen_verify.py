@@ -1184,3 +1184,116 @@ class TestUncorrelatedThermochemistryGuard:
         assert "CO + 1/2 O2 -> CO2" in prompt
         assert "formation_enthalpy_via_reaction" in prompt
         assert "never plain SCF" in prompt
+
+
+class TestTheGateTestsWhatTheCodeNeeds:
+    """A plan can advertise more toolset than the script uses.
+
+    Slurm job 2580768: the plan carried quacc+ASE+Psi4+NWChem, so the smoke gate
+    demanded the psi4 python package AND (via the calculator) the nwchem binary.
+    Both are conda-only and provisioned in separate envs, so NO single env could
+    pass -- whichever engine the script actually drove. The layered venv worked
+    exactly as designed ("layering on twain-envs/nwchem; pip adding: quacc") and
+    still could not help, because pip cannot supply a conda-only package.
+
+    The gate now requires what the generated source imports. An engine the code
+    never touches is not a dependency of the run.
+    """
+
+    TWO_ENGINE = {
+        "tool_name": "quacc", "calculator": "NWChem",
+        "calculator_import": "ase.calculators.nwchem", "calculator_library": "ASE",
+        "libraries": ["quacc", "ASE", "Psi4"],
+    }
+
+    def _plan(self, method=None):
+        return {
+            "selected_method": method or self.TWO_ENGINE,
+            "requested_property": "standard_heat_of_formation_kJ_per_mol",
+            "metadata": {"timestamp": "t", "goal_id": "g", "candidate_rank": 1},
+            "acceptance_metrics": [{"metric_name": "standard_heat_of_formation_kJ_per_mol",
+                                    "target_value": -393.5, "tolerance": 10.0}],
+            "compute_estimate": {"cpu_hours": 1.0}, "cost_estimate": {"min_cost": 0.1},
+            "safety_notes": [],
+            "target_system": {"molecule": {"name": "carbon dioxide", "SMILES": "O=C=O"}},
+        }
+
+    def _requirements(self, script, **kw):
+        bundle = CodegenEngine().generate(self._plan(), agent=lambda _p: script, **kw)
+        tests = bundle.files()["inline_tests.py"]
+        imports = next(l for l in tests.splitlines() if l.startswith("REQUIRED_IMPORTS"))
+        execs = next(l for l in tests.splitlines()
+                     if l.startswith("REQUIRED_EXECUTABLES"))
+        return imports, execs
+
+    PSI4_ONLY = ("import psi4\nfrom quacc.recipes.psi4.core import static_job\n"
+                 "def main():\n    print('ok')\n"
+                 "if __name__ == '__main__':\n    main()\n")
+    NWCHEM_ONLY = ("from ase.calculators.nwchem import NWChem\n"
+                   "from quacc.recipes.nwchem.core import static_job\n"
+                   "def main():\n    print('ok')\n"
+                   "if __name__ == '__main__':\n    main()\n")
+
+    def test_an_unused_engine_is_not_demanded(self):
+        """The realistic shape: the script drives the plan's calculator (NWChem)
+        and ignores the Psi4 the plan also advertised.
+
+        A script that ignored the calculator entirely could not reach the gate at
+        all -- _synthesize_with_llm rejects source that never references
+        calculator_import, so it would be replaced by the scaffold and caught by
+        the synthesis backstop instead. See the scaffold test below.
+        """
+        imports, _ = self._requirements(self.NWCHEM_ONLY)
+        assert "ase.calculators.nwchem" in imports, "the engine it does drive"
+        assert '"psi4"' not in imports, (
+            "the script never imports psi4, so requiring it rules out the only "
+            "env that has the nwchem binary -- and psi4 is conda-only, so the "
+            "pip layer cannot supply it either")
+
+    def test_the_symmetric_case_drops_the_other_engine(self):
+        """Same plan shape with the roles swapped: Psi4 driven, NWChem advertised."""
+        method = dict(self.TWO_ENGINE, calculator="Psi4", calculator_import="psi4",
+                      libraries=["quacc", "ASE", "NWChem"])
+        bundle = CodegenEngine().generate(self._plan(method),
+                                          agent=lambda _p: self.PSI4_ONLY)
+        imports = next(l for l in bundle.files()["inline_tests.py"].splitlines()
+                       if l.startswith("REQUIRED_IMPORTS"))
+        assert "psi4" in imports
+        assert "ase.calculators.nwchem" not in imports
+
+    def test_the_binary_is_only_demanded_when_the_engine_is_driven(self):
+        _, execs = self._requirements(self.PSI4_ONLY, calculator_executable="nwchem")
+        assert "nwchem" not in execs, (
+            "demanding the nwchem binary for a psi4-only script rules out the one "
+            "env that can run it")
+
+    def test_the_binary_is_demanded_when_the_engine_is_driven(self):
+        _, execs = self._requirements(self.NWCHEM_ONLY, calculator_executable="nwchem")
+        assert '"nwchem"' in execs
+
+    def test_a_lazy_import_inside_a_function_still_counts(self):
+        """Generated scripts keep heavy imports in functions on purpose."""
+        lazy = ("def run():\n    import psi4\n    return psi4\n"
+                "def main():\n    run()\n"
+                "if __name__ == '__main__':\n    main()\n")
+        imports, _ = self._requirements(lazy)
+        assert "psi4" in imports
+
+    def test_a_script_importing_none_of_its_toolset_keeps_the_full_gate(self):
+        """A scaffold must not get a weakened gate -- that is how a hollow run
+        reported success. The synthesis backstop is the real guard; this filter
+        must not undercut it."""
+        scaffold = ("def main():\n    print('stub')\n"
+                    "if __name__ == '__main__':\n    main()\n")
+        imports, _ = self._requirements(scaffold)
+        for expected in ("quacc", "ase", "psi4", "ase.calculators.nwchem"):
+            assert expected in imports, expected
+
+    def test_the_helpers_handle_broken_source(self):
+        assert eng._imported_modules("def f(:\n") == set()
+        assert eng._needed_imports(["ase"], "def f(:\n") == ["ase"]
+
+    def test_parent_and_child_imports_both_satisfy(self):
+        assert eng._imports_module("import ase.calculators.nwchem", "ase")
+        assert eng._imports_module("import psi4", "psi4.driver")
+        assert not eng._imports_module("import numpy", "psi4")

@@ -206,6 +206,51 @@ def extract_valid_source(raw, calculator_import: Optional[str] = None) -> Option
     return validate_source(raw, calculator_import)[0]
 
 
+def _imported_modules(source: str) -> set:
+    """Every module path ``source`` imports, at any nesting depth.
+
+    Walks the tree rather than reading top-level statements only: generated
+    scripts deliberately keep heavy imports inside functions so the module still
+    imports where the engine is absent.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    modules = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    return modules
+
+
+def _imports_module(source: str, want: str) -> bool:
+    """Whether ``source`` imports ``want``, a parent of it, or a child of it.
+
+    ``import ase.calculators.nwchem`` satisfies a requirement on ``ase``, and
+    ``import psi4`` satisfies one on ``psi4.driver`` -- either direction means the
+    package has to be present.
+    """
+    for module in _imported_modules(source):
+        if module == want or module.startswith(f"{want}.") or want.startswith(f"{module}."):
+            return True
+    return False
+
+
+def _needed_imports(candidates, source: str) -> List[str]:
+    """The toolset imports ``source`` actually uses, in order.
+
+    Falls back to the full list when nothing matches: a script that imports none
+    of its toolset is a scaffold or a synthesis failure, and weakening the gate to
+    nothing there would let it through silently. The synthesis backstop is what
+    catches that case, not this filter.
+    """
+    needed = [name for name in candidates if _imports_module(source, name)]
+    return needed or list(candidates)
+
+
 _BUNDLE_HELPERS = Path(__file__).resolve().parent / "bundle_helpers"
 
 
@@ -1115,7 +1160,18 @@ class CodegenEngine:
         toolset_imports = [d.import_name for lib in libraries for d in _depinf.import_names(lib)]
         if calculator:
             toolset_imports += [d.import_name for d in _depinf.import_names(calculator)]
-        import_names = list(dict.fromkeys(toolset_imports))
+        # Gate on what the SCRIPT needs, not on what the plan advertised. A plan
+        # can name more of a toolset than the code uses, and each unused member
+        # becomes a requirement no environment has to satisfy: a plan carrying
+        # both Psi4 and NWChem demanded the psi4 python package AND the nwchem
+        # binary, which are conda-only and provisioned in different envs, so no
+        # single env could pass however the run was set up (Slurm job 2580768).
+        import_names = _needed_imports(dict.fromkeys(toolset_imports), main_py)
+        # Same reasoning for the engine binary: only demand it when the script
+        # actually drives that engine.
+        if calculator_executable and calculator_import and not _imports_module(
+                main_py, calculator_import):
+            calculator_executable = None
         inline_tests_py = _smoke.generate_inline_tests(
             tool_name="+".join(libraries + ([calculator] if calculator else [])),
             required_import_names=import_names,
