@@ -12,6 +12,8 @@ Everything runs offline through injected fake runners -- no SSH, no cluster.
 Run from the repo root with:  pixi run pytest tests/unit/test_slurm_execution.py
 """
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -975,3 +977,68 @@ class TestOurOwnTimeoutStillReadsAsATimeout:
             status, _ = SlurmExecutionAdapter._classify(
                 JobState.FAILED, code, "", "999")
             assert status is not ExecutionStatus.TIMEOUT, code
+
+
+class TestScratchStaysOffTheSharedFilesystem:
+    """Calculation scratch belongs on node-local disk, not on GPFS.
+
+    quacc leaves SCRATCH_DIR unset, which resolves to RESULTS_DIR -> "." -> the run
+    directory on shared storage, and then moves the whole tmpdir into place when
+    the calculation finishes. On a network filesystem a file unlinked while still
+    open becomes a `.nfsXXXX` silly-rename stub and moving THAT fails with EBUSY --
+    so a Psi4 job that had already produced its gradient died in cleanup (Slurm job
+    2631900, "Device or resource busy: .../.nfs00000000ba0cbea800020ee0").
+
+    Measured on a compute node: the same unlink-while-open leaves a `.nfs...` entry
+    under /storage2 and nothing at all under /tmp, which is xfs and node-local.
+    """
+
+    def _payload(self, tmp_path, *, run_smoke=True):
+        bundle = tmp_path / "b"
+        bundle.mkdir(exist_ok=True)
+        for name in ("main.py", "inline_tests.py"):
+            (bundle / name).write_text("print(1)\n")
+        (bundle / "requirements.txt").write_text("quacc\n")
+        adapter = SlurmExecutionAdapter(
+            ClusterProfile.load("compute2"), host="",
+            request=SlurmRequest(cpu_count=2, gpu_count=0, max_time=1.0, ram=8000),
+            env_pythons=["/envs/psi4/bin/python"])
+        return adapter._env_payload(bundle, run_smoke=run_smoke,
+                                    install_deps=True)
+
+    def test_scratch_is_node_local(self, tmp_path):
+        payload = self._payload(tmp_path)
+        assert 'export QUACC_SCRATCH_DIR="${TMPDIR:-/tmp}/twain-${SLURM_JOB_ID:-$$}"' \
+            in payload
+        assert 'mkdir -p "$QUACC_SCRATCH_DIR"' in payload
+
+    def test_results_dir_is_left_alone(self, tmp_path):
+        """Results must land in the run directory -- /tmp is wiped and the login
+        node cannot read it."""
+        assert "QUACC_RESULTS_DIR" not in self._payload(tmp_path)
+
+    def test_it_is_exported_before_the_smoke_gate(self, tmp_path):
+        """The smoke run drives the same calculation path, and is where job
+        2631900 actually failed -- setting this only before the real launch would
+        have left the gate broken."""
+        payload = self._payload(tmp_path, run_smoke=True)
+        assert "inline_tests.py" in payload
+        assert payload.index("QUACC_SCRATCH_DIR") < payload.index("inline_tests.py")
+
+    def test_the_snippet_is_valid_shell_and_resolves_locally(self, tmp_path):
+        """Run the emitted lines for real: a local path, created, unique per job."""
+        script = tmp_path / "s.sh"
+        script.write_text(
+            "set -e\n"
+            'export QUACC_SCRATCH_DIR="${TMPDIR:-/tmp}/twain-${SLURM_JOB_ID:-$$}"\n'
+            'mkdir -p "$QUACC_SCRATCH_DIR"\n'
+            'echo "$QUACC_SCRATCH_DIR"\n'
+            '[ -d "$QUACC_SCRATCH_DIR" ] && echo created\n')
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        out = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                             env={**os.environ, "TMPDIR": str(tmp_path),
+                                  "SLURM_JOB_ID": "424242"})
+        assert out.returncode == 0, out.stderr
+        path, created = out.stdout.split()
+        assert path == f"{tmp_path}/twain-424242"
+        assert created == "created"
