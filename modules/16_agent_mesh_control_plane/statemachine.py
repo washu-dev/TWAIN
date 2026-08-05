@@ -2192,6 +2192,12 @@ class StateMachine:
         name = (plan.get("selected_method") or {}).get("calculator")
         return find_calculator(name)
 
+    def _selected_calculator_executable(self, plan: dict):
+        """The plan calculator's own binary, or None for a python-package engine."""
+        name = (plan.get("selected_method") or {}).get("calculator")
+        entry = find_calculator(name) if name else None
+        return getattr(entry, "executable", None) if entry else None
+
     def _build_slurm_adapter(self):
         """A SlurmExecutionAdapter wired from the cluster profile + the plan.
 
@@ -2274,6 +2280,9 @@ class StateMachine:
             user=os.environ.get("TWAIN_SLURM_USER"),
             workspace_root=str(self.artifacts_dir),
             env_pythons=env_pythons,
+            # An engine driven as a separate binary must not have its DRIVER script
+            # launched under mpirun -- see the adapter's _env_payload.
+            external_engine=bool(self._selected_calculator_executable(plan)),
             # Poll for as long as the job may legitimately run (its wall time)
             # plus queue headroom -- otherwise a 4-hour DFT run outlives the
             # adapter's default 2-hour wait and EXECUTE reports a bogus timeout.

@@ -370,7 +370,10 @@ def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
     assert "export OMP_NUM_THREADS=1" in payload
     # OpenMPI needs OPAL_PREFIX when invoked by path without env activation.
     assert 'export OPAL_PREFIX="$(dirname "$BIN")"' in payload
-    assert '  "$PY" main.py' in payload            # serial fallback branch
+    # Serial fallback branch, now bounded: a wedged engine or a hung MPI teardown
+    # must not idle out the whole allocation (job 2601849 burned 2h12m of 4h).
+    assert '  $TWAIN_TIMEOUT "$PY" main.py' in payload
+    assert 'TWAIN_TIMEOUT="timeout --signal=TERM --kill-after=30' in payload
 
 
 def test_env_payload_without_requirements_falls_back_to_system_python(tmp_path):
@@ -818,3 +821,82 @@ class TestLayeredVenvFallback:
         create = next(i for i, l in enumerate(lines)
                       if "-m venv --system-site-packages" in l)
         assert remove < create
+
+
+class TestMpiIsForInProcessEnginesOnly:
+    """Job 2601849 ran ~1 minute of work then idled 2h12m of a 4h allocation.
+
+    Its script drove NWChem as an external binary -- a relaxation then 6N
+    finite-difference displacements, each writing fixed filenames in the CWD --
+    and the payload launched that script under `mpirun -np 2`. Two ranks ran two
+    copies of it in one directory: nwchem_CO.nwo came back 0 bytes, the vib cache
+    was empty, ASE then read a displacement no rank had written
+    (KeyError '1x+'), the rank died, and the MPI teardown never completed.
+
+    GPAW is the opposite case: MPI-parallel in process, so every rank cooperates
+    in one calculation and wrapping the interpreter is exactly right. The registry
+    already distinguishes them -- an external engine declares an `executable`.
+    """
+
+    def _payload(self, tmp_path, *, external, max_time=240.0):
+        bundle = tmp_path / "b"
+        bundle.mkdir(exist_ok=True)
+        for name in ("main.py", "inline_tests.py"):
+            (bundle / name).write_text("print(1)\n")
+        (bundle / "requirements.txt").write_text("ase\n")
+        adapter = SlurmExecutionAdapter(
+            ClusterProfile.load("compute2"), host="",
+            request=SlurmRequest(cpu_count=2, gpu_count=0, max_time=max_time,
+                                 ram=8000),
+            env_pythons=["/envs/nwchem/bin/python"], external_engine=external)
+        return adapter._env_payload(bundle, install_deps=True, run_smoke=True)
+
+    def test_an_external_engine_is_not_launched_under_mpirun(self, tmp_path):
+        payload = self._payload(tmp_path, external=True)
+        assert "mpirun" not in payload, (
+            "N ranks of a file-by-file driver script share one CWD and corrupt "
+            "each other's engine inputs")
+        assert '"$PY" main.py' in payload
+
+    def test_an_in_process_engine_still_gets_mpi(self, tmp_path):
+        payload = self._payload(tmp_path, external=False)
+        assert '"$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"' in payload
+        assert "export OMP_NUM_THREADS=1" in payload
+
+    def test_the_mpirun_lookup_survives_a_layered_venv(self, tmp_path):
+        """A venv's bin/ holds python and pip, never mpirun.
+
+        Deriving the lookup from $PY alone would silently drop every layered run
+        to serial -- the layered venv was added in this same series of changes.
+        """
+        payload = self._payload(tmp_path, external=False)
+        assert ('if [ -n "$LAYERED" ]; then BIN="$(dirname "$BASE")";'
+                ' else BIN="$(dirname "$PY")"; fi') in payload
+
+    def test_the_run_is_bounded_below_the_allocation(self, tmp_path):
+        """Exit 124 a little short of the limit beats idling to the walltime."""
+        payload = self._payload(tmp_path, external=True, max_time=240.0)
+        assert "TWAIN_TIMEOUT=\"timeout --signal=TERM --kill-after=30 14280\"" in payload
+        assert "$TWAIN_TIMEOUT" in payload
+
+    def test_a_tiny_allocation_still_gets_a_positive_budget(self, tmp_path):
+        payload = self._payload(tmp_path, external=True, max_time=1.0)
+        assert "kill-after=30 60\"" in payload
+
+    def test_the_payload_is_valid_shell_both_ways(self, tmp_path):
+        import subprocess
+        for external in (True, False):
+            proc = subprocess.run(["bash", "-n"],
+                                  input=self._payload(tmp_path, external=external),
+                                  text=True, capture_output=True)
+            assert proc.returncode == 0, proc.stderr
+
+
+class TestTheRegistryDecidesWhoGetsMpi:
+    def test_external_engines_are_flagged_from_the_registry(self, tmp_path):
+        from method_discovery.calculator_registry import find_calculator
+        for name, expect_external in (("NWChem", True), ("Quantum ESPRESSO", True),
+                                      ("CP2K", True), ("DFTB+", True),
+                                      ("GPAW", False), ("xtb", False)):
+            entry = find_calculator(name)
+            assert bool(entry.executable) is expect_external, name
