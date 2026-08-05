@@ -162,3 +162,100 @@ class TestBudgetTracker:
         assert d["api_quota_prior"] == 10.0
         assert d["api_quota_remaining"] == 8.0
         assert d["projects"] == 0
+
+
+class TestApprovedComputeAllowance:
+    """The wall-time ceiling is a runaway backstop, not a cap on approved compute.
+
+    Run 6e9c32ae asked for 4 hours, was approved, computed its bulk modulus in 34
+    minutes, and was then failed at INTERPRET by the 30-minute default -- on a
+    Slurm job that had COMPLETED with exit 0. The result was already paid for.
+    """
+
+    def test_extending_raises_the_ceiling(self):
+        rb = RunBudget(wall_time_minutes=30)
+        assert rb.wall_time == 30 * 60
+        rb.extend_wall_time(4 * 60)
+        assert rb.wall_time == (30 + 240) * 60
+
+    def test_a_long_job_no_longer_trips_the_default(self):
+        """34 minutes elapsed, 30-minute default, 4-hour approved allocation."""
+        rb = RunBudget(max_cost=10.0, max_iterations=100, wall_time_minutes=30)
+        rb.start_time -= 34 * 60                     # pretend 34 minutes passed
+        with pytest.raises(OverMaxWallTime):
+            rb.check()
+        rb.extend_wall_time(4 * 60)
+        rb.check()                                   # must not raise
+
+    def test_it_never_lowers_the_ceiling(self):
+        rb = RunBudget(wall_time_minutes=30)
+        for bad in (0, -60, None, "", "abc", float("nan")):
+            rb.extend_wall_time(bad)
+            assert rb.wall_time >= 30 * 60
+
+    def test_a_runaway_pipeline_is_still_bounded(self):
+        """Only the approved allocation is added -- the limit is not removed."""
+        rb = RunBudget(max_cost=10.0, max_iterations=100, wall_time_minutes=30)
+        rb.extend_wall_time(60)
+        rb.start_time -= (30 + 60 + 1) * 60
+        with pytest.raises(OverMaxWallTime):
+            rb.check()
+
+    def test_the_snapshot_reports_the_extended_limit(self):
+        rb = RunBudget(wall_time_minutes=30)
+        rb.extend_wall_time(90)
+        assert rb.to_dict()["wall_time_limit_seconds"] == (30 + 90) * 60
+
+
+class TestOrchestratorAppliesTheAllowance:
+    """_allow_approved_compute reads the plan and extends once."""
+
+    def _harness(self, plan):
+        from orchestrator import Orchestrator
+
+        class Sm:
+            @staticmethod
+            def _load_artifact(name):
+                return plan if name == "execution_plan" else None
+
+        class Stub:
+            _allow_approved_compute = Orchestrator._allow_approved_compute
+
+            def __init__(self):
+                self.run_budget = RunBudget(wall_time_minutes=30)
+                self.sm = Sm()
+                self._compute_allowance_minutes = None
+                self.published = []
+
+            def _publish(self, event, payload):
+                self.published.append((event, payload))
+
+        return Stub()
+
+    def test_it_extends_from_the_plans_walltime(self):
+        s = self._harness({"slurm_request": {"max_time": 4.0}})
+        s._allow_approved_compute()
+        assert s.run_budget.wall_time == (30 + 240) * 60
+        assert s._compute_allowance_minutes == 240
+        assert s.published[0][0] == "run.budget_extended"
+
+    def test_it_applies_only_once(self):
+        s = self._harness({"slurm_request": {"max_time": 4.0}})
+        for _ in range(5):
+            s._allow_approved_compute()
+        assert s.run_budget.wall_time == (30 + 240) * 60
+        assert len(s.published) == 1
+
+    @pytest.mark.parametrize("plan", [
+        None, {}, {"slurm_request": None}, {"slurm_request": {}},
+        {"slurm_request": {"max_time": 0}},
+        {"slurm_request": {"max_time": -1}},
+        {"slurm_request": {"max_time": "4"}},      # wrong type, not trusted
+    ])
+    def test_no_usable_walltime_changes_nothing(self, plan):
+        """Before PLAN there is no allocation to allow for; stay at the default."""
+        s = self._harness(plan)
+        s._allow_approved_compute()
+        assert s.run_budget.wall_time == 30 * 60
+        assert s._compute_allowance_minutes is None
+        assert s.published == []

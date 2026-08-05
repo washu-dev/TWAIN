@@ -182,6 +182,9 @@ class Orchestrator:
             max_iterations=run_max_iterations,
             wall_time_minutes=run_wall_time_minutes,
         )
+        # Minutes added to the wall-time backstop for the plan's approved Slurm
+        # allocation; None until a plan exists. See _allow_approved_compute.
+        self._compute_allowance_minutes: Optional[float] = None
         project_budget = ProjectBudget(self.budget_tracker)
         project_budget.add_run(self.run_budget)
         self.budget_tracker.add_project(project_budget)
@@ -320,8 +323,41 @@ class Orchestrator:
                 agent.api_quota_remaining,
             )
 
+    def _allow_approved_compute(self) -> None:
+        """Extend the wall-time backstop to cover the allocation the plan asked for.
+
+        Applied once, as soon as an execution_plan exists. Without it the backstop
+        measures a Slurm job the researcher approved against a clock sized for
+        pipeline overhead: run 6e9c32ae asked for (and was granted) 4 hours,
+        computed its bulk modulus in 34 minutes, and was then failed at INTERPRET
+        by the 30-minute default -- the exact outcome this class of limit is
+        documented as having to avoid, since the result is already paid for.
+
+        Only the plan's own declared walltime is added, so a runaway pipeline is
+        still bounded: the ceiling becomes overhead + what was approved, not
+        unlimited.
+        """
+        if self._compute_allowance_minutes is not None:
+            return
+        try:
+            plan = self.sm._load_artifact("execution_plan") or {}
+        except Exception:  # noqa: BLE001 - no plan yet is the normal early case
+            return
+        hours = (plan.get("slurm_request") or {}).get("max_time")
+        if not isinstance(hours, (int, float)) or hours <= 0:
+            return
+        minutes = float(hours) * 60.0
+        self.run_budget.extend_wall_time(minutes)
+        self._compute_allowance_minutes = minutes
+        self._publish("run.budget_extended", {
+            "reason": "approved Slurm allocation",
+            "added_minutes": round(minutes, 1),
+            "wall_time_limit_seconds": self.run_budget.wall_time,
+        })
+
     def _check_budget(self) -> None:
         """Raise if the run has exceeded its cost, iteration, or wall-time limit."""
+        self._allow_approved_compute()
         self.run_budget.check()
 
     def _write_budget_artifact(self) -> None:

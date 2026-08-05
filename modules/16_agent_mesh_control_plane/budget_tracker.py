@@ -32,6 +32,24 @@ class RunBudget:
         self.wall_time = wall_time_minutes * 60
         self.start_time = time.time()
 
+    def extend_wall_time(self, minutes):
+        """Raise the wall-time ceiling by ``minutes`` (never lower it).
+
+        The ceiling is a backstop against a pipeline that will not stop looping,
+        not a cap on compute the researcher approved. A plan may legitimately ask
+        for hours of Slurm walltime, and EXECUTE blocks for all of it; measuring
+        that against the pipeline default aborts the run after the allocation is
+        already spent. Run 6e9c32ae failed at INTERPRET on a Slurm job that had
+        COMPLETED, exit 0, with a bulk modulus in hand -- 34 minutes of compute
+        thrown away against a 30-minute clock.
+        """
+        try:
+            extra = float(minutes)
+        except (TypeError, ValueError):
+            return
+        if extra > 0:
+            self.wall_time += extra * 60
+
     def add_cost(self, amount):
         self.cost += amount
 

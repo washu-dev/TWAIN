@@ -50,6 +50,24 @@ SILICON_INTENT = {
     "metadata": {"ambiguity": False, "confidence_scores": {"objective_confidence": 0.95}},
 }
 
+# A periodic solid, described the way the interpreter describes one: kind
+# "crystal" plus a space group. Its formula counts 3 atoms while the C15
+# primitive cell holds 6 -- the mismatch that made the old sizing ask for 2.
+CAPT2_INTENT = {
+    "objective": "compute the bulk modulus of CaPt2 (cubic Laves phase, C15)",
+    "domain": "materials",
+    "system_descriptors": {
+        "kind": "crystal",
+        "formula": "CaPt2",
+        "crystal": {"formula": "CaPt2", "name": "Calcium diplatinide",
+                    "phase": "cubic Laves phase (C15)", "crystal_system": "cubic",
+                    "space_group": "Fd-3m", "space_group_number": 227},
+    },
+    "acceptance_metrics": [{"metric_name": "bulk_modulus",
+                            "target_value": None, "tolerance": None}],
+    "metadata": {"ambiguity": False, "confidence_scores": {"objective_confidence": 0.95}},
+}
+
 ASPIRIN_INTENT = {
     "objective": "predict the aqueous solubility of aspirin",
     "domain": "materials",
@@ -271,6 +289,34 @@ class TestPlanningSelectsCalculator:
         # ... and the card is told it was a suggestion, and on what basis.
         assert "21-atom" in plan["slurm_rationale"]["cpu_count"]
         assert "suggestion" in plan["slurm_rationale"]["cpu_count"].lower()
+
+    def test_a_periodic_crystal_is_not_sized_from_its_formula(self, tmp_path):
+        """The CaPt2 regression, end to end through plan().
+
+        Formula atoms (CaPt2 -> 3) said 2 cores while the C15 cell's 10x10x10
+        mesh could spread over 24 ranks; job 2625288 took ~26x longer than the
+        same study on 24 (e496cf22). A periodic cell run by a rank-scaling
+        calculator now gets the floor, and the card says why.
+        """
+        m = _machine(tmp_path)
+        _seed_intent(m, tmp_path, CAPT2_INTENT)
+        m.decompose()
+        m.discover()
+        with patch.object(SM, "current_platform", return_value="linux-64"):
+            m.plan()
+        plan = m._load_artifact("execution_plan")
+
+        parallelism = m._selected_parallelism(plan)
+        if parallelism not in ("interpreter", "engine"):
+            pytest.skip(f"discovery chose a {parallelism}-parallel calculator here")
+
+        assert plan["slurm_request"]["cpu_count"] == 24
+        why = plan["slurm_rationale"]["cpu_count"]
+        assert "k-points" in why and "DENSE" in why
+        # ...and the quoted cost describes the allocation actually requested,
+        # not the default core count synthesize() started from.
+        assert plan["compute_estimate"]["cpu_hours"] == pytest.approx(
+            24 * plan["slurm_request"]["max_time"], rel=1e-3)
 
     def test_no_engine_note_when_everything_is_runnable(self, tmp_path):
         # Off-Slurm (or nothing vetoed): the note never appears.
