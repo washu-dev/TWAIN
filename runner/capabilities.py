@@ -22,7 +22,6 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,7 @@ def _load(path: Path) -> dict:
         return {}
 
 
-def _import_name_for(display_name: str) -> Optional[str]:
+def _import_name_for(display_name: str) -> str | None:
     """The module a library is imported as, via the dependency inferencer.
 
     The calculator registry states ``import_name`` outright; the discovery
@@ -72,9 +71,9 @@ def _import_name_for(display_name: str) -> Optional[str]:
     return deps[0].import_name if deps else None
 
 
-def registry_entries() -> List[dict]:
+def registry_entries() -> list[dict]:
     """Every library and calculator TWAIN knows about, with its import name."""
-    entries: List[dict] = []
+    entries: list[dict] = []
     for item in _load(DISCOVERY_REGISTRY).get("entries") or []:
         name = item.get("name")
         if not name:
@@ -108,7 +107,7 @@ def registry_entries() -> List[dict]:
     return entries
 
 
-def _envs_root() -> Optional[Path]:
+def _envs_root() -> Path | None:
     root = os.environ.get("TWAIN_ENVS_ROOT")
     if root:
         return Path(root)
@@ -120,7 +119,7 @@ def _envs_root() -> Optional[Path]:
     return Path(profile.envs_root) if getattr(profile, "envs_root", None) else None
 
 
-def env_interpreters(envs_root: Optional[Path] = None) -> Dict[str, str]:
+def env_interpreters(envs_root: Path | None = None) -> dict[str, str]:
     """``{env name: python path}`` for the envs that actually exist on disk.
 
     Read from the filesystem rather than from the env SPECS: a spec that has
@@ -142,12 +141,17 @@ def env_interpreters(envs_root: Optional[Path] = None) -> Dict[str, str]:
     return found
 
 
-def _probe(python: str, modules: List[str], timeout: float) -> Dict[str, bool]:
+def _probe(python: str, modules: list[str], timeout: float) -> dict[str, bool]:
     """find_spec verdicts from one interpreter, or empty when it can't be asked."""
     if not modules:
         return {}
     try:
-        done = subprocess.run(
+        # noqa: S603 -- nothing here is untrusted. The argv is a fixed constant
+        # (_PROBE) plus an interpreter path derived from deployment config
+        # (TWAIN_ENVS_ROOT / the cluster profile's envs_root), never from a request
+        # or a registry field. The module names are the only variable input and they
+        # travel on STDIN precisely so they never reach argv, and shell=False.
+        done = subprocess.run(  # noqa: S603
             [python, "-c", _PROBE],
             input=json.dumps(modules),
             capture_output=True, text=True, timeout=timeout, check=False,
@@ -172,7 +176,7 @@ def _env_key(name: str) -> str:
     return "".join(ch for ch in name.lower() if ch.isalnum())
 
 
-def _search_order(envs: Dict[str, str], name: str) -> List[str]:
+def _search_order(envs: dict[str, str], name: str) -> list[str]:
     """Envs to credit for a hit, most specific first.
 
     Alphabetical order was actively misleading: every env inherits the common
@@ -187,16 +191,16 @@ def _search_order(envs: Dict[str, str], name: str) -> List[str]:
     return named + default + rest
 
 
-def resolve_availability(entries: Optional[List[dict]] = None,
-                         envs: Optional[Dict[str, str]] = None,
-                         *, envs_root: Optional[Path] = None,
-                         timeout: float = 90.0) -> List[dict]:
+def resolve_availability(entries: list[dict] | None = None,
+                         envs: dict[str, str] | None = None,
+                         *, envs_root: Path | None = None,
+                         timeout: float = 90.0) -> list[dict]:
     """Decide installed/not for each entry, naming the env that provides it."""
     entries = registry_entries() if entries is None else entries
     envs = env_interpreters(envs_root) if envs is None else envs
     modules = sorted({e["import_name"] for e in entries if e.get("import_name")})
 
-    verdicts: Dict[str, Dict[str, bool]] = {}
+    verdicts: dict[str, dict[str, bool]] = {}
     for env_name in sorted(envs):
         verdicts[env_name] = _probe(envs[env_name], modules, timeout)
 
