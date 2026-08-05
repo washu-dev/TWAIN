@@ -291,6 +291,64 @@ def test_validate_poor_agreement_routes_to_replan(machine, tmp_path):
     assert machine.context.validation_result == "rejected"
 
 
+def test_an_unspecified_target_is_not_judged_against_zero(machine, tmp_path):
+    """A metric with no number to hit must be delivered, not measured from 0.
+
+    This is what makes a null target safe to represent at all (session 79761036:
+    a CaPt2 bulk modulus with no researcher-supplied target). The criterion is
+    skipped rather than coerced -- a 0.0 default would make a correct 158 GPa look
+    like a 158-unit miss and reject it.
+    """
+    plan = dict(PLAN, acceptance_metrics=[
+        {"metric_name": "bulk_modulus", "target_value": None, "tolerance": None}])
+    _seed(machine, tmp_path, "execution_plan", plan)
+
+    status, rationale, gap = machine._acceptance_fallback(
+        {"primary_metric": {"name": "bulk_modulus", "value": 158.0},
+         "secondary_metrics": []})
+
+    assert status == "accepted"
+    assert "without external validation" in rationale
+    assert "vs target" not in rationale  # nothing was judged, so nothing invented
+    assert gap is None
+
+
+def test_a_zero_placeholder_rejects_a_correct_answer(machine, tmp_path):
+    """Why null has to be representable: 0.0 is not a harmless "unset".
+
+    Session 1fed66e6 ran the same CaPt2 request one hour earlier and passed PLAN
+    because its target was 0/0 -- valid numbers. It never reached VALIDATE (the
+    researcher terminated it), but had it finished, a correct ~158 GPa would have
+    been measured from zero, rejected, and sent to REPLAN to "fix" a right answer.
+    A loud PLAN failure was the better of the two outcomes; neither is acceptable.
+    """
+    plan = dict(PLAN, acceptance_metrics=[
+        {"metric_name": "bulk_modulus", "target_value": 0, "tolerance": 0}])
+    _seed(machine, tmp_path, "execution_plan", plan)
+
+    status, rationale, gap = machine._acceptance_fallback(
+        {"primary_metric": {"name": "bulk_modulus", "value": 158.0},
+         "secondary_metrics": []})
+
+    assert status == "rejected"
+    assert "vs target 0 +/- 0" in rationale
+    assert gap == 158.0
+
+
+def test_a_real_target_is_still_judged(machine, tmp_path):
+    """The guard above must not have turned every criterion into a free pass."""
+    plan = dict(PLAN, acceptance_metrics=[
+        {"metric_name": "bulk_modulus", "target_value": 180.0, "tolerance": 1.0}])
+    _seed(machine, tmp_path, "execution_plan", plan)
+
+    status, rationale, _ = machine._acceptance_fallback(
+        {"primary_metric": {"name": "bulk_modulus", "value": 158.0},
+         "secondary_metrics": []})
+
+    assert status == "rejected"
+    assert "vs target 180" in rationale
+
+
 def test_validate_rerun_loop_is_bounded(machine, tmp_path):
     """A second identical marginal result converges: deliver flagged, not loop."""
     _seed_planning(machine, tmp_path)

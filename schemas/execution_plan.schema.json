@@ -83,10 +83,12 @@
             "type": "string"
           },
           "target_value": {
-            "type":"number"
+            "type":["number","null"],
+            "description":"null means the researcher named this metric but gave no number to hit. Still required, so 'unspecified' is stated rather than left out -- a 0.0 placeholder would be judged literally."
           },
           "tolerance":{
-            "type":"number"
+            "type":["number","null"],
+            "description":"null when target_value is null: there is no band to be inside of."
           }
         }
       }

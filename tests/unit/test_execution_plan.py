@@ -184,7 +184,51 @@ class TestAcceptanceMetric:
 
     def test_tolerance_must_be_number(self):
         with pytest.raises(ValueError):
-            AcceptanceMetric(metric_name="energy", target_value=-5.2, tolerance=None)
+            AcceptanceMetric(metric_name="energy", target_value=-5.2, tolerance="x")
+
+    def test_null_target_means_the_researcher_gave_no_number(self):
+        """Unspecified has to be representable, or the honest encoding is fatal.
+
+        Session 79761036 asked for a CaPt2 bulk modulus "validated against the
+        Materials Project reference" and named no number. An agent rewrote the
+        placeholder 0.0/0.0 to null/null -- correctly, since 0 GPa is not a
+        physically meaningful target and VALIDATE would have compared against it
+        literally -- and PLAN died with "target_value must be of type number".
+        """
+        a = AcceptanceMetric(
+            metric_name="bulk_modulus", target_value=None, tolerance=None)
+        assert a.target_value is None
+        assert a.tolerance is None
+
+    def test_a_target_without_a_tolerance_is_still_allowed(self):
+        a = AcceptanceMetric(
+            metric_name="bulk_modulus", target_value=180.0, tolerance=None)
+        assert (a.target_value, a.tolerance) == (180.0, None)
+
+    @pytest.mark.parametrize("bad", [True, [1, 2], {"v": 1}, "1.17 eV"])
+    def test_a_wrong_type_is_still_a_bug_worth_failing_on(self, bad):
+        """Only null is special. bool included: type(True) is bool, never int."""
+        with pytest.raises(ValueError):
+            AcceptanceMetric(metric_name="e", target_value=bad, tolerance=0.1)
+        with pytest.raises(ValueError):
+            AcceptanceMetric(metric_name="e", target_value=1.0, tolerance=bad)
+
+    def test_a_plan_carrying_an_unspecified_metric_constructs(self, example_dict):
+        """The actual crash site: ExecutionPlan builds AcceptanceMetric(**dict).
+
+        Verbatim from session 79761036's intent_spec, extra keys included -- the
+        plan filters to known fields, so units/note must not break construction.
+        """
+        example_dict["acceptance_metrics"] = [{
+            "metric_name": "bulk_modulus",
+            "target_value": None,
+            "tolerance": None,
+            "units": "GPa",
+            "note": "No explicit numeric target value was provided by the user.",
+        }]
+        plan = ExecutionPlan(**example_dict)
+        assert plan.acceptance_metrics[0].metric_name == "bulk_modulus"
+        assert plan.acceptance_metrics[0].target_value is None
 
 
 # --------------------------------------------------------------------------- #

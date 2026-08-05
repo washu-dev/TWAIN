@@ -82,16 +82,32 @@ class ExecutionPlanMetadata:
 
 @dataclass
 class AcceptanceMetric:
+    # None means "the researcher named this metric but gave no number to hit".
+    # That has to be representable, because the alternatives are worse: a 0.0
+    # placeholder is a lie VALIDATE acts on (it compared a bulk modulus against
+    # 0 GPa and rejected a good result), and inventing a target puts a number the
+    # researcher never supplied into the acceptance report. Session 79761036 died
+    # in PLAN because an agent correctly rewrote a placeholder 0.0/0.0 to
+    # null/null -- reasoning that 0 GPa is not physically meaningful -- and the
+    # schema had no way to express it, so the only honest encoding was fatal.
+    #
+    # Nothing downstream needs a number: VALIDATE skips a criterion it cannot
+    # turn into a float and reports the result as delivered without external
+    # validation, which is exactly right when no target was ever given.
     metric_name: str
-    target_value: float
-    tolerance: float
+    target_value: Optional[float]
+    tolerance: Optional[float]
     def __post_init__(self):
         if self.metric_name is None or type(self.metric_name) is not str:
             raise ValueError("AcceptanceMetric metric_name must be of type str")
-        if self.target_value is None or type(self.target_value) not in (int, float):
-            raise ValueError("AcceptanceMetric target_value must be of type number")
-        if self.tolerance is None or type(self.tolerance) not in (int, float):
-            raise ValueError("AcceptanceMetric tolerance must be of type number")
+        # A wrong *type* is still a bug worth failing on -- "1.17 eV" or [1, 2]
+        # means the upstream agent misunderstood the field. Only null is allowed
+        # through, and only because it carries a meaning. bool is excluded by the
+        # exact-type check: type(True) is bool, so True can never pass as 1.
+        if self.target_value is not None and type(self.target_value) not in (int, float):
+            raise ValueError("AcceptanceMetric target_value must be a number or null")
+        if self.tolerance is not None and type(self.tolerance) not in (int, float):
+            raise ValueError("AcceptanceMetric tolerance must be a number or null")
 
 
 @dataclass
