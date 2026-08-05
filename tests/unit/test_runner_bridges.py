@@ -128,3 +128,33 @@ def test_the_runner_wires_the_hook_to_the_orchestrator():
         sink.flush_artifacts()
         # bound to THIS run's orchestrator, not a stale or global one
         assert capture.call_args.args[1:] == ("sess-1", "the-orchestrator")
+
+
+def test_recapturing_an_artifact_keeps_its_original_timestamp():
+    """created_at must mean "created", so the ordering stays auditable.
+
+    A run captures twice by design -- once before the terminal event, once from
+    the runner's finally block as a backstop. While the upsert refreshed
+    created_at, the second write reset every timestamp, so the column reported
+    when the backstop ran and there was no way to check from data whether the
+    results were committed before the run announced itself finished. A real run
+    (460a1260) therefore still read as "status 13.7s before the last artifact"
+    after the ordering was fixed.
+    """
+    from runner.db import RunnerDB
+
+    sql = []
+
+    class Db(RunnerDB):
+        def __init__(self):
+            pass
+
+        def _execute(self, statement, params=None):
+            sql.append(" ".join(statement.split()))
+
+    Db().upsert_artifact("s", "execution_result", "{}", "json")
+    assert len(sql) == 1
+    assert "ON CONFLICT (session_id, name) DO UPDATE SET" in sql[0]
+    assert "kind = EXCLUDED.kind" in sql[0]
+    assert "content = EXCLUDED.content" in sql[0]
+    assert "created_at" not in sql[0]
