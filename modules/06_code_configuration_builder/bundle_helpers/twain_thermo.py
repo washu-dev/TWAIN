@@ -35,6 +35,7 @@ molecule more stable than its constituent elements.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import Dict, Iterable, Mapping, Optional
 
@@ -42,9 +43,11 @@ __all__ = [
     "EV_TO_KJ_PER_MOL",
     "ThermoError",
     "atomization_enthalpy",
+    "canonical_formula",
     "formation_enthalpy",
     "formation_enthalpy_via_reaction",
     "monatomic_enthalpy_correction",
+    "parse_formula",
     "reaction_enthalpy",
     "species",
     "stoichiometry",
@@ -64,22 +67,202 @@ class ThermoError(ValueError):
     """
 
 
+_FORMULA_TOKEN = re.compile(
+    r"(?P<open>[(\[{])"
+    r"|(?P<close>[)\]}])(?P<group_count>\d*)"
+    r"|(?P<element>[A-Z][a-z]?)(?P<count>\d*)"
+)
+# Hydrate / adduct separators, as they are actually written: CuSO4·5H2O,
+# CuSO4.5H2O, Na2CO3*10H2O.
+_SEPARATORS = "·•⋅∙*."
+# Charge markers. Rejected rather than stripped -- see parse_formula.
+_CHARGE = re.compile(r"[+\-^]|\d+[+\-]")
+
+
+def _parse_groups(text: str, original: str) -> Dict[str, int]:
+    """One formula segment, honouring nested ``()``/``[]``/``{}`` multipliers.
+
+    A stack, because the notation nests: ``K4[Fe(CN)6]3`` closes an inner group
+    inside an outer one, and each close multiplies everything it collected.
+    """
+    stack: list = [{}]
+    position = 0
+    for match in _FORMULA_TOKEN.finditer(text):
+        if match.start() != position:
+            raise ThermoError(_unreadable(original))
+        position = match.end()
+        if match.group("open"):
+            stack.append({})
+        elif match.group("close"):
+            if len(stack) == 1:
+                raise ThermoError(f"unbalanced brackets in {original!r}")
+            group = stack.pop()
+            if not group:
+                raise ThermoError(f"empty group in {original!r}")
+            digits = match.group("group_count")
+            multiplier = int(digits) if digits else 1
+            if multiplier < 1:
+                raise ThermoError(f"group multiplier must be >= 1 in {original!r}")
+            for element, n in group.items():
+                stack[-1][element] = stack[-1].get(element, 0) + n * multiplier
+        else:
+            element = match.group("element")
+            digits = match.group("count")
+            n = int(digits) if digits else 1
+            if n < 1:
+                raise ThermoError(f"element count must be >= 1 in {original!r}")
+            stack[-1][element] = stack[-1].get(element, 0) + n
+    if position != len(text):
+        raise ThermoError(_unreadable(original))
+    if len(stack) != 1:
+        raise ThermoError(f"unbalanced brackets in {original!r}")
+    return stack[0]
+
+
+def _unreadable(original: str) -> str:
+    return (f"could not read {original!r} as a chemical formula (expected e.g. "
+            f"'CO2', 'O2', 'Mg(OH)2', 'CuSO4·5H2O')")
+
+
+def parse_formula(text: str) -> Dict[str, int]:
+    """``{element: count}`` from a formula string: ``"CO2" -> {"C": 1, "O": 2}``.
+
+    A formula is neither an iterable of symbols nor a single symbol, and treating
+    it as either corrupts it. Iterating ``"CO2"`` yields ``"C"``, ``"O"``, ``"2"``;
+    taking the whole string as one symbol -- which this module used to do -- makes
+    ``"CO"`` the *element* CO and ``"O2"`` the *element* O2. That produced the
+    lookup keys ``"CO1"`` and ``"O21"``, so a reference table written the obvious
+    way (``{"CO": -110.53, "O2": 0.0}``) could never match and a CO2 formation run
+    died at ``no standard formation enthalpy for CO1, O21`` (Slurm job 2629667).
+
+    It also hid a worse failure: ``{"CO2": 1}`` sums to ONE atom, so a polyatomic
+    molecule looked monatomic and the guard demanding its ``H(T) - E_elec``
+    could not fire -- a missing correction would have silently taken 5/2 kT and
+    dropped the zero-point energy.
+
+    Handles the notation chemists actually write: nested groups
+    (``Ca3(PO4)2``, ``K4[Fe(CN)6]3``) and hydrates/adducts with any of the usual
+    separators (``CuSO4·5H2O``, ``CuSO4.5H2O``, ``Na2CO3*10H2O``). Written against
+    the standard library on purpose -- this file is copied verbatim into every
+    RunBundle, including ones that ship neither ASE nor pymatgen, so it cannot
+    borrow their parsers. The tests cross-check it against ASE's, which is where
+    that authority belongs.
+
+    Two deliberate refusals, because both would otherwise produce a confident
+    wrong number:
+
+    * a CHARGE (``SO4^2-``, ``Fe3+``) is rejected rather than ignored -- silently
+      dropping it makes Fe2+ and Fe3+ the same species;
+    * anything else it cannot read raises, since a misparsed formula yields a
+      plausible enthalpy.
+
+    >>> parse_formula("CO2") == {"C": 1, "O": 2}
+    True
+    >>> parse_formula("Mg(OH)2") == {"Mg": 1, "O": 2, "H": 2}
+    True
+    >>> parse_formula("Ca3(PO4)2") == {"Ca": 3, "P": 2, "O": 8}
+    True
+    >>> parse_formula("CuSO4·5H2O") == {"Cu": 1, "S": 1, "O": 9, "H": 10}
+    True
+    """
+    if not isinstance(text, str):
+        raise ThermoError(f"expected a formula string, got {type(text).__name__}")
+    stripped = text.strip()
+    if not stripped:
+        raise ThermoError("empty formula")
+    if _CHARGE.search(stripped):
+        raise ThermoError(
+            f"{text!r} carries a charge; this cycle works from gas-phase "
+            f"electronic energies, and dropping the charge would make e.g. Fe2+ "
+            f"and Fe3+ the same species. Supply a neutral formula.")
+
+    segments = [s for s in _split_segments(stripped)]
+    if any(not s for s in segments):
+        raise ThermoError(_unreadable(text))
+
+    counts: Dict[str, int] = {}
+    for index, segment in enumerate(segments):
+        # A leading integer is a HYDRATE count, and only after a separator:
+        # "CuSO4·5H2O" has five waters. On the first segment it would instead be a
+        # stoichiometric coefficient -- "2CO" -- which belongs in species(
+        # coefficient=...), not in the formula. Folding it in here would double
+        # count it against a coefficient the caller also passed, so it is refused.
+        leading = re.match(r"^(\d+)(.+)$", segment) if index else None
+        multiplier, body = (int(leading.group(1)), leading.group(2)) if leading \
+            else (1, segment)
+        if multiplier < 1:
+            raise ThermoError(f"hydrate multiplier must be >= 1 in {text!r}")
+        for element, n in _parse_groups(body, text).items():
+            counts[element] = counts.get(element, 0) + n * multiplier
+    if not counts:
+        raise ThermoError(_unreadable(text))
+    return counts
+
+
+def _split_segments(text: str) -> list:
+    """Split a hydrate/adduct on its separator, keeping the pieces in order."""
+    out, current = [], []
+    for char in text:
+        if char in _SEPARATORS:
+            out.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    out.append("".join(current))
+    return out
+
+
 def stoichiometry(atoms_or_symbols) -> Dict[str, int]:
-    """``{element: count}`` for an ASE ``Atoms`` or any iterable of symbols.
+    """``{element: count}`` for an ASE ``Atoms``, a formula string, or symbols.
 
     >>> stoichiometry(["C", "O", "O"]) == {"C": 1, "O": 2}
+    True
+    >>> stoichiometry("CO2") == {"C": 1, "O": 2}
     True
     """
     if hasattr(atoms_or_symbols, "get_chemical_symbols"):
         symbols: Iterable[str] = atoms_or_symbols.get_chemical_symbols()
     elif isinstance(atoms_or_symbols, str):
-        symbols = [atoms_or_symbols]
+        # A string is a FORMULA, parsed as one. Callers write species("CO2", ...)
+        # and reference tables keyed "CO"/"O2"; both have to mean what they say.
+        return parse_formula(atoms_or_symbols)
     else:
         symbols = atoms_or_symbols
     counts = Counter(str(s) for s in symbols)
     if not counts:
         raise ThermoError("no atoms: cannot build a thermochemical cycle")
     return dict(counts)
+
+
+def _by_species(mapping: Mapping[str, float]) -> Dict[str, float]:
+    """Re-key a caller's reference table by species rather than by spelling.
+
+    Applied to EVERY reference lookup in this module, not just the reaction one.
+    The same trap exists for the element-keyed tables: codegen used to instruct
+    models to key references "by formula with elements sorted", which yields
+    ``{"C1": 716.68, "O1": 249.18}`` for an atom table just as readily as
+    ``{"C1O1": ...}`` for a reaction one -- and a raw dict lookup rejects both.
+
+    An unparseable key is kept verbatim rather than dropped, so it simply fails to
+    match and the caller is told what is missing alongside what was supplied.
+    """
+    out: Dict[str, float] = {}
+    for key, value in mapping.items():
+        try:
+            out[canonical_formula(key)] = float(value)
+        except (ThermoError, TypeError, ValueError):
+            out[str(key)] = value
+    return out
+
+
+def canonical_formula(atoms_or_symbols) -> str:
+    """One spelling for a species, whatever it was written as.
+
+    ``"CO"``, ``"OC"``, ``"C1O1"`` and ``["C", "O"]`` all become ``"CO"``. Used on
+    BOTH sides of every reference lookup, so a table keyed the way a chemist
+    writes it matches a species built from an ASE object.
+    """
+    return _formula(stoichiometry(atoms_or_symbols))
 
 
 def monatomic_enthalpy_correction(temperature: float = 298.15) -> float:
@@ -118,6 +301,7 @@ def atomization_enthalpy(
     electronic-degeneracy term), never to zero one out.
     """
     counts = stoichiometry(atoms_or_symbols)
+    atom_energies = _by_species(atom_energies)
     missing = sorted(el for el in counts if el not in atom_energies)
     if missing:
         raise ThermoError(
@@ -128,7 +312,8 @@ def atomization_enthalpy(
     default_correction = monatomic_enthalpy_correction(temperature)
     total_atoms = 0.0
     for element, n in counts.items():
-        correction = (atom_corrections or {}).get(element, default_correction)
+        correction = _by_species(atom_corrections or {}).get(
+            element, default_correction)
         total_atoms += n * (atom_energies[element] + correction)
     return total_atoms - (molecule_energy + molecule_correction)
 
@@ -149,6 +334,7 @@ def formation_enthalpy(
     algebra, not the thermochemical data.
     """
     counts = stoichiometry(atoms_or_symbols)
+    atom_formation_enthalpies_kj = _by_species(atom_formation_enthalpies_kj)
     missing = sorted(el for el in counts
                      if el not in atom_formation_enthalpies_kj)
     if missing:
@@ -184,7 +370,14 @@ def species(symbols, energy: float, *, correction: Optional[float] = None,
 
 
 def _formula(counts: Mapping[str, int]) -> str:
-    return "".join(f"{el}{counts[el]}" for el in sorted(counts))
+    """Canonical spelling, counts of 1 omitted: ``{"C":1,"O":2}`` -> ``"CO2"``.
+
+    Readable on purpose. It is an internal identity key, but it also reaches the
+    researcher through every error message here, and "no standard formation
+    enthalpy for C1O1, O2" sends someone hunting for a species they never wrote.
+    """
+    return "".join(f"{el}{counts[el] if counts[el] != 1 else ''}"
+                   for el in sorted(counts))
 
 
 def _enthalpy(entry: Mapping, temperature: float) -> float:
@@ -239,10 +432,15 @@ def formation_enthalpy_via_reaction(
     """``dHf(target)`` in kJ/mol by Hess's law from a balanced reaction.
 
     The target must appear among ``products``. Every OTHER species in the
-    reaction needs a known standard formation enthalpy, keyed by formula as
-    :func:`_formula` spells it (``"C1O1"`` for CO, ``"O2"`` for O2) -- 0.0 for an
-    element in its standard state. Those are reference data the caller supplies;
-    this module owns the algebra and the signs, not the thermochemical tables.
+    reaction needs a known standard formation enthalpy -- 0.0 for an element in
+    its standard state. Those are reference data the caller supplies; this module
+    owns the algebra and the signs, not the thermochemical tables.
+
+    Keys are matched by SPECIES, not by spelling: ``{"CO": -110.53, "O2": 0.0}``
+    is normalised the same way the reaction's own species are, so a table written
+    the way a chemist writes it matches, and so does ``"OC"`` or ``"C1O1"``.
+    Requiring one internal spelling was a trap nobody could satisfy from the
+    outside.
 
     ``dHf(target) = [dH_rxn + sum v dHf(reactants) - sum v dHf(other products)] / v_target``
     """
@@ -256,19 +454,24 @@ def formation_enthalpy_via_reaction(
             f"solves for a product's formation enthalpy")
     coefficient = sum(m["coefficient"] for m in matches)
 
+    # Normalise the caller's table onto the same keys the species carry, so the
+    # match is on the species and not on how either side spelled it. An
+    # unparseable key is kept verbatim rather than dropped: it simply will not
+    # match, and the error below then names what is actually missing.
+    references = _by_species(reference_formation_enthalpies_kj)
+
     others = reactants + [p for p in products if p["formula"] != target]
-    missing = sorted({o["formula"] for o in others
-                      if o["formula"] not in reference_formation_enthalpies_kj})
+    missing = sorted({o["formula"] for o in others if o["formula"] not in references})
     if missing:
         raise ThermoError(
             f"no standard formation enthalpy for {', '.join(missing)}; supply one "
             f"per reference species (0.0 for an element in its standard state) "
-            f"rather than omitting it")
+            f"rather than omitting it. Supplied: "
+            f"{', '.join(sorted(references)) or '(none)'}")
 
     d_rxn_kj = reaction_enthalpy(reactants, products,
                                  temperature=temperature) * EV_TO_KJ_PER_MOL
-    known = sum(r["coefficient"] * reference_formation_enthalpies_kj[r["formula"]]
-                for r in reactants)
-    known -= sum(p["coefficient"] * reference_formation_enthalpies_kj[p["formula"]]
+    known = sum(r["coefficient"] * references[r["formula"]] for r in reactants)
+    known -= sum(p["coefficient"] * references[p["formula"]]
                  for p in products if p["formula"] != target)
     return (d_rxn_kj + known) / coefficient

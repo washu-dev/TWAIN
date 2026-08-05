@@ -226,3 +226,207 @@ class TestErrorCancellingReactionRoute:
                  tt.species(["O", "O"], 0.0, correction=0.0, coefficient=0.5)],
                 [tt.species(["C", "O", "O"], 0.0, correction=0.0)],
                 {"O2": 0.0})   # CO missing
+
+
+class TestAFormulaStringIsAFormula:
+    """A string names a SPECIES, not one element and not a list of symbols.
+
+    Every existing test here passes FakeAtoms or a symbol list, so nothing
+    exercised the string path -- which is how this reached the cluster. A CO2
+    formation run written the obvious way died at
+    ``no standard formation enthalpy for CO1, O21`` (Slurm job 2629667): the
+    string branch took "CO" to be the element CO and "O2" to be the element O2,
+    then appended the count.
+    """
+
+    @pytest.mark.parametrize("text,expected", [
+        ("CO2", {"C": 1, "O": 2}),
+        ("O2", {"O": 2}),
+        ("CO", {"C": 1, "O": 1}),
+        ("C", {"C": 1}),
+        ("H2O", {"H": 2, "O": 1}),
+        ("CH4", {"C": 1, "H": 4}),
+        ("NaCl", {"Na": 1, "Cl": 1}),        # two-letter symbol
+        ("C6H12O6", {"C": 6, "H": 12, "O": 6}),
+        ("  CO2  ", {"C": 1, "O": 2}),       # whitespace tolerated
+        ("OC", {"O": 1, "C": 1}),            # order irrelevant
+    ])
+    def test_parse_formula(self, text, expected):
+        assert tt.parse_formula(text) == expected
+
+    @pytest.mark.parametrize("junk", [
+        "", "   ", "co2", "CO2(g)", "x", "-1", 42, None,
+        "2CO", "3H2O",              # a coefficient belongs in species(coefficient=)
+        "CO2(", "CO2)", "()", "Mg(OH",  # unbalanced / empty groups
+        "SO4^2-", "Fe3+", "Ca2+",   # charges: dropping one conflates Fe2+ with Fe3+
+        "CO2·", "·H2O",             # dangling separator
+    ])
+    def test_unparseable_raises_rather_than_guessing(self, junk):
+        """A silently wrong formula yields a plausible number, which is the whole
+        failure mode this module exists to prevent."""
+        with pytest.raises(tt.ThermoError):
+            tt.parse_formula(junk)
+
+    def test_stoichiometry_reads_a_string_as_a_formula(self):
+        assert tt.stoichiometry("CO2") == {"C": 1, "O": 2}
+        assert tt.stoichiometry("O2") == {"O": 2}
+        # ...and still handles the shapes it always did.
+        assert tt.stoichiometry(["C", "O", "O"]) == {"C": 1, "O": 2}
+        assert tt.stoichiometry(FakeAtoms(["C", "O", "O"])) == {"C": 1, "O": 2}
+
+    def test_a_polyatomic_string_is_not_mistaken_for_one_atom(self):
+        """The silent half of the bug.
+
+        {"CO2": 1} sums to ONE atom, so a polyatomic looked monatomic: the guard
+        demanding H(T)-E_elec could not fire, and a missing correction would have
+        taken 5/2 kT and quietly dropped the zero-point energy.
+        """
+        entry = tt.species("CO2", -1030.0)          # correction deliberately omitted
+        assert sum(entry["counts"].values()) == 3
+        with pytest.raises(tt.ThermoError, match="polyatomic"):
+            tt.reaction_enthalpy([entry], [tt.species("CO2", -1030.0, correction=0.0)])
+
+    def test_canonical_formula_is_readable_and_spelling_agnostic(self):
+        for spelling in ("CO", "OC", "C1O1", ["C", "O"]):
+            assert tt.canonical_formula(spelling) == "CO"
+        assert tt.canonical_formula("CO2") == "CO2"
+        assert tt.canonical_formula(["O", "O"]) == "O2"
+
+
+class TestReferenceKeysMatchBySpeciesNotSpelling:
+    """The reported crash: a reference table keyed the way a chemist writes it.
+
+    The contract used to demand one internal spelling ("C1O1" for CO), which no
+    caller could be expected to produce -- and the generated script wrote
+    {"CO": -110.53, "O2": 0.0}, as anyone would.
+    """
+
+    def _cycle(self, table):
+        return tt.formation_enthalpy_via_reaction(
+            "CO2",
+            [tt.species("CO", -1.0, correction=0.0, coefficient=1.0),
+             tt.species("O2", -2.0, correction=0.0, coefficient=0.5)],
+            [tt.species("CO2", -5.0, correction=0.0, coefficient=1.0)],
+            table,
+        )
+
+    def test_the_generated_scripts_table_works(self):
+        assert self._cycle({"CO": -110.53, "O2": 0.0}) == pytest.approx(-399.99, abs=0.01)
+
+    @pytest.mark.parametrize("table", [
+        {"CO": -110.53, "O2": 0.0},
+        {"C1O1": -110.53, "O2": 0.0},
+        {"OC": -110.53, "O2": 0.0},
+        {"CO": -110.53, "OO": 0.0},
+    ])
+    def test_every_spelling_gives_the_same_answer(self, table):
+        assert self._cycle(table) == pytest.approx(self._cycle({"CO": -110.53, "O2": 0.0}))
+
+    def test_a_genuinely_missing_species_still_raises(self):
+        """Normalising must not turn a real omission into a silent zero."""
+        with pytest.raises(tt.ThermoError, match="no standard formation enthalpy"):
+            self._cycle({"O2": 0.0})
+
+    def test_the_error_names_what_was_supplied(self):
+        """"missing CO" while the caller believes they supplied it is the confusing
+        case; listing both sides makes a spelling problem self-evident."""
+        with pytest.raises(tt.ThermoError, match="Supplied: O2"):
+            self._cycle({"O2": 0.0})
+
+    def test_the_error_uses_readable_formulas(self):
+        """Not "CO1"/"O21", and not "C1O1" either."""
+        with pytest.raises(tt.ThermoError) as excinfo:
+            self._cycle({})
+        message = str(excinfo.value)
+        assert "CO" in message and "O2" in message
+        assert "CO1" not in message and "O21" not in message and "C1O1" not in message
+
+
+class TestEveryReferenceLookupMatchesBySpecies:
+    """The normalisation is module-wide, not only in the function that broke.
+
+    The old codegen note told models to key references "by formula with elements
+    sorted", which yields {"C1": 716.68, "O1": 249.18} for an ATOM table exactly
+    as readily as {"C1O1": ...} for a reaction one -- so fixing only the reaction
+    path would have left the same trap in the other two.
+    """
+
+    def test_atomization_accepts_count_suffixed_atom_keys(self):
+        plain = tt.atomization_enthalpy(
+            FakeAtoms(["C", "O", "O"]), E_CO2, {"C": E_C, "O": E_O},
+            molecule_correction=CORR_CO2_EV)
+        suffixed = tt.atomization_enthalpy(
+            FakeAtoms(["C", "O", "O"]), E_CO2, {"C1": E_C, "O1": E_O},
+            molecule_correction=CORR_CO2_EV)
+        assert suffixed == pytest.approx(plain)
+
+    def test_formation_accepts_count_suffixed_atom_keys(self):
+        plain = tt.formation_enthalpy(FakeAtoms(["C", "O", "O"]), 16.0, DHF_ATOMS)
+        suffixed = tt.formation_enthalpy(
+            FakeAtoms(["C", "O", "O"]), 16.0, {"C1": 716.68, "O1": 249.18})
+        assert suffixed == pytest.approx(plain)
+
+    def test_atom_corrections_are_normalised_too(self):
+        """Overriding an element must not depend on how the key was spelled."""
+        override = tt.atomization_enthalpy(
+            FakeAtoms(["C", "O", "O"]), E_CO2, {"C": E_C, "O": E_O},
+            molecule_correction=CORR_CO2_EV, atom_corrections={"C1": 0.0, "O1": 0.0})
+        expected = tt.atomization_enthalpy(
+            FakeAtoms(["C", "O", "O"]), E_CO2, {"C": E_C, "O": E_O},
+            molecule_correction=CORR_CO2_EV, atom_corrections={"C": 0.0, "O": 0.0})
+        assert override == pytest.approx(expected)
+
+    def test_a_real_omission_still_raises_everywhere(self):
+        """Normalising must not turn a missing reference into a silent zero."""
+        with pytest.raises(tt.ThermoError, match="no reference energy"):
+            tt.atomization_enthalpy(FakeAtoms(["C", "O", "O"]), E_CO2, {"C": E_C})
+        with pytest.raises(tt.ThermoError, match="no standard atomic formation"):
+            tt.formation_enthalpy(FakeAtoms(["C", "O", "O"]), 16.0, {"C": 716.68})
+
+
+class TestTheNotationChemistsActuallyWrite:
+    """Nested groups and hydrates, cross-checked against ASE's own parser.
+
+    This file is copied verbatim into every RunBundle, including bundles that ship
+    neither ASE nor pymatgen, so the parser has to be standard-library only. That
+    is a constraint on HOW it is written, not on what it supports -- the authority
+    lives here in the tests, where ASE is available.
+    """
+
+    CORPUS = ["CO2", "O2", "C", "H2O", "CH4", "NaCl", "C6H12O6", "Mg(OH)2",
+              "Ca3(PO4)2", "Al2(SO4)3", "(NH4)2SO4", "Fe(NO3)3", "Ba(OH)2",
+              "CaPt2", "SiO2", "C2H5OH"]
+
+    @pytest.mark.parametrize("text", CORPUS)
+    def test_agrees_with_ase(self, text):
+        Formula = pytest.importorskip("ase.formula").Formula
+        assert tt.parse_formula(text) == dict(Formula(text).count())
+
+    def test_square_brackets_ase_rejects(self):
+        """A coordination complex: ASE's parser raises on these, ours does not."""
+        assert tt.parse_formula("K4[Fe(CN)6]3") == {
+            "K": 4, "Fe": 3, "C": 18, "N": 18}
+
+    @pytest.mark.parametrize("text,expected", [
+        ("CuSO4·5H2O", {"Cu": 1, "S": 1, "O": 9, "H": 10}),
+        ("CuSO4.5H2O", {"Cu": 1, "S": 1, "O": 9, "H": 10}),
+        ("Na2CO3*10H2O", {"Na": 2, "C": 1, "O": 13, "H": 20}),
+        ("MgSO4·7H2O", {"Mg": 1, "S": 1, "O": 11, "H": 14}),
+    ])
+    def test_hydrates_in_every_separator_they_are_written_with(self, text, expected):
+        assert tt.parse_formula(text) == expected
+
+    def test_a_hydrate_count_is_not_a_stoichiometric_coefficient(self):
+        """"5H2O" after a separator is five waters; "2CO" as a whole formula is a
+        reaction coefficient, which belongs in species(coefficient=...). Folding
+        the latter into the formula would double count it."""
+        assert tt.parse_formula("CuSO4·5H2O")["H"] == 10
+        with pytest.raises(tt.ThermoError):
+            tt.parse_formula("2CO")
+
+    def test_a_grouped_species_flows_through_a_real_cycle(self):
+        """End to end: the parser is only useful if the cycle accepts it."""
+        entry = tt.species("Mg(OH)2", -100.0, correction=0.0)
+        assert entry["counts"] == {"Mg": 1, "O": 2, "H": 2}
+        assert entry["formula"] == "H2MgO2"          # canonical, elements sorted
+        assert tt.canonical_formula("Mg(OH)2") == tt.canonical_formula("MgO2H2")
