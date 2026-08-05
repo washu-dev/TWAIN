@@ -25,7 +25,12 @@ from result_interpreter.extractors.base import (ParsedField, ParsedOutput,
                                                 ParserError, get_parser)
 from result_interpreter.metric_normalizer import NormalizedResult, normalize
 from cross_validation.acceptance_judge import AcceptanceThresholds, cross_validate
-from cross_validation.baseline_validator import Prediction
+from cross_validation.baseline_validator import (
+    BaselineDB,
+    ChainedBaselines,
+    Prediction,
+)
+from cross_validation.mp_reference import MaterialsProjectBaselines
 from self_correction.failure_classifier import RunEvidence
 from self_correction.reflection import reflect
 from self_correction.rerun_controller import RerunController
@@ -3157,6 +3162,38 @@ class StateMachine:
                 and not isinstance(m.get("value"), bool)
                 and math.isfinite(m["value"])]
 
+    def _baseline_db(self):
+        """The curated snapshot, backed by live Materials Project values.
+
+        The snapshot is consulted first so a hand-checked record always wins. MP
+        is only attached for a material MP could plausibly hold: an explicit
+        mp-id, or a formula that the plan resolved as a crystal. A molecular run
+        is excluded on purpose -- MP has a solid CO2 entry, and quietly grading a
+        gas-phase enthalpy against it would be worse than not comparing at all.
+        """
+        db = BaselineDB.load()
+        material = CodegenEngine._material_brief(
+            self._load_artifact("execution_plan") or {},
+            self._load_artifact("intent_spec") or {})
+        is_crystal = any(material.get(k) for k in
+                         ("crystal_system", "space_group", "space_group_number", "phase"))
+        if not material.get("mp_id") and not (material.get("formula") and is_crystal):
+            return db
+        space_group = material.get("space_group_number")
+        mp = MaterialsProjectBaselines(
+            formula=material.get("formula"),
+            mp_id=material.get("mp_id"),
+            space_group_number=(int(space_group)
+                                if isinstance(space_group, (int, float)) else None),
+        )
+        if not mp.configured:
+            # No key on this host: keep the report's wording honest rather than
+            # attaching a source that can only ever answer None.
+            logger.info("[validate] Materials Project reference unavailable: "
+                        "MP_API_KEY is not set")
+            return db
+        return ChainedBaselines(db, mp)
+
     def _baseline_property(self, name) -> str:
         """A metric name as the baseline DB spells the property."""
         text = str(name)
@@ -3202,6 +3239,7 @@ class StateMachine:
         thresholds = self._acceptance_thresholds()
         result, verdict, report = cross_validate(
             predictions,
+            db=self._baseline_db(),
             thresholds=thresholds,
             report_id=f"val-{self.run_id}",
             timestamp=datetime.now(timezone.utc).isoformat(),
