@@ -49,6 +49,7 @@ from runner.bridges import (
     post_plan_for_approval,
     post_reject_feedback_question,
 )
+from runner.capabilities import publish as publish_capabilities
 from runner.db import JobNotifyWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
 from runner.notifications import default_notifier, make_notifier
@@ -370,6 +371,18 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         # process has none of the original run's artifact files on disk).
         engine.rewind(orch, target)
         rematerialize_inputs(db, session_id, orch)
+        # Re-run the SAME plan with edited resources. After rematerialize, because
+        # it patches the plan artifact on disk; only meaningful for targets after
+        # PLAN, which the API enforces -- re-running PLAN would synthesize a fresh
+        # plan straight over the patch.
+        overrides = params.get("slurm_request") or None
+        if overrides:
+            engine.apply_slurm_overrides(orch, overrides)
+            db.add_assistant_message(
+                session_id,
+                "Applied your edited resource request to the existing plan.",
+                kind="chat", state=target,
+            )
         feedback = (params.get("feedback") or "").strip()
         if feedback:
             # Mid-session revision: fold the researcher's "here's what to
@@ -568,6 +581,11 @@ def main() -> None:
                         help="fallback poll cadence in seconds (LISTEN/NOTIFY handles latency)")
     args = parser.parse_args()
     db = RunnerDB()
+    # Refresh the capability list the app shows. Done here because this is the one
+    # process that can see the cluster envs, and because auto_update.sh restarts the
+    # runner on every deploy -- so provisioning a new env updates the homepage
+    # without anyone maintaining a list by hand. Never fatal (see capabilities.publish).
+    publish_capabilities(db)
     if args.once:
         run_loop(once=True, poll=args.poll, db=db)
         return

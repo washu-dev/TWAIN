@@ -75,6 +75,32 @@ async def health_check():
     return {"status": "ok"}
 
 
+@app.get("/api/libraries")
+async def list_libraries(user: CurrentUser):
+    """What TWAIN knows about, and which of it this cluster can actually run.
+
+    Served from the snapshot the runner publishes (``library_availability``): the
+    API cannot probe the cluster envs itself -- it is a separate deployable with no
+    access to that filesystem -- so the runner, which lives with the envs, records
+    the verdicts and this reads them. Requires a signed-in user like every other
+    route; the list describes the deployment, not public information.
+    """
+    rows = convo.list_library_availability()
+    return {
+        "data": {
+            "libraries": rows,
+            "installed": sum(1 for row in rows if row.get("installed")),
+            "total": len(rows),
+            # Newest probe wins: the app shows how fresh the answer is, so a runner
+            # that has not restarted since a provision run is visible as such.
+            "checked_at": max(
+                (row["checked_at"] for row in rows if row.get("checked_at")),
+                default=None,
+            ),
+        }
+    }
+
+
 # ── Interim email login (pre-SSO) ─────────────────────────────────────────────
 class InterimLogin(BaseModel):
     email: str
@@ -223,6 +249,12 @@ class RerunConversation(BaseModel):
     # produced), so the handler rejects it for any other target rather than
     # accepting an edit that would silently do nothing.
     request: str | None = None
+    # Replacement resource request (cpu_count, gpu_count, ram GB, max_time hours),
+    # for re-running the SAME plan with different resources. Only accepted for
+    # targets after PLAN: re-running PLAN itself synthesizes a fresh plan, which
+    # would overwrite the patch -- accepting it there would look like it worked and
+    # silently do nothing, the same trap `request` avoids for later stages.
+    slurm_request: dict | None = None
 
 
 def _require_own_conversation(conversation_id: str, user: dict) -> dict:
@@ -328,11 +360,23 @@ async def rerun_conversation(conversation_id: str, body: RerunConversation, user
             detail="An edited request only applies when re-running from INTAKE; "
                    "every later stage works from the spec intake already produced.",
         )
+    # Stages that run AFTER plan synthesis, i.e. the ones where the plan on disk
+    # survives the rewind and can therefore be patched.
+    after_plan = convo.RERUNNABLE_STATES[convo.RERUNNABLE_STATES.index("PLAN") + 1:]
+    slurm_request = body.slurm_request or None
+    if slurm_request and state not in after_plan:
+        raise HTTPException(
+            status_code=422,
+            detail="Edited resources only apply when re-running from a stage after "
+                   f"PLAN ({', '.join(after_plan)}); re-running PLAN itself "
+                   "synthesizes a new plan, which would discard them.",
+        )
     try:
         conversation = convo.rerun_conversation(
             conversation_id, user["id"], state,
             feedback=(body.feedback or "").strip() or None,
             request=request,
+            slurm_request=slurm_request,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

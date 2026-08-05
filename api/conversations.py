@@ -120,8 +120,12 @@ def get_conversation(conversation_id: str, user_id: str) -> dict | None:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT id, user_id, title, status, current_state, created_at, updated_at
-            FROM conversations WHERE id = %s AND user_id = %s;
+            SELECT c.id, c.user_id, c.title, c.status, c.current_state,
+                   c.created_at, c.updated_at,
+                   (SELECT max(e.created_at) FROM run_events e
+                     WHERE e.session_id = c.id::text
+                       AND e.event_type = 'run.started') AS started_at
+            FROM conversations c WHERE c.id = %s AND c.user_id = %s;
             """,
             (conversation_id, user_id),
         )
@@ -130,6 +134,33 @@ def get_conversation(conversation_id: str, user_id: str) -> dict | None:
         return row
     except Exception as e:
         raise Exception(f"Failed to fetch conversation: {e}") from e
+    finally:
+        conn.close()
+
+
+def list_library_availability() -> list:
+    """The runner's capability snapshot: what TWAIN knows, and what is installed.
+
+    Installed first, then by kind and name, so the app renders "what you can run"
+    without sorting client-side. An empty list means the runner has not published
+    yet (fresh database, or a runner that has not restarted since the migration).
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            SELECT kind, name, import_name, version, description,
+                   installed, env, detail, checked_at
+            FROM library_availability
+            ORDER BY installed DESC, kind, name;
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+    except Exception as e:
+        raise Exception(f"Failed to list library availability: {e}") from e
     finally:
         conn.close()
 
@@ -152,14 +183,29 @@ def get_conversation_status(conversation_id: str) -> str | None:
 
 
 def list_conversations(user_id: str) -> list:
-    """List a user's conversations, newest activity first."""
+    """List a user's conversations, newest activity first.
+
+    ``started_at`` is when the run's CURRENT activity began -- the newest
+    ``run.started``, which the orchestrator publishes once per slice (start,
+    resume, rerun). Neither existing column can stand in for it: ``updated_at`` is
+    rewritten on every status change, and ``created_at`` is when the conversation
+    was opened, which is wrong for anything resumed or rerun. It drives the live
+    elapsed display, so it must mean "running for this long", not "exists since".
+
+    The correlated subquery costs one indexed seek per row (idx_run_events_session
+    is on session_id) over a per-user list, which is tens of rows.
+    """
     conn = get_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT id, title, status, current_state, created_at, updated_at
-            FROM conversations WHERE user_id = %s ORDER BY updated_at DESC;
+            SELECT c.id, c.title, c.status, c.current_state,
+                   c.created_at, c.updated_at,
+                   (SELECT max(e.created_at) FROM run_events e
+                     WHERE e.session_id = c.id::text
+                       AND e.event_type = 'run.started') AS started_at
+            FROM conversations c WHERE c.user_id = %s ORDER BY c.updated_at DESC;
             """,
             (user_id,),
         )
@@ -309,6 +355,7 @@ def request_termination(conversation_id: str) -> dict:
 def rerun_conversation(
     conversation_id: str, user_id: str, target_state: str,
     feedback: str | None = None, request: str | None = None,
+    slurm_request: dict | None = None,
 ) -> dict | None:
     """Re-run a conversation from an earlier pipeline stage.
 
@@ -384,6 +431,11 @@ def rerun_conversation(
             params["max_cost"] = max_cost
         if feedback:
             params["feedback"] = feedback
+        # Re-run the SAME plan with different resources. The runner patches the
+        # surviving plan after the rewind; the API has already refused this for
+        # targets at or before PLAN, where a fresh plan would discard it.
+        if slurm_request:
+            params["slurm_request"] = slurm_request
 
         # Retire the questions of the pass being rewound past. Choosing to re-run
         # IS the answer to whatever was outstanding, and a question left looking
@@ -432,6 +484,9 @@ def rerun_conversation(
                       f"(re-planning from {target_state}).")
         elif request:
             marker = f"↩︎ Re-running from {target_state} with your edited request."
+        elif slurm_request:
+            marker = (f"↩︎ Re-running from {target_state} with your edited "
+                      f"resource request.")
         else:
             marker = f"↩︎ Re-running from {target_state}."
         cursor.execute(

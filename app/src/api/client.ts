@@ -45,7 +45,39 @@ export interface Conversation {
   current_state: string;
   created_at: string;
   updated_at: string;
+  /**
+   * When the run's CURRENT activity began: the newest `run.started` event, which
+   * the orchestrator publishes once per slice (start, resume, rerun). Null before
+   * a run has ever been driven. Drives the live elapsed display -- neither
+   * `created_at` (conversation opened) nor `updated_at` (rewritten on every
+   * status change) means "running for this long".
+   */
+  started_at?: string | null;
   messages?: Message[];
+}
+
+/** One entry from the runner's capability snapshot. */
+export interface LibraryInfo {
+  /** 'library' (a Python package TWAIN can build on) or 'calculator' (an engine). */
+  kind: 'library' | 'calculator';
+  name: string;
+  import_name?: string | null;
+  version?: string | null;
+  description?: string | null;
+  /** Whether this deployment can actually run it right now. */
+  installed: boolean;
+  /** Which cluster env provides it, when installed. */
+  env?: string | null;
+  /** How it was found, or why it wasn't — shown so "no" is never unexplained. */
+  detail?: string | null;
+  checked_at?: string | null;
+}
+
+export interface LibraryAvailability {
+  libraries: LibraryInfo[];
+  installed: number;
+  total: number;
+  checked_at?: string | null;
 }
 
 export interface ArtifactMeta {
@@ -267,6 +299,18 @@ class APIClient {
     return response.data;
   }
 
+  /**
+   * What TWAIN knows about, and which of it this cluster can actually run.
+   *
+   * Served from the snapshot the runner publishes -- the API cannot probe the
+   * cluster envs itself. `checked_at` is how fresh that probe is, which matters:
+   * a runner that has not restarted since a provision run reports the old answer.
+   */
+  async listLibraries(): Promise<LibraryAvailability> {
+    const response = await this.client.get('/api/libraries');
+    return response.data.data;
+  }
+
   // ── Auth ────────────────────────────────────────────────────────────────────
   // The Entra access token is attached by the request interceptor; this returns
   // the authenticated user the API resolved from it (identity + role). Doubles as
@@ -341,16 +385,27 @@ class APIClient {
    * Re-run from an earlier stage. `request` replaces the opening prompt and is
    * only accepted with state 'INTAKE' — the one stage that re-reads it.
    */
+  /**
+   * Re-run from an earlier stage, optionally saying what should be different.
+   *
+   * `feedback` is accepted for any stage (the runner folds it into the intent, so
+   * discovery/plan/codegen all see it). `request` replaces the opening prompt and
+   * is INTAKE-only; `slurmRequest` re-runs the same plan with different resources
+   * and is only accepted after PLAN — the API rejects either in the wrong place
+   * rather than accepting an edit that would silently do nothing.
+   */
   async rerunConversation(
     id: string,
     state: string,
     feedback?: string,
     request?: string,
+    slurmRequest?: { cpu_count?: number; gpu_count?: number; ram?: number; max_time?: number },
   ): Promise<Conversation> {
     const response = await this.client.post(`/api/conversations/${id}/rerun`, {
       state,
       ...(feedback ? { feedback } : {}),
       ...(request ? { request } : {}),
+      ...(slurmRequest ? { slurm_request: slurmRequest } : {}),
     });
     return response.data.data;
   }

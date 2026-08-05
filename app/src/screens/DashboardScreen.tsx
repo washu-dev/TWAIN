@@ -69,6 +69,13 @@ export const DashboardScreen: React.FC = () => {
         />
 
         <TileButton
+          title={APP_STRINGS.libraries}
+          description={APP_STRINGS.librariesDesc}
+          accentColor="#215732"
+          onPress={() => router.push('/libraries')}
+        />
+
+        <TileButton
           title={APP_STRINGS.createIssue}
           description={APP_STRINGS.createIssueDesc}
           accentColor="#BA0C2F"
