@@ -385,16 +385,27 @@ class APIClient {
    * Re-run from an earlier stage. `request` replaces the opening prompt and is
    * only accepted with state 'INTAKE' — the one stage that re-reads it.
    */
+  /**
+   * Re-run from an earlier stage, optionally saying what should be different.
+   *
+   * `feedback` is accepted for any stage (the runner folds it into the intent, so
+   * discovery/plan/codegen all see it). `request` replaces the opening prompt and
+   * is INTAKE-only; `slurmRequest` re-runs the same plan with different resources
+   * and is only accepted after PLAN — the API rejects either in the wrong place
+   * rather than accepting an edit that would silently do nothing.
+   */
   async rerunConversation(
     id: string,
     state: string,
     feedback?: string,
     request?: string,
+    slurmRequest?: { cpu_count?: number; gpu_count?: number; ram?: number; max_time?: number },
   ): Promise<Conversation> {
     const response = await this.client.post(`/api/conversations/${id}/rerun`, {
       state,
       ...(feedback ? { feedback } : {}),
       ...(request ? { request } : {}),
+      ...(slurmRequest ? { slurm_request: slurmRequest } : {}),
     });
     return response.data.data;
   }

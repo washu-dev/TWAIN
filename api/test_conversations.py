@@ -153,7 +153,8 @@ class TestRerun:
         assert response.status_code == 200
         assert response.json()["data"]["current_state"] == "CLARIFY"
         mock_rerun.assert_called_once_with(
-            "conv-1", "user-1", "CLARIFY", feedback=None, request=None)
+            "conv-1", "user-1", "CLARIFY", feedback=None, request=None,
+            slurm_request=None)
 
     @patch("conversations.rerun_conversation",
            return_value={**CONVERSATION, "current_state": "PLAN"})
@@ -162,7 +163,8 @@ class TestRerun:
         response = client.post("/api/conversations/conv-1/rerun", json={"state": "plan"})
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
-            "conv-1", "user-1", "PLAN", feedback=None, request=None)
+            "conv-1", "user-1", "PLAN", feedback=None, request=None,
+            slurm_request=None)
 
     @patch("conversations.rerun_conversation",
            return_value={**CONVERSATION, "status": "running", "current_state": "DISCOVER"})
@@ -177,7 +179,7 @@ class TestRerun:
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "DISCOVER", feedback="use xtb instead of DFT",
-            request=None)
+            request=None, slurm_request=None)
 
     @patch("conversations.get_conversation", return_value=CONVERSATION)
     def test_rerun_rejects_unknown_state(self, _conv):
@@ -289,7 +291,7 @@ class TestRerunFromIntakeWithAnEditedRequest:
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "INTAKE", feedback=None,
-            request="compute the bandgap of germanium")
+            request="compute the bandgap of germanium", slurm_request=None)
 
     @patch("conversations.rerun_conversation")
     @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
@@ -314,7 +316,59 @@ class TestRerunFromIntakeWithAnEditedRequest:
         )
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
-            "conv-1", "user-1", "INTAKE", feedback=None, request=None)
+            "conv-1", "user-1", "INTAKE", feedback=None, request=None,
+            slurm_request=None)
+
+
+class TestRerunWithEditedResources:
+    """Re-running the SAME plan with different resources.
+
+    The pairing with `request` is deliberate: each structured edit is accepted
+    only at the stage that actually consumes it, and refused elsewhere rather
+    than accepted and silently dropped.
+    """
+
+    @patch("conversations.rerun_conversation",
+           return_value={**CONVERSATION, "current_state": "EXECUTE"})
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_resources_are_forwarded_after_plan(self, _conv, mock_rerun):
+        response = client.post(
+            "/api/conversations/conv-1/rerun",
+            json={"state": "EXECUTE",
+                  "slurm_request": {"cpu_count": 24, "max_time": 4.0}},
+        )
+        assert response.status_code == 200
+        mock_rerun.assert_called_once_with(
+            "conv-1", "user-1", "EXECUTE", feedback=None, request=None,
+            slurm_request={"cpu_count": 24, "max_time": 4.0})
+
+    @pytest.mark.parametrize("state", ["INTAKE", "DISCOVER", "PLAN"])
+    @patch("conversations.rerun_conversation")
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_resources_are_refused_at_or_before_plan(self, _conv, mock_rerun, state):
+        """Re-running PLAN synthesizes a fresh plan, which would discard them."""
+        response = client.post(
+            "/api/conversations/conv-1/rerun",
+            json={"state": state, "slurm_request": {"cpu_count": 24}},
+        )
+        assert response.status_code == 422
+        assert "after PLAN" in response.json()["detail"]
+        mock_rerun.assert_not_called()
+
+    @patch("conversations.rerun_conversation",
+           return_value={**CONVERSATION, "current_state": "EXECUTE"})
+    @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
+    def test_a_note_and_resources_travel_together(self, _conv, mock_rerun):
+        """The note applies to every stage; the fields only to this one."""
+        response = client.post(
+            "/api/conversations/conv-1/rerun",
+            json={"state": "EXECUTE", "feedback": "give it more memory",
+                  "slurm_request": {"ram": 64}},
+        )
+        assert response.status_code == 200
+        mock_rerun.assert_called_once_with(
+            "conv-1", "user-1", "EXECUTE", feedback="give it more memory",
+            request=None, slurm_request={"ram": 64})
 
 
 class TestRerunStatusGate:

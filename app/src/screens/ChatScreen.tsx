@@ -46,6 +46,24 @@ const LOOP_STATE_ANCHOR: Record<string, string> = {
 // Stages a finished run can be restarted from, with plain-language descriptions
 // of what re-running each one redoes. A re-run resets the chosen stage and every
 // stage after it, keeping the earlier work as input.
+/** An in-progress "re-run from here, with these changes" draft. */
+type RerunDraft = {
+  state: string;
+  label: string;
+  /** Free text folded into the intent. Offered for every stage. */
+  note: string;
+  /** The opening prompt, for INTAKE only; null when the stage doesn't re-read it. */
+  request: string | null;
+  /** Resource request, for stages after PLAN only; null when a fresh plan would
+      overwrite it (the API rejects it there too). */
+  slurm: SlurmDraft | null;
+};
+
+// Stages that run after plan synthesis, so the plan on disk survives the rewind
+// and an edited resource request still means something. Mirrors the API's own
+// check, which is the authority.
+const AFTER_PLAN_STAGES = ['BUILD', 'EXECUTE', 'INTERPRET', 'VALIDATE', 'ACCEPT'];
+
 const RERUN_STAGES: { state: string; label: string; desc: string }[] = [
   { state: 'INTAKE', label: 'Intake', desc: 'Re-read your request from scratch' },
   { state: 'CLARIFY', label: 'Clarify', desc: 'Re-ask the clarifying questions' },
@@ -144,7 +162,14 @@ export const ChatScreen: React.FC = () => {
   const [rerunOpen, setRerunOpen] = useState(false);  // "Re-run from…" picker
   // Re-running from Intake re-reads the opening request, so it is offered for
   // editing first; null means the picker is showing its stage list.
-  const [intakeDraft, setIntakeDraft] = useState<string | null>(null);
+  // What to change on a re-run, for whichever stage was picked. Every stage gets
+  // a note ("what should be different?"), which the runner folds into the intent
+  // so the re-planned stages actually see it. Two stages also get structured
+  // fields, because they have an editable representation: INTAKE re-reads the
+  // opening prompt, and anything after PLAN re-uses the existing plan and so can
+  // take an edited resource request. Previously only INTAKE offered an editor and
+  // every other stage was a bare "run it again", with no way to say why.
+  const [rerunDraft, setRerunDraft] = useState<RerunDraft | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -409,14 +434,61 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
-  const handleRerun = async (state: string, request?: string) => {
+  /** Open the editor for a stage, seeded with whatever that stage can change. */
+  const openRerunDraft = (stage: { state: string; label: string }) =>
+    setRerunDraft({
+      state: stage.state,
+      label: stage.label,
+      note: '',
+      request: stage.state === 'INTAKE' ? openingRequest : null,
+      slurm:
+        AFTER_PLAN_STAGES.includes(stage.state) && approvalPlan?.slurm_request
+          ? {
+              cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
+              gpu_count: String(approvalPlan.slurm_request.gpu_count ?? 0),
+              ram: String(Math.max(MIN_RAM_GB, approvalPlan.slurm_request.ram ?? 16)),
+              max_time: formatDurationHours(approvalPlan.slurm_request.max_time ?? 0.17),
+            }
+          : null,
+    });
+
+  const submitRerunDraft = async () => {
+    if (!rerunDraft) return;
+    const { state, note, request, slurm } = rerunDraft;
+    await handleRerun(
+      state,
+      request?.trim() || undefined,
+      note.trim() || undefined,
+      slurm
+        ? {
+            cpu_count: Math.max(1, parseInt(slurm.cpu_count, 10) || 8),
+            gpu_count: Math.max(0, parseInt(slurm.gpu_count, 10) || 0),
+            ram: Math.max(MIN_RAM_GB, parseInt(slurm.ram, 10) || MIN_RAM_GB),
+            max_time: Math.max(
+              10 / 60,
+              parseDurationHours(slurm.max_time)
+                ?? approvalPlan?.slurm_request?.max_time
+                ?? 0.17,
+            ),
+          }
+        : undefined,
+    );
+  };
+
+  const handleRerun = async (
+    state: string,
+    request?: string,
+    feedback?: string,
+    slurmRequest?: { cpu_count: number; gpu_count: number; ram: number; max_time: number },
+  ) => {
     if (!conversationId || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await apiClient.rerunConversation(conversationId, state, undefined, request);
+      await apiClient.rerunConversation(
+        conversationId, state, feedback, request, slurmRequest);
       setRerunOpen(false);
-      setIntakeDraft(null);
+      setRerunDraft(null);
       // Reload the full conversation (now `running` at `state`, with the marker
       // message); the poll effect restarts automatically once it's active again.
       await refresh(conversationId);
@@ -774,12 +846,12 @@ export const ChatScreen: React.FC = () => {
         onRequestClose={() => {
           if (busy) return;
           setRerunOpen(false);
-          setIntakeDraft(null);
+          setRerunDraft(null);
         }}
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            {intakeDraft === null ? (
+            {rerunDraft === null ? (
               <>
                 <Text style={styles.modalTitle}>Re-run from a step</Text>
                 <Text style={styles.modalHint}>
@@ -795,13 +867,10 @@ export const ChatScreen: React.FC = () => {
                       <TouchableOpacity
                         key={stage.state}
                         style={[styles.stageRow, (!enabled || busy) && styles.disabled]}
-                        // Intake re-reads the opening request, so it opens the
-                        // editor first instead of restarting the old prompt.
-                        onPress={() =>
-                          stage.state === 'INTAKE'
-                            ? setIntakeDraft(openingRequest)
-                            : handleRerun(stage.state)
-                        }
+                        // Every stage opens its editor first: restarting a step
+                        // without being able to say what should differ just
+                        // reruns the same inputs and gets the same answer.
+                        onPress={() => openRerunDraft(stage)}
                         disabled={!enabled || busy}
                         accessibilityRole="button"
                         accessibilityState={{ disabled: !enabled || busy }}
@@ -826,33 +895,100 @@ export const ChatScreen: React.FC = () => {
               </>
             ) : (
               <>
-                <Text style={styles.modalTitle}>Edit your request</Text>
+                <Text style={styles.modalTitle}>{`Re-run from ${rerunDraft.label}`}</Text>
                 <Text style={styles.modalHint}>
-                  Re-running from Intake reads this prompt again, so you can change what
-                  you asked for. Everything after Intake is re-derived from it.
+                  {rerunDraft.request !== null
+                    ? 'Intake reads this prompt again, so you can change what you asked for. Everything after it is re-derived.'
+                    : `${rerunDraft.label} and every step after it run again. Say what should be different and TWAIN takes it into account.`}
                 </Text>
-                <TextInput
-                  style={styles.promptInput}
-                  value={intakeDraft}
-                  onChangeText={setIntakeDraft}
-                  placeholder="Describe the simulation you want"
-                  placeholderTextColor={C.textSecondary}
-                  multiline
-                  editable={!busy}
-                  accessibilityLabel="Edited request"
-                />
+                <ScrollView style={styles.stageList}>
+                  {/* INTAKE: the prompt itself is the editable input. */}
+                  {rerunDraft.request !== null && (
+                    <TextInput
+                      style={styles.promptInput}
+                      value={rerunDraft.request}
+                      onChangeText={(v) => setRerunDraft({ ...rerunDraft, request: v })}
+                      placeholder="Describe the simulation you want"
+                      placeholderTextColor={C.textSecondary}
+                      multiline
+                      editable={!busy}
+                      accessibilityLabel="Edited request"
+                    />
+                  )}
+                  {/* Every stage: what should be different this time. */}
+                  <TextInput
+                    style={styles.promptInput}
+                    value={rerunDraft.note}
+                    onChangeText={(v) => setRerunDraft({ ...rerunDraft, note: v })}
+                    placeholder={
+                      rerunDraft.request !== null
+                        ? 'Anything else to change (optional)'
+                        : 'What should be different this time? (optional)'
+                    }
+                    placeholderTextColor={C.textSecondary}
+                    multiline
+                    editable={!busy}
+                    accessibilityLabel="What to change on this re-run"
+                  />
+                  {/* After PLAN: the existing plan survives, so its resources are
+                      editable here. Before PLAN a fresh plan would overwrite them,
+                      which is why no fields are offered (and the API refuses). */}
+                  {rerunDraft.slurm && (
+                    <View style={styles.slurmGrid}>
+                      <Text style={styles.slurmNote}>
+                        Re-uses the existing plan with these resources.
+                      </Text>
+                      <SlurmField
+                        label="CPUs"
+                        value={rerunDraft.slurm.cpu_count}
+                        onChange={(v) =>
+                          setRerunDraft({
+                            ...rerunDraft,
+                            slurm: { ...rerunDraft.slurm!, cpu_count: v },
+                          })
+                        }
+                      />
+                      <SlurmField
+                        label="RAM GB"
+                        value={rerunDraft.slurm.ram}
+                        onChange={(v) =>
+                          setRerunDraft({
+                            ...rerunDraft,
+                            slurm: { ...rerunDraft.slurm!, ram: v },
+                          })
+                        }
+                      />
+                      <SlurmField
+                        label="Wall time — e.g. 90m or 1.5h"
+                        value={rerunDraft.slurm.max_time}
+                        onChange={(v) =>
+                          setRerunDraft({
+                            ...rerunDraft,
+                            slurm: { ...rerunDraft.slurm!, max_time: v },
+                          })
+                        }
+                      />
+                    </View>
+                  )}
+                </ScrollView>
                 <View style={styles.approvalButtons}>
                   <TouchableOpacity
-                    style={[styles.approveBtn, (busy || !intakeDraft.trim()) && styles.disabled]}
-                    onPress={() => handleRerun('INTAKE', intakeDraft.trim())}
-                    disabled={busy || !intakeDraft.trim()}
+                    style={[
+                      styles.approveBtn,
+                      (busy || (rerunDraft.request !== null && !rerunDraft.request.trim()))
+                        && styles.disabled,
+                    ]}
+                    onPress={submitRerunDraft}
+                    disabled={
+                      busy || (rerunDraft.request !== null && !rerunDraft.request.trim())
+                    }
                     accessibilityRole="button"
                   >
                     <Text style={styles.approveText}>Re-run with this</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.neutralBtn, busy && styles.disabled]}
-                    onPress={() => setIntakeDraft(null)}
+                    onPress={() => setRerunDraft(null)}
                     disabled={busy}
                     accessibilityRole="button"
                   >
@@ -1222,6 +1358,10 @@ const styles = StyleSheet.create({
   slurmLimitsLine: { fontSize: 12, fontWeight: '600', color: C.textSecondary },
   slurmSuggestHint: { fontSize: 12, color: C.textSecondary, lineHeight: 17 },
   slurmRow: { flexDirection: 'row', gap: Spacing.two },
+  // Resource fields inside the re-run editor (stacked, unlike the approval card's
+  // side-by-side row, because the modal is narrower).
+  slurmGrid: { gap: Spacing.one, marginTop: Spacing.two },
+  slurmNote: { fontSize: 12, color: C.textSecondary },
   slurmField: { flex: 1, gap: 4 },
   slurmFieldLabel: { fontSize: 11, color: C.textSecondary, fontWeight: '600' },
   slurmFieldInput: {

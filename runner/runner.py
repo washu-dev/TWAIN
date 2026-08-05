@@ -371,6 +371,18 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         # process has none of the original run's artifact files on disk).
         engine.rewind(orch, target)
         rematerialize_inputs(db, session_id, orch)
+        # Re-run the SAME plan with edited resources. After rematerialize, because
+        # it patches the plan artifact on disk; only meaningful for targets after
+        # PLAN, which the API enforces -- re-running PLAN would synthesize a fresh
+        # plan straight over the patch.
+        overrides = params.get("slurm_request") or None
+        if overrides:
+            engine.apply_slurm_overrides(orch, overrides)
+            db.add_assistant_message(
+                session_id,
+                "Applied your edited resource request to the existing plan.",
+                kind="chat", state=target,
+            )
         feedback = (params.get("feedback") or "").strip()
         if feedback:
             # Mid-session revision: fold the researcher's "here's what to

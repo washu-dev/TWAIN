@@ -355,6 +355,7 @@ def request_termination(conversation_id: str) -> dict:
 def rerun_conversation(
     conversation_id: str, user_id: str, target_state: str,
     feedback: str | None = None, request: str | None = None,
+    slurm_request: dict | None = None,
 ) -> dict | None:
     """Re-run a conversation from an earlier pipeline stage.
 
@@ -430,6 +431,11 @@ def rerun_conversation(
             params["max_cost"] = max_cost
         if feedback:
             params["feedback"] = feedback
+        # Re-run the SAME plan with different resources. The runner patches the
+        # surviving plan after the rewind; the API has already refused this for
+        # targets at or before PLAN, where a fresh plan would discard it.
+        if slurm_request:
+            params["slurm_request"] = slurm_request
 
         # Retire the questions of the pass being rewound past. Choosing to re-run
         # IS the answer to whatever was outstanding, and a question left looking
@@ -478,6 +484,9 @@ def rerun_conversation(
                       f"(re-planning from {target_state}).")
         elif request:
             marker = f"↩︎ Re-running from {target_state} with your edited request."
+        elif slurm_request:
+            marker = (f"↩︎ Re-running from {target_state} with your edited "
+                      f"resource request.")
         else:
             marker = f"↩︎ Re-running from {target_state}."
         cursor.execute(
