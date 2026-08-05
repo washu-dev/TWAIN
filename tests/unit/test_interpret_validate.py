@@ -313,6 +313,140 @@ def test_an_unspecified_target_is_not_judged_against_zero(machine, tmp_path):
     assert gap is None
 
 
+# -- validate: Materials Project as a live baseline source ---------------------
+
+CRYSTAL_PLAN = dict(
+    PLAN,
+    requested_property="bulk_modulus",
+    target_system={"formula": "CaPt2",
+                   "crystal": {"formula": "CaPt2", "name": "Calcium diplatinide",
+                               "crystal_system": "cubic", "space_group": "Fd-3m",
+                               "space_group_number": 227}},
+    acceptance_metrics=[{"metric_name": "bulk_modulus",
+                         "target_value": None, "tolerance": None}],
+)
+
+# The real mp-842 entry (C15 CaPt2), from the live API on 2026-08-05.
+MP_DOC = {
+    "material_id": "mp-842", "formula_pretty": "CaPt2",
+    "symmetry": {"number": 227}, "energy_above_hull": 0.0, "theoretical": False,
+    "bulk_modulus": {"voigt": 132.905, "reuss": 132.905, "vrh": 132.905},
+    "band_gap": 0.0, "density": 15.2,
+}
+
+
+def _fake_mp(monkeypatch, docs=(MP_DOC,), *, key="test-key"):
+    """Point the state machine's MP source at a canned doc. Never touches a network."""
+    import cross_validation.mp_reference as mpref
+
+    class _Rester:
+        """Shaped like mp-api's SummaryRester: a context manager with .search()."""
+
+        calls = []
+
+        def search(self, **kwargs):
+            type(self).calls = self.calls + [kwargs]
+            return list(docs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def factory(*args, **kwargs):
+        return mpref.MaterialsProjectBaselines(
+            formula=kwargs.get("formula"), mp_id=kwargs.get("mp_id"),
+            space_group_number=kwargs.get("space_group_number"),
+            api_key=key, client_factory=lambda _k: _Rester())
+
+    monkeypatch.setattr(SM, "MaterialsProjectBaselines", factory)
+    return _Rester
+
+
+def test_a_crystal_run_is_validated_against_materials_project(
+        machine, tmp_path, monkeypatch):
+    """The gap this closes: a bulk modulus with no target got no check at all.
+
+    Run e496cf22 computed 131.07 GPa for CaPt2 and VALIDATE could only report it
+    "delivered without external validation" -- the researcher had asked for it to
+    be validated against the Materials Project reference value.
+    """
+    _fake_mp(monkeypatch)
+    _seed(machine, tmp_path, "intent_spec", INTENT)
+    _seed(machine, tmp_path, "execution_plan", CRYSTAL_PLAN)
+    _seed_normalized(machine, tmp_path, 131.07, name="bulk_modulus")
+
+    machine.validate()
+    report = machine._load_artifact("validation_report")
+    _validator("validation_report.schema.json").validate(report)
+
+    comparisons = report["cross_validation"]["comparisons"]
+    assert len(comparisons) == 1, report["cross_validation"]["unmatched"]
+    assert comparisons[0]["property"] == "bulk_modulus"
+    assert comparisons[0]["literature"] == 132.905
+    assert "mp-842" in comparisons[0]["literature_source"]
+    assert "without external validation" not in report["rationale"]
+
+
+def test_a_molecular_run_is_never_graded_against_materials_project(
+        machine, tmp_path, monkeypatch):
+    """MP holds a solid CO2 entry; a gas-phase enthalpy must not meet it.
+
+    The gate is the plan's own description of the system, not the formula: a
+    molecule has no space group, so no MP request is made at all.
+    """
+    summary = _fake_mp(monkeypatch)
+    summary.calls = []
+    _seed_planning(machine, tmp_path)          # aspirin, molecular
+    _seed_normalized(machine, tmp_path, -1.70)
+
+    machine.validate()
+
+    assert summary.calls == []                 # never queried
+    report = machine._load_artifact("validation_report")
+    assert report["cross_validation"]["comparisons"][0]["molecule"] == "aspirin"
+
+
+def test_without_a_key_the_crystal_run_falls_back_cleanly(
+        machine, tmp_path, monkeypatch):
+    """No key on this host must degrade to the old behaviour, not to an error."""
+    _fake_mp(monkeypatch, key=None)
+    monkeypatch.delenv("MP_API_KEY", raising=False)
+    _seed(machine, tmp_path, "intent_spec", INTENT)
+    _seed(machine, tmp_path, "execution_plan", CRYSTAL_PLAN)
+    _seed_normalized(machine, tmp_path, 131.07, name="bulk_modulus")
+
+    machine.validate()
+    report = machine._load_artifact("validation_report")
+
+    assert report["cross_validation"]["comparisons"] == []
+    assert "without external validation" in report["rationale"]
+
+
+def test_a_failing_materials_project_does_not_fail_the_run(
+        machine, tmp_path, monkeypatch):
+    """The run already computed its answer; a reference lookup cannot cost it."""
+    import cross_validation.mp_reference as mpref
+
+    def exploding(*args, **kwargs):
+        src = mpref.MaterialsProjectBaselines(
+            formula="CaPt2", api_key="k",
+            client_factory=lambda _k: (_ for _ in ()).throw(
+                ConnectionError("api.materialsproject.org unreachable")))
+        return src
+
+    monkeypatch.setattr(SM, "MaterialsProjectBaselines", exploding)
+    _seed(machine, tmp_path, "intent_spec", INTENT)
+    _seed(machine, tmp_path, "execution_plan", CRYSTAL_PLAN)
+    _seed_normalized(machine, tmp_path, 131.07, name="bulk_modulus")
+
+    machine.validate()   # must not raise
+    report = machine._load_artifact("validation_report")
+    assert report["cross_validation"]["comparisons"] == []
+    assert report["acceptance_status"]  # a verdict was still reached
+
+
 def test_a_zero_placeholder_rejects_a_correct_answer(machine, tmp_path):
     """Why null has to be representable: 0.0 is not a harmless "unset".
 

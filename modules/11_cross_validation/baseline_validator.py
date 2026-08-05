@@ -86,6 +86,84 @@ class BaselineDB:
         return len(self._by_key)
 
 
+class ChainedBaselines:
+    """Consult several baseline sources in order, first hit wins.
+
+    Lets a live source (the Materials Project) back the curated
+    ``configs/baselines.json`` snapshot without either one knowing about the
+    other. Order is precedence: a hand-checked record should never be displaced
+    by a queried one, so the snapshot goes first.
+    """
+
+    def __init__(self, *sources):
+        self.sources = [s for s in sources if s is not None]
+
+    def lookup(self, molecule: str, prop: str) -> Optional[BaselineRecord]:
+        for source in self.sources:
+            record = source.lookup(molecule, prop)
+            if record is not None:
+                return record
+        return None
+
+    def __len__(self) -> int:
+        return sum(len(s) for s in self.sources if hasattr(s, "__len__"))
+
+
+# --------------------------------------------------------------------------- #
+# unit compatibility
+
+# Spellings that mean the same unit, canonicalized before comparison. Only what
+# TWAIN's own metrics and reference sources actually emit -- this is a guard, not
+# a units library, and anything unrecognized is left alone rather than guessed at.
+_UNIT_ALIASES = {
+    "gpa": "gpa",
+    "ev": "ev",
+    "ev/atom": "ev/atom",
+    "evperatom": "ev/atom",
+    "ev_per_atom": "ev/atom",
+    "kj/mol": "kj/mol",
+    "kjmol": "kj/mol",
+    "kj_per_mol": "kj/mol",
+    "kjpermol": "kj/mol",
+    "kcal/mol": "kcal/mol",
+    "ang^3": "ang^3",
+    "ang3": "ang^3",
+    "angstrom^3": "ang^3",
+    "a^3": "ang^3",
+    "g/cm^3": "g/cm^3",
+    "gcm3": "g/cm^3",
+    "g/cc": "g/cm^3",
+    "mub": "mub",
+    "bohr_magneton": "mub",
+}
+
+
+def canonical_unit(unit) -> Optional[str]:
+    """A comparable form of a unit string, or None when there is nothing to compare."""
+    if unit is None:
+        return None
+    text = str(unit).strip().lower()
+    if not text:
+        return None
+    squashed = text.replace(" ", "").replace("-", "").replace("**", "^")
+    return _UNIT_ALIASES.get(squashed, _UNIT_ALIASES.get(text, squashed))
+
+
+def units_comparable(predicted_unit, baseline_unit) -> bool:
+    """Whether two values may be subtracted.
+
+    Unknown on either side means "no information", which stays permissive: the
+    curated snapshot carries units for almost nothing, and every comparison the
+    pipeline made before units existed must keep working. Only two *stated*,
+    *different* units block a comparison -- the case a live reference source
+    introduces, where MP reports eV/atom and the run reports kJ/mol.
+    """
+    left, right = canonical_unit(predicted_unit), canonical_unit(baseline_unit)
+    if left is None or right is None:
+        return True
+    return left == right
+
+
 # --------------------------------------------------------------------------- #
 # predictions + comparisons
 # --------------------------------------------------------------------------- #
@@ -214,6 +292,14 @@ def compare(predictions: Sequence[Prediction], db: BaselineDB) -> CrossValidatio
         baseline = db.lookup(pred.molecule, pred.property)
         if baseline is None:
             unmatched.append(f"{pred.molecule}/{pred.property}")
+            continue
+        # Two values in different stated units are not comparable, and a wrong
+        # comparison is worse than none: it would be graded and routed on. Left
+        # unmatched, so VALIDATE falls back to the plan's acceptance criteria.
+        if not units_comparable(pred.unit, baseline.unit):
+            unmatched.append(
+                f"{pred.molecule}/{pred.property} "
+                f"(unit mismatch: {pred.unit} vs {baseline.unit})")
             continue
         abs_err = abs(pred.value - baseline.literature_value)
         rel_err = abs_err / abs(baseline.literature_value) if baseline.literature_value != 0 else None
