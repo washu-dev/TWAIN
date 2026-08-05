@@ -919,3 +919,28 @@ class TestTheRegistryDecidesWhoGetsMpi:
                                       ("GPAW", False), ("xtb", False)):
             entry = find_calculator(name)
             assert bool(entry.executable) is expect_external, name
+
+
+class TestOurOwnTimeoutStillReadsAsATimeout:
+    """The in-job `timeout` fires before Slurm's limit, so Slurm never says TIMEOUT.
+
+    Story 5.4 requires TIMEOUT to be classified as permanent WITH an actionable
+    message. Without mapping exit 124 the bound added for the 2h12m hang would
+    have downgraded every real wall-clock overrun to a generic FAILED.
+    """
+
+    def test_exit_124_is_a_timeout(self):
+        status, message = SlurmExecutionAdapter._classify(
+            JobState.FAILED, 124, "", "999")
+        assert status is ExecutionStatus.TIMEOUT
+        assert "wall-clock" in message and "max_time" in message
+
+    def test_slurms_own_timeout_state_is_unchanged(self):
+        status, _ = SlurmExecutionAdapter._classify(JobState.TIMEOUT, None, "", "999")
+        assert status is ExecutionStatus.TIMEOUT
+
+    def test_other_failures_are_not_swept_into_timeout(self):
+        for code in (1, 2, 125):
+            status, _ = SlurmExecutionAdapter._classify(
+                JobState.FAILED, code, "", "999")
+            assert status is not ExecutionStatus.TIMEOUT, code

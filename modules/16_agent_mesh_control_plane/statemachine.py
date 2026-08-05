@@ -2118,6 +2118,21 @@ class StateMachine:
         self._log_repair(report)
         return State.EXECUTE
 
+    def _bundle_helper_files(self) -> dict:
+        """Helper modules sitting beside main.py in the current run bundle.
+
+        Handed to the ScriptDoctor so its smoke sandbox runs the bundle the
+        cluster will run, not main.py in isolation.
+        """
+        bundle = Path(self.artifacts_dir) / f"run_bundle_{self.run_id}"
+        files = {}
+        try:
+            for path in sorted(bundle.glob("twain_*.py")):
+                files[path.name] = path.read_text(encoding="utf-8")
+        except OSError:
+            return {}
+        return files
+
     def _make_script_doctor(self, plan: dict, method: dict, calc_import):
         """The ScriptDoctor both REPAIR and EXECUTE's self-heal loop use.
 
@@ -2132,6 +2147,7 @@ class StateMachine:
             agent=(lambda p: self._agent_text(p, max_tokens=_CODEGEN_MAX_TOKENS))
             if self.verify_codegen else None,
             brief=self._repair_brief(plan, method),
+            bundle_files=self._bundle_helper_files(),
             sim_python=smoke_python,
         )
 

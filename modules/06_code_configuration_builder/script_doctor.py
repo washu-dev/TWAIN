@@ -244,9 +244,18 @@ class ScriptDoctor:
                  brief: Optional[dict] = None,
                  sim_python: Union[str, None, object] = _UNSET,
                  verifier: Optional[Callable[[str, dict], SmokeOutcome]] = None,
-                 max_rounds: int = 3, review: bool = True):
+                 max_rounds: int = 3, review: bool = True,
+                 bundle_files: Optional[Dict[str, str]] = None):
         self.agent = agent
         self.brief = dict(brief or {})
+        # Extra bundle files (filename -> source) placed beside main.py in the
+        # smoke sandbox. A bundle can now carry helper modules the script imports
+        # by bare name -- twain_pseudo.py, twain_thermo.py -- and smoking main.py
+        # alone makes those imports fail for a reason that is not the code's
+        # fault. Worse, the cheapest repair for "No module named twain_pseudo" is
+        # to drop the import and inline the pseudopotential filenames, which is
+        # exactly what that helper exists to prevent.
+        self.bundle_files = dict(bundle_files or {})
         self._sim_python = sim_python
         self._verifier = verifier
         self.max_rounds = max(1, max_rounds)
@@ -596,6 +605,8 @@ class ScriptDoctor:
         try:
             with tempfile.TemporaryDirectory(prefix="twain_repair_") as tmp:
                 (Path(tmp) / "main.py").write_text(source, encoding="utf-8")
+                for name, text in self.bundle_files.items():
+                    (Path(tmp) / name).write_text(text, encoding="utf-8")
                 proc = subprocess.run(
                     [python, "main.py", "--smoke"],
                     cwd=tmp, capture_output=True, text=True, timeout=_SMOKE_TIMEOUT_S,
@@ -688,10 +699,18 @@ class ScriptDoctor:
             str(self.brief.get("library_import") or "").split(".")[0].lower(),
         }
         toolset.discard("")
+        # Bundle-local helper modules. The sandbox above copies them, so a miss
+        # here means the copy did not happen -- a harness gap, never a reason to
+        # ask the model to delete an import it was told to make.
+        helpers = {Path(name).stem.lower() for name in self.bundle_files}
         for match in re.finditer(r"No module named ['\"]([\w.]+)['\"]", output):
             name = match.group(1)
-            if "." not in name and name.lower() in toolset:
+            if "." in name:
+                continue
+            if name.lower() in toolset:
                 return SmokeOutcome("unverifiable", tail)  # e.g. matgl absent here
+            if name.lower() in helpers or name.lower().startswith("twain_"):
+                return SmokeOutcome("unverifiable", tail)
         return SmokeOutcome("repairable", tail)
 
 
