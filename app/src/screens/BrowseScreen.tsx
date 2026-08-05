@@ -12,6 +12,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { apiClient, Conversation, ConversationStatus } from '@/api/client';
+import { useNow } from '@/hooks/useNow';
+import { formatElapsed } from '@/utils/duration';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -159,6 +161,9 @@ export const BrowseScreen: React.FC = () => {
     () => items.some((item) => metaFor(item.status).group !== 'done'),
     [items],
   );
+  // ONE clock for the whole list, passed down to the rows. A useNow() per row
+  // would mean ten intervals for ten running runs, all doing the same thing.
+  const now = useNow(anyLive);
   useEffect(() => {
     if (!anyLive) return;
     const timer = setInterval(() => {
@@ -278,6 +283,7 @@ export const BrowseScreen: React.FC = () => {
                   <RunRow
                     key={item.id}
                     item={item}
+                    now={now}
                     onPress={() =>
                       router.push({
                         pathname: TERMINAL_STATUSES.includes(item.status) ? '/report' : '/chat',
@@ -333,12 +339,20 @@ export const BrowseScreen: React.FC = () => {
   );
 };
 
-const RunRow: React.FC<{ item: Conversation; onPress: () => void; onDelete: () => void }> = ({
-  item,
-  onPress,
-  onDelete,
-}) => {
+const RunRow: React.FC<{
+  item: Conversation;
+  now: number;
+  onPress: () => void;
+  onDelete: () => void;
+}> = ({ item, now, onPress, onDelete }) => {
   const meta = metaFor(item.status);
+  // While a run is going, "just now" is all relativeTime(updated_at) can ever say
+  // -- the status writes keep bumping it. How long it has been running is the
+  // thing the researcher is actually watching for, so show that instead.
+  const running = meta.group === 'running' && !!item.started_at;
+  const elapsed = running
+    ? formatElapsed((now - new Date(item.started_at as string).getTime()) / 1000)
+    : null;
   return (
     <View style={[styles.rowItem, { borderLeftColor: meta.color }]}>
       <TouchableOpacity
@@ -352,7 +366,7 @@ const RunRow: React.FC<{ item: Conversation; onPress: () => void; onDelete: () =
         </Text>
         <Text style={styles.rowMeta} numberOfLines={1}>
           <Text style={{ color: meta.color, fontWeight: '600' }}>{meta.label}</Text>
-          {`  ·  ${relativeTime(item.updated_at)}`}
+          {`  ·  ${elapsed ?? relativeTime(item.updated_at)}`}
           {item.status === 'running'
             ? `  ·  ${PHASE[item.current_state] ?? item.current_state}`
             : ''}

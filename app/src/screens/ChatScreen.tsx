@@ -16,6 +16,8 @@ import { apiClient, Conversation, Message, RunIssue } from '@/api/client';
 import { IssueModal } from '@/components/IssueModal';
 import { ReportIssueModal } from '@/components/ReportIssueModal';
 import { useAuth } from '@/hooks/useAuth';
+import { useNow } from '@/hooks/useNow';
+import { formatDurationHours, formatElapsed, parseDurationHours } from '@/utils/duration';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -150,6 +152,8 @@ export const ChatScreen: React.FC = () => {
   const status = conversation?.status;
   const isActive = !!status && ACTIVE_STATUSES.includes(status);
   const isTerminal = !!status && TERMINAL_STATUSES.includes(status);
+  // One clock, ticking only while the run is active (see useNow).
+  const now = useNow(isActive);
   const terminalMessage =
     status === 'completed'
       ? '✓ Simulation complete — your results are ready.'
@@ -204,6 +208,15 @@ export const ChatScreen: React.FC = () => {
 
   const slurmLimits = approvalPlan?.slurm_limits ?? null;
   const slurmRationale = approvalPlan?.slurm_rationale ?? null;
+  // "12m 04s / 4h" -- how long this run has been going, against the wall-time cap
+  // it was approved with. started_at is the newest run.started, so a resumed run
+  // times its current slice rather than reporting the age of the conversation.
+  const wallLimitHours = approvalPlan?.slurm_request?.max_time;
+  const runElapsed =
+    isActive && conversation?.started_at
+      ? formatElapsed((now - new Date(conversation.started_at).getTime()) / 1000)
+        + (wallLimitHours ? ` / ${formatDurationHours(wallLimitHours)}` : '')
+      : null;
   const limitsSource = approvalPlan?.limits_source ?? null;
 
   // Editable Slurm fields: the plan's request seeds the values (TWAIN's
@@ -214,7 +227,9 @@ export const ChatScreen: React.FC = () => {
         cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
         gpu_count: String(approvalPlan.slurm_request.gpu_count ?? 0),
         ram: String(Math.max(MIN_RAM_GB, approvalPlan.slurm_request.ram ?? 16)),
-        max_time: String(approvalPlan.slurm_request.max_time ?? 0.17),
+        // Seeded readably: a 10-minute cap shows as "10m", not "0.17". The field
+        // accepts either form back (parseDurationHours).
+        max_time: formatDurationHours(approvalPlan.slurm_request.max_time ?? 0.17),
       }
     : null;
   const slurmDraft =
@@ -351,7 +366,19 @@ export const ChatScreen: React.FC = () => {
           cpu_count: cap(Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8), slurmLimits?.cpu_count),
           gpu_count: cap(Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0), slurmLimits?.gpu_count),
           ram: cap(Math.max(MIN_RAM_GB, parseInt(slurmDraft.ram, 10) || MIN_RAM_GB), slurmLimits?.ram),
-          max_time: cap(Math.max(10 / 60, parseFloat(slurmDraft.max_time) || 0.17), slurmLimits?.max_time),
+          // Accepts "90m" / "1.5h" / a bare number of hours (see
+          // parseDurationHours: a bare number stays HOURS, so an existing plan
+          // cannot silently shrink 60x). An unparseable entry falls back to the
+          // plan's own suggestion rather than to zero.
+          max_time: cap(
+            Math.max(
+              10 / 60,
+              parseDurationHours(slurmDraft.max_time)
+                ?? approvalPlan?.slurm_request?.max_time
+                ?? 0.17,
+            ),
+            slurmLimits?.max_time,
+          ),
         };
       }
       await apiClient.sendApproval(conversation.id, decision, overrides);
@@ -455,6 +482,14 @@ export const ChatScreen: React.FC = () => {
           <Text style={[styles.targetBadge, styles.targetBadgeSlurm]}>
             {`RIS / Slurm${approvalPlan?.slurm_cluster ? ` · ${approvalPlan.slurm_cluster}` : ''}`}
           </Text>
+          {/* Live running time. A multi-hour DFT job is otherwise indistinguishable
+              from a hung one, which is what sent us looking at the cluster by hand.
+              Paired with the wall-time cap when the plan is at hand, so the number
+              the researcher set on the approval card is visible against the clock
+              it is racing. Ticks only while the run is active. */}
+          {runElapsed && (
+            <Text style={[styles.targetBadge, styles.elapsedBadge]}>{runElapsed}</Text>
+          )}
         </View>
       )}
 
@@ -574,7 +609,7 @@ export const ChatScreen: React.FC = () => {
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, ram: v })}
                 />
                 <SlurmField
-                  label={`Wall time h — suggested${slurmLimits?.max_time != null ? `, max ${slurmLimits.max_time}` : ''}`}
+                  label={`Wall time — e.g. 90m or 1.5h${slurmLimits?.max_time != null ? `, max ${formatDurationHours(slurmLimits.max_time)}` : ''}`}
                   value={slurmDraft.max_time}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, max_time: v })}
                 />
@@ -1050,6 +1085,8 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   targetBadgeSlurm: { color: C.washuGreen },
+  // Tabular figures so a ticking counter doesn't shuffle its own width each second.
+  elapsedBadge: { color: C.textSecondary, fontVariant: ['tabular-nums'] },
   stepper: { maxHeight: 62, backgroundColor: C.backgroundElement, flexGrow: 0 },
   stepperContent: { alignItems: 'center', paddingHorizontal: Spacing.three, gap: Spacing.three },
   step: { alignItems: 'center', gap: 4, paddingVertical: Spacing.two },

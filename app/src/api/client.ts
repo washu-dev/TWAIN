@@ -45,6 +45,14 @@ export interface Conversation {
   current_state: string;
   created_at: string;
   updated_at: string;
+  /**
+   * When the run's CURRENT activity began: the newest `run.started` event, which
+   * the orchestrator publishes once per slice (start, resume, rerun). Null before
+   * a run has ever been driven. Drives the live elapsed display -- neither
+   * `created_at` (conversation opened) nor `updated_at` (rewritten on every
+   * status change) means "running for this long".
+   */
+  started_at?: string | null;
   messages?: Message[];
 }
 

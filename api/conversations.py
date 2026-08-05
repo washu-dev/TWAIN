@@ -120,8 +120,12 @@ def get_conversation(conversation_id: str, user_id: str) -> dict | None:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT id, user_id, title, status, current_state, created_at, updated_at
-            FROM conversations WHERE id = %s AND user_id = %s;
+            SELECT c.id, c.user_id, c.title, c.status, c.current_state,
+                   c.created_at, c.updated_at,
+                   (SELECT max(e.created_at) FROM run_events e
+                     WHERE e.session_id = c.id::text
+                       AND e.event_type = 'run.started') AS started_at
+            FROM conversations c WHERE c.id = %s AND c.user_id = %s;
             """,
             (conversation_id, user_id),
         )
@@ -152,14 +156,29 @@ def get_conversation_status(conversation_id: str) -> str | None:
 
 
 def list_conversations(user_id: str) -> list:
-    """List a user's conversations, newest activity first."""
+    """List a user's conversations, newest activity first.
+
+    ``started_at`` is when the run's CURRENT activity began -- the newest
+    ``run.started``, which the orchestrator publishes once per slice (start,
+    resume, rerun). Neither existing column can stand in for it: ``updated_at`` is
+    rewritten on every status change, and ``created_at`` is when the conversation
+    was opened, which is wrong for anything resumed or rerun. It drives the live
+    elapsed display, so it must mean "running for this long", not "exists since".
+
+    The correlated subquery costs one indexed seek per row (idx_run_events_session
+    is on session_id) over a per-user list, which is tens of rows.
+    """
     conn = get_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT id, title, status, current_state, created_at, updated_at
-            FROM conversations WHERE user_id = %s ORDER BY updated_at DESC;
+            SELECT c.id, c.title, c.status, c.current_state,
+                   c.created_at, c.updated_at,
+                   (SELECT max(e.created_at) FROM run_events e
+                     WHERE e.session_id = c.id::text
+                       AND e.event_type = 'run.started') AS started_at
+            FROM conversations c WHERE c.user_id = %s ORDER BY c.updated_at DESC;
             """,
             (user_id,),
         )
