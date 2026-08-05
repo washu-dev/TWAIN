@@ -47,10 +47,28 @@ A generous fallback poll (`--poll`, default 30s) covers any missed notification.
 it (resolved from `users` via the conversation; see `db.owner_contact`) so they
 can return when ready. Configure via `TWAIN_NOTIFY_BACKEND` (`log` default, or
 `ses`/`sendgrid` email / `sns` SMS); email targets the owner's address and `sns`
-texts their `phone` (migration `005_user_contact.sql`), each falling back to the
-configured global `TWAIN_NOTIFY_EMAIL` / `TWAIN_NOTIFY_SNS_TOPIC_ARN` when the
-owner has no contact on file. See `runner/notifications.py`. `TWAIN_APP_URL` adds
-a deep link back to the run.
+texts their `phone` (migration `005_user_contact.sql`). See
+`runner/notifications.py`. `TWAIN_APP_URL` adds a deep link back to the run.
+
+**The owner is the only destination.** There is no global fallback inbox or SNS
+topic: a run whose owner has no address (or no phone) on file is not notified at
+all, logged at WARNING naming the run. Redirecting elsewhere hands one
+researcher's prompt, results and gate questions to somebody who can neither act
+on them nor switch them off — notification preferences live on the owner's row —
+so the remedy for a missing address is to populate `users.email`, not to reroute
+the mail. Note `users.email` is nullable and an Entra token with no
+`preferred_username`/`email`/`upn` claim stores an empty one, so this case is
+real; the WARNING is how you find those accounts.
+
+Every send is de-duplicated and rate-capped **per run** before it reaches a
+backend (`TWAIN_NOTIFY_DEDUPE_SECONDS`, default 120s; `TWAIN_NOTIFY_MAX_PER_HOUR`,
+default 12 — either `0` disables that rail). Notifications are best-effort and
+never fail a run, so without these rails anything that drives one run repeatedly
+turns into one email per drive. A dropped notification is logged with the reason.
+Sends and failures are logged too (`twain.runner.notify`, INFO for an accepted
+send, ERROR with SendGrid's own message for a rejection), so the runner log
+answers "was the researcher actually told?" — set `TWAIN_LOG_LEVEL` to change the
+level.
 
 **Resume durability** — a run's state + context resume from the Postgres session
 store, and its stage artifacts (intent_spec, execution_plan, the generated run

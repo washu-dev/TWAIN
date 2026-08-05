@@ -168,6 +168,18 @@ class RunnerDB:
             (status, session_id),
         )
 
+    def conversation_status(self, session_id: str) -> str | None:
+        """This run's lifecycle status, or None if the conversation is unknown.
+
+        Read by the driver to tell "settle this run" from "this run was already
+        settled" — a terminate request is sticky, so without the check every
+        later slice re-announced the cancellation (chat + email).
+        """
+        row = self._query_one(
+            "SELECT status FROM conversations WHERE id = %s;", (session_id,)
+        )
+        return row.get("status") if row else None
+
     def set_conversation_state(self, session_id: str, state: str) -> None:
         self._execute(
             "UPDATE conversations SET current_state = %s, updated_at = now() WHERE id = %s;",

@@ -61,6 +61,20 @@ def _load_token() -> str:
     return token.strip()
 
 
+def token_configured() -> str | None:
+    """The PAT if one resolves, else None.
+
+    :func:`_load_token` raises, which is right for ``POST /api/issues`` (the user
+    asked to file an issue, so a missing PAT is an error). Run reports instead
+    degrade -- they are recorded against the run either way -- so ``run_issue_github``
+    needs to *ask* without failing. One credential path, two failure policies.
+    """
+    try:
+        return _load_token()
+    except GitHubError:
+        return None
+
+
 def _compose_body(description: str, *, email: str, name: str | None) -> str:
     """Append a submitter footer so issues stay attributable to a real user."""
     submitter = email or "unknown"

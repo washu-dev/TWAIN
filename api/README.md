@@ -63,6 +63,49 @@ access token (RS256) — both are accepted, routed by algorithm.
 | GET | `/api/conversations/{id}/report` | run summary + artifact list |
 | GET | `/api/conversations/{id}/artifacts` · `/artifacts/{name}` | list · fetch one artifact |
 
+### Report an issue about a run
+
+A researcher can report a problem from the run window without leaving TWAIN; the
+run's own data is attached server-side, so a maintainer never has to ask what was
+being run. See `run_issue_github.py` (labels + issue body) and `run_issues.py`
+(the snapshot + the local record). This is distinct from `POST /api/issues`
+(`github_issues.py`), which files a plain title+body issue — that is what the
+one-tap "provision this engine" request on the approval card uses.
+
+```
+GET  /api/conversations/{id}/issue-context   # exactly what would be attached, + whether GitHub is configured
+POST /api/conversations/{id}/issues          # {category, title, description} -> files the issue
+GET  /api/conversations/{id}/issues          # what has already been reported for this run
+```
+
+`category` is one of `bug | library | result | other` and maps to a GitHub label
+(`BugReport`, `LibraryAddition`, `ResultDiscrepancy`, `RunReport`); every issue
+also carries `RunReport`. `library` deliberately reuses the tag the pipeline uses
+when discovery reaches for an uninstalled library, so both kinds of request
+triage as one list.
+
+The response `status` is:
+
+| status | meaning |
+|---|---|
+| `created` | the issue was filed; `issue_url` points at it |
+| `queued` | no GitHub credentials in this deployment — the report is saved against the run, nothing was filed |
+| `failed` | GitHub refused or was unreachable; `error` says why. The report is still saved |
+
+Credentials are resolved by `github_issues.py`, which is the single GitHub
+identity for the whole API — so configuring the PAT once enables both this and
+`POST /api/issues`:
+
+| Env var | Effect |
+|---|---|
+| `GITHUB_ISSUE_TOKEN` | the PAT. Needs read+write on Issues for the repo. When unset, read from Secrets Manager at `TWAIN_GITHUB_SECRET_ID` (default `TWAIN/github/GITHUB_ISSUE_TOKEN`) |
+| `GITHUB_ISSUE_REPO` | `owner/repo` the issues go to (default `washu-dev/TWAIN`). There is no git remote inside the container, so this is configuration-only |
+| `TWAIN_RUN_ISSUES=0` | force run reports off, so a staging deployment can't post to the tracker |
+
+Without a PAT the run-report endpoints still work: a report is recorded against
+the run with status `queued`. `POST /api/issues` instead returns 502, since there
+the user explicitly asked to file an issue.
+
 ## Tests
 
 ```bash
@@ -74,11 +117,15 @@ ruff check .
 
 ```
 api/
-├── main.py            # FastAPI app + routes
-├── auth.py            # bearer-token auth: interim (HS256) + Entra (RS256)
-├── conversations.py   # conversation/message/artifact/event data access
-├── database.py        # Postgres connection + user CRUD (Secrets Manager aware)
-├── migrations/        # idempotent SQL schema
+├── main.py               # FastAPI app + routes
+├── auth.py               # bearer-token auth: interim (HS256) + Entra (RS256)
+├── conversations.py      # conversation/message/artifact/event data access
+├── database.py           # Postgres connection + user CRUD (Secrets Manager aware)
+├── github_issues.py      # GitHub identity + plain title+body issues (POST /api/issues)
+├── run_issue_github.py   # Run reports as GitHub issues: labels + issue body
+├── run_issues.py         # The run snapshot attached to a report + its local record
+├── migrate.py            # Applies migrations/ on startup (advisory-locked, idempotent)
+├── migrations/           # idempotent SQL schema
 ├── requirements.txt
-└── test_*.py          # test suite
+└── test_*.py             # test suite
 ```

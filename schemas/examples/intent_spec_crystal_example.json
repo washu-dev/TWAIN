@@ -1,5 +1,5 @@
 {
-  "objective": "Compute the bulk modulus of rutile titanium dioxide (TiO2) from first principles.",
+  "objective": "Compute the bulk modulus of rutile titanium dioxide (TiO2) from first principles with GPAW.",
   "domain": "materials",
   "system_descriptors": {
     "kind": "crystal",
@@ -14,6 +14,7 @@
       "mp_id": "mp-2657"
     }
   },
+  "requested_libraries": ["GPAW"],
   "acceptance_criteria": [
     {
       "metric_name": "bulk_modulus",

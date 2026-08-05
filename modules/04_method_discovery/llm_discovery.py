@@ -63,7 +63,7 @@ TASK
   domain:    {domain}
   property:  {property}
   platform:  {platform}
-
+{requested}
 CANDIDATE LIBRARIES (the framework that builds the system / drives a calculator):
 {libraries}
 
@@ -85,6 +85,22 @@ You may name a well-known tool that isn't listed if it is clearly better and \
 installable on the platform, but prefer the candidates. Begin now."""
 
 
+_REQUESTED_BLOCK = """
+USER-REQUESTED SOFTWARE (the researcher named these explicitly): {names}
+  Honour the request when the tool appears among the candidates below and fits the \
+task -- the researcher's own choice outranks your preference. If a requested tool \
+is NOT among the candidates it is not installed here: pick the closest candidate \
+that IS, and say in the reasoning which request you could not honour and why. Never \
+name a requested tool you were not offered as a candidate.
+"""
+
+
+def _fmt_requested(requested: Optional[List[str]]) -> str:
+    """The user-preference block, or "" when the researcher named no software."""
+    names = [str(r).strip() for r in (requested or []) if str(r or "").strip()]
+    return _REQUESTED_BLOCK.format(names=", ".join(names)) if names else ""
+
+
 def _fmt_candidates(items: List[dict], keys: List[str]) -> str:
     lines = []
     for it in items:
@@ -94,13 +110,15 @@ def _fmt_candidates(items: List[dict], keys: List[str]) -> str:
 
 
 def build_prompt(*, objective, material, domain, requested_property, platform,
-                 libraries: List[dict], calculators: List[dict]) -> str:
+                 libraries: List[dict], calculators: List[dict],
+                 requested_libraries: Optional[List[str]] = None) -> str:
     return _PROMPT.format(
         objective=objective or "(unspecified)",
         material=material or "(unspecified)",
         domain=domain or "(unspecified)",
         property=requested_property or "(unspecified)",
         platform=platform or "(unspecified)",
+        requested=_fmt_requested(requested_libraries),
         libraries=_fmt_candidates(libraries, ["name", "capabilities", "description"]),
         calculators=_fmt_candidates(
             calculators,
@@ -173,6 +191,7 @@ def recommend_toolset(
     libraries: List[dict],
     calculators: List[dict],
     agent: Callable[[str], str],
+    requested_libraries: Optional[List[str]] = None,
     available: Optional[Callable[[str, str], Optional[bool]]] = None,
     max_repair: int = 1,
 ) -> Optional[ToolRecommendation]:
@@ -182,13 +201,17 @@ def recommend_toolset(
     or the chosen calculator can't be grounded on the platform after repair (the
     caller then uses the deterministic registry path). ``agent`` is a
     ``prompt -> str`` callable; ``available(package, platform)`` returns
-    True/False/None (None = unknown -> trusted).
+    True/False/None (None = unknown -> trusted). ``requested_libraries`` are tools
+    the researcher named explicitly; they are given to the model as a preference
+    to honour where possible, not as a constraint -- the caller still grounds the
+    resulting pick against what is actually installed.
     """
     available = available or _default_conda_check
     prompt = build_prompt(
         objective=objective, material=material, domain=domain,
         requested_property=requested_property, platform=platform,
         libraries=libraries, calculators=calculators,
+        requested_libraries=requested_libraries,
     )
     warnings: List[str] = []
     for attempt in range(max_repair + 1):

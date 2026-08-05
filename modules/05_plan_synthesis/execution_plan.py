@@ -110,6 +110,13 @@ class ExecutionPlan:
     # hard-coded sample.
     target_system: Optional[dict] = None
     requested_property: Optional[str] = None
+    # Libraries this plan WANTED but could not use, because they are not in the
+    # preset install set -- each one recorded and filed as a 'LibraryAddition'
+    # GitHub issue (see method_discovery.library_requests). The plan itself always
+    # uses installed libraries only; this is the audit trail of what was asked for,
+    # mirrored into safety_notes for the researcher. Optional, so existing plans
+    # and tests are unaffected.
+    library_requests: List[dict] = field(default_factory=list)
     # A plain-language description of what this run will do -- the property, the
     # concrete system, the toolset, and the reasoning behind the approach. Built
     # at plan time so the approval gate shows *what will happen*, not just which
@@ -120,6 +127,7 @@ class ExecutionPlan:
     # suggestion and on what basis, rather than guessing whether they are a hard
     # requirement. Optional so existing plans/tests are unaffected.
     slurm_rationale: Optional[dict] = None
+
     def __post_init__(self):
         if self.summary is not None and type(self.summary) is not str:
             raise ValueError("summary must be a str when provided")
@@ -164,6 +172,10 @@ class ExecutionPlan:
 
         if type(self.safety_notes) is not list or any(type(note) is not str for note in self.safety_notes):
             raise ValueError("safety_notes must be a list of str")
+
+        if type(self.library_requests) is not list or any(
+                type(req) is not dict for req in self.library_requests):
+            raise ValueError("library_requests must be a list of dict")
 
 
 if __name__ == "__main__":
