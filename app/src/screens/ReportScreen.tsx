@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -12,10 +12,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { apiClient, ArtifactMeta, Report } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
+import { useConversationStream } from '@/hooks/useConversationStream';
 import { canCopy, copyText } from '@/utils/clipboard';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
+
+// Mirrors ChatScreen/BrowseScreen. A run in any other status can still produce
+// artifacts, so the report has to keep looking until it reaches one of these.
+const TERMINAL_STATUSES = ['completed', 'error', 'rejected', 'cancelled'];
 
 export const ReportScreen: React.FC = () => {
   const router = useRouter();
@@ -44,6 +49,28 @@ export const ReportScreen: React.FC = () => {
       cancelled = true;
     };
   }, [id, authLoading, isAuthenticated]);
+
+  // Re-read the report while the run is still going. Separate from the initial
+  // load above so it never re-triggers the spinner, and it swallows transient
+  // failures because the stream will simply ask again.
+  const refresh = useCallback(async () => {
+    if (!id) return;
+    try {
+      setReport(await apiClient.getReport(id as string));
+    } catch {
+      // Transient; the next event or poll tick retries.
+    }
+  }, [id]);
+
+  // A report opened before the run finished has to keep converging on its own.
+  // ChatScreen has always been live (SSE, falling back to polling); this screen
+  // fetched exactly once and then never again, so opening it mid-run pinned an
+  // empty result on screen until the browser was reloaded -- while the value sat
+  // in the DB the whole time. The stream stops itself at a terminal status, and
+  // `error` gates it so a 401 or a 500 cannot become a poll loop.
+  const stillRunning =
+    !error && (!report || !TERMINAL_STATUSES.includes(report.status));
+  useConversationStream(id as string | undefined, stillRunning, refresh);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
