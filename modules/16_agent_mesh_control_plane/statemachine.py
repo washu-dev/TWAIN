@@ -1091,8 +1091,14 @@ class StateMachine:
         despite a live agent is traceable to the failure that caused it.
         """
         objective = intent.get("objective") or "the requested computation"
+        # A metric can carry no target (the researcher gave no number). Rendering
+        # that as "within None of None" would state a criterion the graph cannot
+        # judge, so say what is actually going to happen to it instead.
         acceptance = [
-            f"{m.get('metric_name')} within {m.get('tolerance')} of {m.get('target_value')}"
+            (f"{m.get('metric_name')} within {m.get('tolerance')} "
+             f"of {m.get('target_value')}")
+            if m.get("target_value") is not None and m.get("tolerance") is not None
+            else f"{m.get('metric_name')} reported for review (no target specified)"
             for m in intent.get("acceptance_metrics", [])
             if isinstance(m, dict) and m.get("metric_name") is not None
         ]

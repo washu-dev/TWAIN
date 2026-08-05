@@ -109,10 +109,12 @@
             "type": "string"
           },
           "target_value": {
-            "type":"number"
+            "type":["number","null"],
+            "description":"null means the researcher gave no number to hit -- judge against a reference instead. Prefer null over a 0.0 placeholder, which downstream stages compare against literally."
           },
           "tolerance":{
-            "type":"number"
+            "type":["number","null"],
+            "description":"null when target_value is null: there is no band to be inside of."
           }
         }
       }

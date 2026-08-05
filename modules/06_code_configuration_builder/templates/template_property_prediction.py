@@ -127,6 +127,16 @@ def _check_acceptance(metrics, criteria):
     ...     [{"metric_name": "mean_mol_weight", "target_value": 60.0, "tolerance": 5.0}],
     ... )
     {'mean_mol_weight': {'value': 60.0, 'target': 60.0, 'tolerance': 5.0, 'passed': True}}
+
+    A metric the plan named but gave no number for is reported, not judged
+    -- passed is None, which is neither a pass nor a fail:
+
+    >>> _check_acceptance(
+    ...     {"mean_mol_weight": 60.0},
+    ...     [{"metric_name": "mean_mol_weight", "target_value": None,
+    ...       "tolerance": None}],
+    ... )
+    {'mean_mol_weight': {'value': 60.0, 'target': None, 'tolerance': None, 'passed': None}}
     """
     report = {}
     for crit in criteria or []:
@@ -134,13 +144,19 @@ def _check_acceptance(metrics, criteria):
         if name is None or name not in metrics:
             continue
         value = metrics[name]
-        target = crit.get("target_value", 0.0)
-        tol = crit.get("tolerance", 0.0)
+        # A plan may name a metric with no number to hit, because the researcher
+        # gave none. .get's default cannot cover that case: the key is present and
+        # null, so it returns None and float(None) would crash the run *after* it
+        # had already spent its allocation. Report the value as unchecked --
+        # passed=None, distinct from both a real pass and a real fail.
+        target = crit.get("target_value")
+        tol = crit.get("tolerance")
         report[name] = {
             "value": value,
             "target": target,
             "tolerance": tol,
-            "passed": abs(float(value) - float(target)) <= float(tol),
+            "passed": (None if target is None or tol is None
+                       else abs(float(value) - float(target)) <= float(tol)),
         }
     return report
 
