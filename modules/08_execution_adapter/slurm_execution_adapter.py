@@ -469,6 +469,23 @@ class SlurmExecutionAdapter:
         candidates = " ".join(shlex.quote(p) for p in self.env_pythons)
         lines = [
             "set -e",
+            # Calculation scratch goes on NODE-LOCAL disk, never on the shared
+            # filesystem the run directory lives on. quacc defaults its scratch to
+            # the results dir (SCRATCH_DIR=None -> RESULTS_DIR -> "." -> here, on
+            # GPFS), then moves the whole tmpdir into place when the calculation
+            # finishes. On a network filesystem a file unlinked while still open
+            # becomes a `.nfsXXXX` silly-rename stub, and moving THAT fails with
+            # EBUSY -- so a Psi4 job that had already produced its gradient died in
+            # cleanup (Slurm job 2631900). Measured on a compute node: the same
+            # unlink-while-open leaves `.nfs...` under /storage2 and nothing at all
+            # under /tmp, which is xfs and node-local.
+            #
+            # Set before the smoke gate on purpose: the smoke run drives the same
+            # calculation path and is where that job actually failed. RESULTS_DIR is
+            # deliberately left alone -- results must land in the run directory on
+            # shared storage, which is the only part the login node can read.
+            'export QUACC_SCRATCH_DIR="${TMPDIR:-/tmp}/twain-${SLURM_JOB_ID:-$$}"',
+            'mkdir -p "$QUACC_SCRATCH_DIR"',
             # An ASE calculator shells out to its engine binary (nwchem, dftb+,
             # pw.x). Invoking <prefix>/bin/python by absolute path does not
             # activate the env, so its bin/ is absent from PATH and the binary is
