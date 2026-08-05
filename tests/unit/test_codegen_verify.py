@@ -1417,3 +1417,64 @@ class TestEngineLaunchIsActuallyUsed:
         assert report.healthy, "a utilisation warning must never block the run"
         assert "TWAIN_ENGINE_LAUNCH" in seen.get("prompt", ""), (
             "the warning has to reach the model for it to be fixable")
+
+
+class TestTheRepairSandboxRunsTheRealBundle:
+    """A bundle can carry helper modules; smoking main.py alone breaks them.
+
+    twain_pseudo.py and twain_thermo.py reach a run only through
+    RunBundle.helpers, but ScriptDoctor.smoke() wrote main.py into a bare temp
+    dir. The import then failed for a reason that is not the code's fault -- and
+    _classify_smoke graded it `repairable`, so up to max_rounds LLM repairs were
+    spent on it. The cheapest way for a model to silence
+    "No module named twain_pseudo" is to drop the import and write the
+    pseudopotential filenames inline, which is precisely what that helper exists
+    to prevent. A safety feature that talks the model out of using it is worse
+    than not having it.
+    """
+
+    def _doctor(self, **kw):
+        return ScriptDoctor(brief=dict(_brief(),
+                                       calculator_import="ase.calculators.espresso",
+                                       library_import="ase"), **kw)
+
+    def _missing(self, module):
+        return f"Traceback...\nModuleNotFoundError: No module named '{module}'\n"
+
+    def test_a_missing_helper_is_never_a_code_bug(self):
+        doctor = self._doctor(bundle_files={"twain_pseudo.py": "x = 1\n"})
+        assert doctor._classify_smoke(
+            self._missing("twain_pseudo")).status == "unverifiable"
+
+    def test_that_holds_even_if_the_copy_never_happened(self):
+        """Belt and braces: the twain_ prefix is enough on its own."""
+        doctor = self._doctor()
+        for module in ("twain_pseudo", "twain_thermo"):
+            assert doctor._classify_smoke(
+                self._missing(module)).status == "unverifiable", module
+
+    def test_a_real_missing_module_is_still_repairable(self):
+        """The guard must not blunt the check it lives in."""
+        assert self._doctor()._classify_smoke(
+            self._missing("matgl")).status == "repairable"
+
+    def test_the_toolset_exemption_still_works(self):
+        assert self._doctor()._classify_smoke(
+            self._missing("ase")).status == "unverifiable"
+
+    def test_the_doctor_carries_the_bundle_files(self, tmp_path):
+        doctor = self._doctor(bundle_files={"twain_thermo.py": "VALUE = 41\n"},
+                             sim_python=None)
+        assert doctor.bundle_files == {"twain_thermo.py": "VALUE = 41\n"}
+
+    def test_a_script_importing_a_helper_smokes_clean_in_the_sandbox(self, tmp_path):
+        """End to end through the real subprocess path."""
+        import sys
+        script = ("import argparse\nfrom twain_thermo import VALUE\n"
+                  "p = argparse.ArgumentParser(); p.add_argument('--smoke', "
+                  "action='store_true'); p.add_argument('--output', default='results.csv')\n"
+                  "a = p.parse_args()\n"
+                  "open(a.output, 'w').write(f'value\\n{VALUE}\\n')\n")
+        doctor = self._doctor(bundle_files={"twain_thermo.py": "VALUE = 41\n"},
+                              sim_python=sys.executable)
+        assert doctor.smoke(script).status == "pass"

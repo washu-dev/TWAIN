@@ -685,6 +685,16 @@ class SlurmExecutionAdapter:
                     f"Slurm job {job_id} hit its wall-clock limit and was killed")
         if state is JobState.CANCELLED:
             return ExecutionStatus.FAILED, f"Slurm job {job_id} was cancelled"
+        # Our own in-job `timeout` fires ~2 min before Slurm's limit so a wedged
+        # engine dies with a diagnosable code instead of idling out the
+        # allocation. That means Slurm never reports its own TIMEOUT state for
+        # this case, and without mapping 124 the run would be classified a
+        # generic FAILED -- losing the actionable "it ran out of time" message.
+        if exit_code == 124:
+            return (ExecutionStatus.TIMEOUT,
+                    f"Slurm job {job_id} made no progress within its wall-clock "
+                    f"limit and was stopped short of it — raise max_time on the "
+                    f"approval card, or check the job log for a wedged engine")
         # OUT_OF_MEMORY maps to FAILED in parse_slurm_state; surface it clearly
         # (sacct often reports ExitCode 0:125 which looks like success otherwise).
         blob = (stdout or "").lower()

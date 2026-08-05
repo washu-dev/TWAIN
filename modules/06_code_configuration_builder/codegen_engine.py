@@ -605,7 +605,11 @@ partway or omit the entrypoint.
 - Run entirely IN-PROCESS on the packages installed in the run environment (the Python \
 standard library, `{library_import}`, and `{calculator_import}`). {also_available} Do NOT \
 require an external command-line program or separate binary that is not part of that \
-installed stack -- a tool you assume is on PATH may be absent and will crash the run. Do \
+installed stack -- a tool you ASSUME is on PATH may be absent and will crash the run. The \
+one exception is the engine this plan selected: when a PARALLELISM note below tells you it \
+is a separate program, its binary is declared in the registry and checked on PATH by the \
+bundle's smoke test before anything runs, so driving it is expected -- what is forbidden is \
+reaching for some OTHER binary nobody verified. Do \
 NOT add physics corrections that computing {property} does not require. When a driver uses \
 ASE and a DFT-D3 dispersion correction IS warranted (e.g. a van-der-Waals-bound molecular \
 crystal), the IN-PROCESS `dftd3.ase.DFTD3` calculator (from the installed dftd3-python) is \

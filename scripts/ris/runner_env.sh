@@ -9,6 +9,15 @@ export PATH="$HOME/.pixi/bin:$PATH"
 # Unbuffered so `tail -f runner-ris.log` shows activity in real time.
 export PYTHONUNBUFFERED=1
 
+# Which file holds THIS process's output, so a run error can tell the reader
+# where to look. Logging is a shell-level redirect (auto_update.sh tees the
+# always-on runner into runner-ris.log), so the python side cannot discover it
+# on its own -- the launcher has to say. scale_runners.sh overrides this per
+# worker; without it a scaled worker's output lands in scale-runners.log
+# interleaved with cron scaling chatter, while the error block points readers at
+# runner-ris.log, which never mentions that run at all.
+export TWAIN_RUN_LOG="${TWAIN_RUN_LOG:-$RIS_DIR/runner-ris.log}"
+
 # sbatch/squeue for the runner's own submissions (jobs load modules themselves).
 # `module` is a shell function that only exists after Lmod init, which login
 # shells get from /etc/profile -- but a tmux session started from cron (the
