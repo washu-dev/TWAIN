@@ -2200,6 +2200,10 @@ class StateMachine:
                          or _first_metric_name(plan)
                          or "the requested property"),
             "material_desc": CodegenEngine._material_desc(material),
+            # The bare formula as well as the prose description: a check that has
+            # to reason about which ELEMENTS a run touches cannot parse them back
+            # out of "Calcium diplatinide (CaPt2), cubic Laves phase" reliably.
+            "formula": material.get("formula"),
             # Registry-declared placement, so the doctor can tell whether the
             # script has to hand its ranks to the engine.
             "parallelism": self._selected_parallelism(plan),

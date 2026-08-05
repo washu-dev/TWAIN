@@ -15,6 +15,8 @@ Run from the repo root with:  pixi run pytest tests/unit/test_codegen_verify.py
 """
 import doctest
 
+import pytest
+
 from code_gen import codegen_engine as eng
 from code_gen import script_doctor as sd
 from code_gen.codegen_engine import CodegenEngine, pixi_env_python
@@ -1478,3 +1480,159 @@ class TestTheRepairSandboxRunsTheRealBundle:
         doctor = self._doctor(bundle_files={"twain_thermo.py": "VALUE = 41\n"},
                               sim_python=sys.executable)
         assert doctor.smoke(script).status == "pass"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Element coverage + silent calculator substitution (job 2611227)
+# ═══════════════════════════════════════════════════════════════════════════
+class TestElementCoverage:
+    """A potential used outside its parameter table is a guaranteed failure.
+
+    Job 2611227 burned its allocation on it: MACE was absent from the env, the
+    generated script fell back to EMT, and the material contained Ca. ASE raised
+    NotImplementedError from inside initialize(); the script's bare except
+    swallowed it; the next evaluation reused the same calculator on new Atoms with
+    the same species, so 'numbers' was not in system_changes, initialize() was
+    skipped, and it died on "'EMT' object has no attribute 'nl'".
+    """
+
+    def _brief_with(self, formula):
+        b = _brief()
+        b["formula"] = formula
+        b["calculator_import"] = "ase"
+        return b
+
+    EMT_SCRIPT = ("import ase\n"
+                  "from ase.calculators.emt import EMT\n"
+                  "def main():\n"
+                  "    calc = EMT()\n"
+                  "    print(calc)\n"
+                  "if __name__ == '__main__':\n    main()\n")
+
+    def test_an_unsupported_element_is_an_error(self):
+        diags = ScriptDoctor(brief=self._brief_with("CaPt2")).static_diagnostics(
+            self.EMT_SCRIPT)
+        hits = [d for d in diags if d.source == "element-coverage"]
+        assert len(hits) == 1
+        assert hits[0].severity == "error"
+        assert "Ca" in hits[0].message
+        assert "nl" in hits[0].message      # names the misleading symptom
+
+    def test_a_supported_material_is_left_alone(self):
+        """EMT on Pt or Cu is legitimate; the check must not fire."""
+        for formula in ("Pt", "Cu", "AgAu", "CuNi"):
+            diags = ScriptDoctor(brief=self._brief_with(formula)).static_diagnostics(
+                self.EMT_SCRIPT)
+            assert not [d for d in diags if d.source == "element-coverage"], formula
+
+    def test_a_script_that_never_touches_emt_is_left_alone(self):
+        script = ("import ase\ndef main():\n    print('hi')\n"
+                  "if __name__ == '__main__':\n    main()\n")
+        diags = ScriptDoctor(brief=self._brief_with("CaPt2")).static_diagnostics(script)
+        assert not [d for d in diags if d.source == "element-coverage"]
+
+    @pytest.mark.parametrize("formula", [
+        None, "", "   ", "the requested material", "Calcium diplatinide", "Foo",
+    ])
+    def test_a_non_formula_never_blocks_a_run(self, formula):
+        """error severity can block, so an unparseable name must yield nothing."""
+        diags = ScriptDoctor(brief=self._brief_with(formula)).static_diagnostics(
+            self.EMT_SCRIPT)
+        assert not [d for d in diags if d.source == "element-coverage"]
+
+    @pytest.mark.parametrize("text,expected", [
+        ("CaPt2", {"Ca", "Pt"}),
+        ("C9H8O4", {"C", "H", "O"}),
+        ("Si", {"Si"}),
+        ("Mg(OH)2", {"Mg", "O", "H"}),
+        ("CuSO4·5H2O", {"Cu", "S", "O", "H"}),
+        # Not formulas -- must yield nothing rather than a plausible-looking guess
+        ("Foo", frozenset()),                    # "Fo" is not an element
+        ("Calcium diplatinide", frozenset()),    # would otherwise find "Ca"
+        ("Calciumdiplatinide", frozenset()),     # same, without the space to help
+        ("the requested material", frozenset()),
+        (None, frozenset()),
+        ("", frozenset()),
+    ])
+    def test_formula_elements_is_conservative(self, text, expected):
+        assert sd.formula_elements(text) == expected
+
+    def test_the_emt_table_matches_ase(self):
+        """Pinned to ASE itself, so an ASE update cannot leave the table stale."""
+        try:
+            from ase.calculators.emt import parameters
+        except Exception:                                  # pragma: no cover
+            pytest.skip("ase not importable in this env")
+        assert sd._ELEMENT_LIMITED_CALCULATORS["EMT"] == frozenset(parameters)
+
+
+class TestSilentCalculatorSubstitution:
+    """A missing library must fail loudly, not become a different experiment."""
+
+    SUBSTITUTING = (
+        "import ase\n"
+        "def get_calculator():\n"
+        "    try:\n"
+        "        from mace.calculators import mace_mp\n"
+        "    except ModuleNotFoundError:\n"
+        "        from ase.calculators.emt import EMT\n"
+        "        return EMT()\n"
+        "    return mace_mp(model='small')\n"
+        "def main():\n"
+        "    print(get_calculator())\n"
+        "if __name__ == '__main__':\n    main()\n")
+
+    def test_a_swapped_in_calculator_is_an_error(self):
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(self.SUBSTITUTING)
+        hits = [d for d in diags if d.source == "calculator-substitution"]
+        assert len(hits) == 1
+        assert hits[0].severity == "error"
+        assert "mace" in hits[0].message and "ase" in hits[0].message
+
+    def test_an_aliasing_fallback_is_not_flagged(self):
+        """`except ImportError: import tomli as tomllib` builds nothing."""
+        script = ("import ase\n"
+                  "try:\n    import tomllib\n"
+                  "except ImportError:\n    import tomli as tomllib\n"
+                  "def main():\n    print(tomllib)\n"
+                  "if __name__ == '__main__':\n    main()\n")
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not [d for d in diags if d.source == "calculator-substitution"]
+
+    def test_a_retry_within_the_same_library_is_not_flagged(self):
+        """Trying several checkpoints of the SAME potential is legitimate."""
+        script = ("import ase\n"
+                  "def load():\n"
+                  "    try:\n        from mace.calculators import mace_mp\n"
+                  "    except ImportError:\n"
+                  "        from mace.calculators import mace_off\n"
+                  "        return mace_off()\n"
+                  "    return mace_mp()\n"
+                  "def main():\n    print(load())\n"
+                  "if __name__ == '__main__':\n    main()\n")
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not [d for d in diags if d.source == "calculator-substitution"]
+
+    def test_a_non_import_except_is_not_flagged(self):
+        """Only ImportError fallbacks substitute a library."""
+        script = ("import ase\n"
+                  "def load():\n"
+                  "    try:\n        from ase.calculators.emt import EMT\n"
+                  "        return EMT()\n"
+                  "    except ValueError:\n"
+                  "        from numpy import zeros\n"
+                  "        return zeros(3)\n"
+                  "def main():\n    print(load())\n"
+                  "if __name__ == '__main__':\n    main()\n")
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        assert not [d for d in diags if d.source == "calculator-substitution"]
+
+    def test_both_checks_fire_on_the_real_failing_script(self):
+        """The shape of job 2611227's main.py: substitution AND bad coverage."""
+        brief = _brief()
+        brief["formula"] = "CaPt2"
+        brief["calculator_import"] = "ase"
+        diags = ScriptDoctor(brief=brief).static_diagnostics(self.SUBSTITUTING)
+        sources = {d.source for d in diags if d.severity == "error"}
+        assert "calculator-substitution" in sources
+        assert "element-coverage" in sources

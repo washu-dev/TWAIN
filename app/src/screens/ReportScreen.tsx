@@ -72,6 +72,25 @@ export const ReportScreen: React.FC = () => {
     !error && (!report || !TERMINAL_STATUSES.includes(report.status));
   useConversationStream(id as string | undefined, stillRunning, refresh);
 
+  // Belt and braces for the window this screen cannot see. The runner now commits
+  // artifacts before it publishes a terminal event, but a status that says
+  // "finished" was previously up to 8s ahead of the last artifact, and this screen
+  // stops streaming the moment it reads terminal -- so a single late write would
+  // strand an empty report until a manual reload, which is the bug this whole
+  // effect exists to kill. A few bounded sweeps after the run ends cost three
+  // requests and remove the class of failure. Deps are the boolean and a stable
+  // callback, so this runs once per run-end, never in a loop.
+  const finished = !!report && TERMINAL_STATUSES.includes(report.status);
+  useEffect(() => {
+    if (!finished) return;
+    const timers = [1500, 5000, 12000].map((ms) =>
+      setTimeout(() => {
+        void refresh();
+      }, ms),
+    );
+    return () => timers.forEach(clearTimeout);
+  }, [finished, refresh]);
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <View style={styles.topBar}>
