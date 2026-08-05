@@ -325,12 +325,19 @@ class RunnerDB:
 
     # ---- artifacts ------------------------------------------------------------
     def upsert_artifact(self, session_id: str, name: str, content: str, kind: str) -> None:
+        # created_at is deliberately NOT refreshed on update. A run captures its
+        # artifacts more than once -- once before the terminal event is published,
+        # and again from the runner's finally block as a backstop -- so bumping the
+        # timestamp on the second write made the column mean "last written" and
+        # left no way to audit whether the results really were committed before the
+        # run announced itself finished. Keeping the insert time makes that
+        # orderable against sessions.updated_at.
         self._execute(
             """
             INSERT INTO artifacts (session_id, name, kind, content)
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (session_id, name) DO UPDATE SET
-                kind = EXCLUDED.kind, content = EXCLUDED.content, created_at = now();
+                kind = EXCLUDED.kind, content = EXCLUDED.content;
             """,
             (session_id, name, kind, content),
         )
