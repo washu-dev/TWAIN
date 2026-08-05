@@ -33,6 +33,17 @@ const BASE_SCOPES = ['openid', 'profile', 'email', 'offline_access'];
 // access token is used instead (the standard resource-token flow).
 const USE_ID_TOKEN = !ENTRA_CONFIG.apiScope;
 
+// Discovery-fallback timing. The wait lets useAutoDiscovery win normally, so the
+// happy path makes no extra request; the retries cover a transient failure, which
+// the hook itself does not.
+const DISCOVERY_FALLBACK_AFTER_MS = 2500;
+const DISCOVERY_RETRY_BACKOFF_MS = 2000;
+const DISCOVERY_ATTEMPTS = 3;
+// Absolute ceiling on the splash. Beyond this the app is shown regardless, because
+// an indefinite spinner is the one outcome from which the user cannot recover
+// without reloading the tab.
+const AUTH_LOADING_CEILING_MS = 12000;
+
 interface AuthContextValue {
   isAuthenticated: boolean;
   // Initial validation of a stored session (blocks the app briefly on load).
@@ -92,6 +103,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // OIDC discovery + PKCE auth request. Hooks must run unconditionally; when SSO
   // is unconfigured `request` simply stays unusable and `signIn` no-ops.
   const discovery = AuthSession.useAutoDiscovery(ENTRA_CONFIG.authority);
+  // useAutoDiscovery returns null until it succeeds and, per the SDK reference,
+  // defines no retry if the fetch fails -- so one slow or failed discovery request
+  // left it null for the whole page load. Everything that needs it then stalled:
+  // the silent refresh below returned early WITHOUT clearing isLoading, and
+  // _layout renders a splash while isLoading, so the user sat on an indefinite
+  // spinner. Reloading the tab was the only way in, which is exactly the "have to
+  // refresh to get in sometimes" report. Fetch it ourselves as a bounded retrying
+  // fallback, and use the result everywhere -- including useAuthRequest, or
+  // interactive sign-in would stay broken for the same reason.
+  const [fallbackDiscovery, setFallbackDiscovery] =
+    useState<AuthSession.DiscoveryDocument | null>(null);
+  const effectiveDiscovery = discovery ?? fallbackDiscovery;
+
   const redirectUri = useMemo(
     () => AuthSession.makeRedirectUri({ scheme: 'twain' }),
     [],
@@ -110,8 +134,54 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       usePKCE: true,
       prompt: AuthSession.Prompt.SelectAccount,
     },
-    discovery,
+    effectiveDiscovery,
   );
+
+  // The fallback fetch. Waits briefly for useAutoDiscovery to win on its own (the
+  // common case), then takes over with a bounded number of retries so a single
+  // transient failure is not fatal to the whole session.
+  useEffect(() => {
+    if (AUTH_DISABLED || !authConfigured || effectiveDiscovery) return;
+    let cancelled = false;
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const tryFetch = () => {
+      const delay = attempt === 0
+        ? DISCOVERY_FALLBACK_AFTER_MS
+        : DISCOVERY_RETRY_BACKOFF_MS * attempt;
+      timer = setTimeout(async () => {
+        if (cancelled) return;
+        attempt += 1;
+        try {
+          const doc = await AuthSession.fetchDiscoveryAsync(ENTRA_CONFIG.authority);
+          if (!cancelled) setFallbackDiscovery(doc);
+        } catch {
+          if (!cancelled && attempt < DISCOVERY_ATTEMPTS) tryFetch();
+        }
+      }, delay);
+    };
+    tryFetch();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [authConfigured, effectiveDiscovery]);
+
+  // Last resort, and the actual invariant: isLoading must always resolve. Every
+  // early return in the validation effect below leaves it true on the assumption
+  // that the effect will re-run with what it was missing -- and if that never
+  // arrives, _layout holds a spinner forever and the only way in is reloading the
+  // tab. Showing the app (landing/login) beats a dead splash. Stored tokens are
+  // deliberately left intact, so a session that is merely slow still restores
+  // itself once the request it was waiting on lands.
+  useEffect(() => {
+    if (!isLoading) return;
+    const timer = setTimeout(() => {
+      setIsLoading(false);
+      setError((prev) => prev ?? 'Could not reach the sign-in service — please try again.');
+    }, AUTH_LOADING_CEILING_MS);
+    return () => clearTimeout(timer);
+  }, [isLoading]);
 
   // Surface the resolved redirect URI in dev so it can be registered verbatim on
   // the SPA app registration (Entra requires an exact match).
@@ -153,13 +223,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshInFlight = useRef<Promise<string | null> | null>(null);
   const refreshSession = useCallback(async (): Promise<string | null> => {
     const { refreshToken } = loadTokens();
-    if (!refreshToken || !discovery || !ENTRA_CONFIG.clientId) return null;
+    if (!refreshToken || !effectiveDiscovery || !ENTRA_CONFIG.clientId) return null;
     if (!refreshInFlight.current) {
       refreshInFlight.current = (async () => {
         try {
           const refreshed = await AuthSession.refreshAsync(
             { clientId: ENTRA_CONFIG.clientId, refreshToken, scopes },
-            discovery,
+            effectiveDiscovery,
           );
           const bearer = USE_ID_TOKEN ? refreshed.idToken : refreshed.accessToken;
           if (!bearer) return null;
@@ -177,7 +247,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })();
     }
     return refreshInFlight.current;
-  }, [discovery, scopes, applyToken]);
+  }, [effectiveDiscovery, scopes, applyToken]);
 
   // Keep the session alive across access-token expiry (the "logged out after a
   // few minutes idle" bug): each request renews a nearly-expired token up front,
@@ -222,6 +292,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const me = await apiClient.me();
           if (!cancelled) {
             setUser(me);
+            // Clears the ceiling's "could not reach sign-in" message if the
+            // validation was merely slow and landed after the splash gave up.
+            setError(null);
             setIsLoading(false);
           }
           return;
@@ -231,11 +304,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       if (refreshToken) {
         // Need the discovery doc to refresh; wait for it (this effect re-runs).
-        if (!discovery || !ENTRA_CONFIG.clientId) return;
+        if (!effectiveDiscovery || !ENTRA_CONFIG.clientId) return;
         try {
           const refreshed = await AuthSession.refreshAsync(
             { clientId: ENTRA_CONFIG.clientId, refreshToken, scopes },
-            discovery,
+            effectiveDiscovery,
           );
           if (cancelled) return;
           const bearer = USE_ID_TOKEN ? refreshed.idToken : refreshed.accessToken;
@@ -260,7 +333,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [discovery, applyToken, establishSession, resetSession, scopes]);
+  }, [effectiveDiscovery, applyToken, establishSession, resetSession, scopes]);
 
   // Handle the outcome of an interactive sign-in (code → tokens → user).
   useEffect(() => {
@@ -268,7 +341,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     (async () => {
       if (response.type === 'success' && response.params.code) {
-        if (!discovery || !request) {
+        if (!effectiveDiscovery || !request) {
           if (!cancelled) {
             setError('Sign in could not be completed. Please try again.');
             setIsSigningIn(false);
@@ -285,7 +358,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 ? { code_verifier: request.codeVerifier }
                 : {},
             },
-            discovery,
+            effectiveDiscovery,
           );
           if (cancelled) return;
           const bearer = USE_ID_TOKEN ? token.idToken : token.accessToken;
