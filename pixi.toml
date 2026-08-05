@@ -9,6 +9,17 @@ version = "0.1.0"
 test = "pytest tests/"
 runner = "python -m runner.runner"
 dev = "bash dev.sh"
+# Lint what CI lints, so a clean run here means a clean run there. ci-runner.yml
+# runs `ruff check runner`; deploy-api.yml runs `ruff check .` from api/. Ruff
+# resolves configuration per file, so this single invocation from the root still
+# applies runner/ruff.toml and api/ruff.toml to their own trees -- confirmed by
+# S603 (flake8-bandit, off by default) firing under runner/.
+#
+# modules/ and tests/ are deliberately NOT included: neither is linted in CI, and
+# they carry ~1200 pre-existing findings that would bury a real one. Add them only
+# alongside a pass to clear them.
+lint = "ruff check runner api"
+lint-fix = "ruff check runner api --fix"
 # Fetch the DFTB+ Slater-Koster (.skf) parameter files into <repo>/slako/ (see
 # runner/fetch_slako.sh). Not committed (CC-BY-SA data); run once after checkout.
 fetch-slako = "bash runner/fetch_slako.sh"
@@ -26,6 +37,11 @@ DFTB_PREFIX = "$PIXI_PROJECT_ROOT/slako/"
 python = "3.12.*"
 jsonschema = "*"
 pytest = "*"
+# The linter CI gates on (`pixi run lint`). Unpinned like the other dev tools --
+# pixi.lock fixes the actual version -- but note the workflows install it with a
+# bare `pip install ruff`, so CI can float ahead of the lock and a ruff release
+# that adds rules will fail there after passing here. Pin both to close that.
+ruff = "*"
 python-dotenv = ">=1.2.2,<2"
 requests = ">=2.34.2,<3"
 pymatgen = ">=2026.5.4,<2027"
