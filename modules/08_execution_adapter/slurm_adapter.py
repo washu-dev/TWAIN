@@ -210,6 +210,17 @@ class SlurmError(RuntimeError):
     """Raised when a Slurm command fails (non-zero exit) or output is unparseable."""
 
 
+# Every knob that decides how many threads a numeric library opens. They are set
+# together, and anything that hands the allocation to MPI ranks must re-pin all
+# of them together: OpenBLAS reads OPENBLAS_NUM_THREADS in preference to
+# OMP_NUM_THREADS, so pinning OMP alone leaves BLAS at the full core count.
+THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
 # ----------------------------------------------------------------------- adapter
 _SUBMITTED_RE = re.compile(r"Submitted batch job (\d+)")
 
@@ -312,8 +323,7 @@ class SlurmAdapter:
         # OpenMP/BLAS threading, but those libraries default to 1 thread (or to
         # the node's full core count, oversubscribing a shared node) unless told
         # otherwise. Job-specific env can still override any of these.
-        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        for var in THREAD_ENV_VARS:
             if var not in job.env:
                 lines.append(f'export {var}="${{SLURM_CPUS_PER_TASK:-1}}"')
         for key, value in job.env.items():
