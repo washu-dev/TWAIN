@@ -324,6 +324,47 @@ class RunnerDB:
         )
 
     # ---- artifacts ------------------------------------------------------------
+    def replace_library_availability(self, rows) -> None:
+        """Publish the capability snapshot the app's library list reads.
+
+        Upserts rather than truncating: the table is read by the API continuously,
+        and a delete-then-insert would serve an empty list to anyone who looked
+        mid-refresh. Entries dropped from a registry are cleared afterwards, in the
+        same statement set, so a removed library does not linger as capability.
+        """
+        rows = list(rows or [])
+        if not rows:
+            return
+        for row in rows:
+            self._execute(
+                """
+                INSERT INTO library_availability
+                    (kind, name, import_name, version, description,
+                     installed, env, detail, checked_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (kind, name) DO UPDATE SET
+                    import_name = EXCLUDED.import_name,
+                    version     = EXCLUDED.version,
+                    description = EXCLUDED.description,
+                    installed   = EXCLUDED.installed,
+                    env         = EXCLUDED.env,
+                    detail      = EXCLUDED.detail,
+                    checked_at  = now();
+                """,
+                (row.get("kind"), row.get("name"), row.get("import_name"),
+                 row.get("version"), row.get("description"),
+                 bool(row.get("installed")), row.get("env"), row.get("detail")),
+            )
+        # Drop anything no longer in a registry, so a removed library stops being
+        # advertised as capability. Placeholders are generated from the row COUNT
+        # and every value is still parameterised.
+        pairs = [(row.get("kind"), row.get("name")) for row in rows]
+        placeholders = ", ".join(["(%s, %s)"] * len(pairs))
+        self._execute(
+            f"DELETE FROM library_availability WHERE (kind, name) NOT IN ({placeholders});",
+            [value for pair in pairs for value in pair],
+        )
+
     def upsert_artifact(self, session_id: str, name: str, content: str, kind: str) -> None:
         # created_at is deliberately NOT refreshed on update. A run captures its
         # artifacts more than once -- once before the terminal event is published,

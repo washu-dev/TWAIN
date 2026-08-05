@@ -49,6 +49,7 @@ from runner.bridges import (
     post_plan_for_approval,
     post_reject_feedback_question,
 )
+from runner.capabilities import publish as publish_capabilities
 from runner.db import JobNotifyWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
 from runner.notifications import default_notifier, make_notifier
@@ -568,6 +569,11 @@ def main() -> None:
                         help="fallback poll cadence in seconds (LISTEN/NOTIFY handles latency)")
     args = parser.parse_args()
     db = RunnerDB()
+    # Refresh the capability list the app shows. Done here because this is the one
+    # process that can see the cluster envs, and because auto_update.sh restarts the
+    # runner on every deploy -- so provisioning a new env updates the homepage
+    # without anyone maintaining a list by hand. Never fatal (see capabilities.publish).
+    publish_capabilities(db)
     if args.once:
         run_loop(once=True, poll=args.poll, db=db)
         return

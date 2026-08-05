@@ -138,6 +138,33 @@ def get_conversation(conversation_id: str, user_id: str) -> dict | None:
         conn.close()
 
 
+def list_library_availability() -> list:
+    """The runner's capability snapshot: what TWAIN knows, and what is installed.
+
+    Installed first, then by kind and name, so the app renders "what you can run"
+    without sorting client-side. An empty list means the runner has not published
+    yet (fresh database, or a runner that has not restarted since the migration).
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            SELECT kind, name, import_name, version, description,
+                   installed, env, detail, checked_at
+            FROM library_availability
+            ORDER BY installed DESC, kind, name;
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+    except Exception as e:
+        raise Exception(f"Failed to list library availability: {e}") from e
+    finally:
+        conn.close()
+
+
 def get_conversation_status(conversation_id: str) -> str | None:
     """Return just a conversation's status (used by the SSE loop), or None."""
     conn = get_connection()

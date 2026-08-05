@@ -56,6 +56,30 @@ export interface Conversation {
   messages?: Message[];
 }
 
+/** One entry from the runner's capability snapshot. */
+export interface LibraryInfo {
+  /** 'library' (a Python package TWAIN can build on) or 'calculator' (an engine). */
+  kind: 'library' | 'calculator';
+  name: string;
+  import_name?: string | null;
+  version?: string | null;
+  description?: string | null;
+  /** Whether this deployment can actually run it right now. */
+  installed: boolean;
+  /** Which cluster env provides it, when installed. */
+  env?: string | null;
+  /** How it was found, or why it wasn't — shown so "no" is never unexplained. */
+  detail?: string | null;
+  checked_at?: string | null;
+}
+
+export interface LibraryAvailability {
+  libraries: LibraryInfo[];
+  installed: number;
+  total: number;
+  checked_at?: string | null;
+}
+
 export interface ArtifactMeta {
   name: string;
   kind: string;
@@ -273,6 +297,18 @@ class APIClient {
   async health(): Promise<{ status: string }> {
     const response = await this.client.get('/api/health');
     return response.data;
+  }
+
+  /**
+   * What TWAIN knows about, and which of it this cluster can actually run.
+   *
+   * Served from the snapshot the runner publishes -- the API cannot probe the
+   * cluster envs itself. `checked_at` is how fresh that probe is, which matters:
+   * a runner that has not restarted since a provision run reports the old answer.
+   */
+  async listLibraries(): Promise<LibraryAvailability> {
+    const response = await this.client.get('/api/libraries');
+    return response.data.data;
   }
 
   // ── Auth ────────────────────────────────────────────────────────────────────

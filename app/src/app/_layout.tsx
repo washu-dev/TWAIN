@@ -47,6 +47,7 @@ function RootNavigator() {
         <Stack.Screen name="dashboard" options={{ title: 'TWAIN' }} />
         <Stack.Screen name="chat" options={{ title: 'TWAIN Chat' }} />
         <Stack.Screen name="browse" options={{ title: 'Simulations' }} />
+        <Stack.Screen name="libraries" options={{ title: 'What TWAIN can run' }} />
         <Stack.Screen name="report" options={{ title: 'Report' }} />
         <Stack.Screen name="settings" options={{ title: 'Settings' }} />
         {/* The notification emails' deep link (/conversations/<id>). Expo Router
