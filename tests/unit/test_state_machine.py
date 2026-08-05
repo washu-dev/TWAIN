@@ -1533,3 +1533,55 @@ class TestTheRepairBriefCarriesTheRealProperty:
     def test_a_plan_with_neither_keeps_the_placeholder(self, tmp_path):
         plan = dict(self.PLAN, requested_property=None, acceptance_metrics=[])
         assert self._brief_for(tmp_path, plan)["property"] == "the requested property"
+
+
+class TestScaledWorkersGetTheirOwnLog:
+    """A scaled worker used to inherit the supervisor's stdout.
+
+    Under cron that put an entire run into scale-runners.log next to the
+    every-minute scaling chatter, with no worker identity on any line -- the
+    reason run 3d545537 took several cluster queries to reconstruct. These assert
+    over the script text, matching TestClusterEngineDataIsProvisioned's style,
+    because nothing here can be executed off-cluster.
+    """
+
+    RIS = Path(__file__).resolve().parents[2] / "scripts" / "ris"
+
+    @property
+    def scale(self) -> str:
+        return (self.RIS / "scale_runners.sh").read_text()
+
+    def test_a_worker_writes_to_its_own_file(self):
+        assert 'worker_log="$WORKER_LOG_DIR/worker-' in self.scale
+        assert '>>"$worker_log" 2>&1' in self.scale
+
+    def test_the_worker_is_told_which_log_is_its_own(self):
+        """So the run-error block can name it (see error_handler)."""
+        assert 'TWAIN_RUN_LOG="$worker_log"' in self.scale
+
+    def test_the_default_run_log_is_set_once_in_the_shared_seam(self):
+        """runner_env.sh is sourced by both launchers; a copy would drift."""
+        env = (self.RIS / "runner_env.sh").read_text()
+        assert 'export TWAIN_RUN_LOG="${TWAIN_RUN_LOG:-$RIS_DIR/runner-ris.log}"' in env
+
+    def test_the_worker_does_not_inherit_the_flock_fd(self):
+        """A worker outliving a killed supervisor would hold .scale-runners.lock
+        forever, so every later cron fire exits silently at the flock -- the trap
+        auto_update.sh already documents for its tmux server."""
+        assert "9>&-" in self.scale
+
+    def test_worker_logs_are_pruned(self):
+        """Workers are one-shot and can spawn every few seconds; nothing in
+        scripts/ris rotates any log, so an unpruned dir grows without limit."""
+        assert "prune_worker_logs" in self.scale
+        assert "KEEP_WORKER_LOGS" in self.scale
+        # Pruning must happen before the spawn that adds another file.
+        assert self.scale.index("prune_worker_logs\n") < self.scale.index("worker_log=")
+
+    def test_both_edited_scripts_are_valid_shell(self):
+        """The repo bash -n's generated payloads but never a committed script."""
+        import subprocess
+        for name in ("scale_runners.sh", "runner_env.sh"):
+            proc = subprocess.run(["bash", "-n", str(self.RIS / name)],
+                                  capture_output=True, text=True)
+            assert proc.returncode == 0, f"{name}: {proc.stderr}"

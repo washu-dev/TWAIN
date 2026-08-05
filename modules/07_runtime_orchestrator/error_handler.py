@@ -17,6 +17,7 @@ this decides *how to explain a failure that has already exhausted retries*.
 """
 import _bootstrap  # noqa: F401
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
@@ -218,7 +219,17 @@ def _heuristic_category(exc: BaseException) -> ErrorCategory:
 
 
 def format_for_researcher(error: ClassifiedError, session_id: str = "", state: str = "") -> str:
-    """Render a classified error as a readable notification block."""
+    """Render a classified error as a readable notification block.
+
+    Includes the log file holding this run when the launcher named one in
+    ``TWAIN_RUN_LOG``. On the cluster more than one process drives runs -- the
+    always-on runner plus on-demand workers from scale_runners.sh -- so "check the
+    runner log" is ambiguous and was actively misleading: a scaled worker's whole
+    run went to its own file while readers were pointed at runner-ris.log, which
+    never mentioned that run. Omitted entirely when unset (local CLI runs, where
+    the block is printed to the terminal anyway).
+    """
+    run_log = os.environ.get("TWAIN_RUN_LOG", "").strip()
     lines = [
         "── TWAIN run error ─────────────────────────────────────────",
         f"  session : {session_id}" if session_id else None,
@@ -227,6 +238,7 @@ def format_for_researcher(error: ClassifiedError, session_id: str = "", state: s
         f"  what    : {error.message}",
         f"  do next : {error.hint}",
         f"  fallback: {error.fallback}",
+        f"  log     : {run_log}" if run_log else None,
         f"  resumable: {'yes' if error.recoverable else 'needs a fix first'}",
         "────────────────────────────────────────────────────────────",
     ]

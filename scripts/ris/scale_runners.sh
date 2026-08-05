@@ -50,6 +50,25 @@ flock -n 9 || exit 0
 
 log() { echo "[scale $(date '+%F %T')] $*"; }
 
+# Each worker gets its own log. Previously a worker inherited the supervisor's
+# stdout, so under cron its whole run landed in scale-runners.log mixed with
+# scaling chatter -- and nothing told the reader that, because the run-error
+# block names $TWAIN_RUN_LOG, which defaulted to the always-on runner's file.
+WORKER_LOG_DIR="$RIS_DIR/logs/workers"
+spawned=0
+
+# Bound the file count. Workers are one-shot (`--once`: claim one job, run it,
+# exit) and can be spawned every few seconds under sustained backlog, and
+# nothing in scripts/ris rotates or prunes any log -- so without this the
+# directory grows without limit on shared storage.
+KEEP_WORKER_LOGS="${TWAIN_KEEP_WORKER_LOGS:-40}"
+prune_worker_logs() {
+  ls -1t "$WORKER_LOG_DIR"/worker-*.log 2>/dev/null \
+    | tail -n "+$((KEEP_WORKER_LOGS + 1))" | while IFS= read -r old; do
+      rm -f "$old"
+    done
+}
+
 # Claimable backlog only: mirror claim_job()'s per-session guard, else a
 # queued-but-blocked job (its session already has a running job) would make
 # us churn workers that claim nothing and exit. Direct env python (no `pixi
@@ -100,10 +119,23 @@ while true; do
       ;;
   esac
   if [ "$backlog" -gt 0 ] && [ "$workers" -lt "$MAX_EXTRA" ]; then
+    mkdir -p "$WORKER_LOG_DIR"
+    prune_worker_logs
+    # Timestamp + counter, not $!: the PID is only known after the spawn, and the
+    # worker needs to be told its own log path before it starts.
+    spawned=$((spawned + 1))
+    worker_log="$WORKER_LOG_DIR/worker-$(date '+%Y%m%d-%H%M%S')-$spawned.log"
     # Same launcher as start_runner.sh (pixi run provides activation env like
     # DFTB_PREFIX, which local-execution jobs on the login node rely on).
-    pixi run python -m runner.runner --once &
-    log "spawned worker $! (backlog: $backlog, workers: $((workers + 1)))"
+    #
+    # 9>&-: do NOT let a worker inherit the flock fd. A worker that outlives a
+    # killed supervisor would otherwise hold .scale-runners.lock forever, so every
+    # later cron fire exits silently at the flock -- the same trap auto_update.sh
+    # documents for its tmux server.
+    TWAIN_RUN_LOG="$worker_log" \
+      pixi run python -m runner.runner --once >>"$worker_log" 2>&1 9>&- &
+    log "spawned worker $! (backlog: $backlog, workers: $((workers + 1)))" \
+        "-> $worker_log"
     sleep 3  # let it claim its job before we recount the backlog
     continue
   fi

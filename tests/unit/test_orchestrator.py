@@ -675,3 +675,45 @@ class TestSuspend:
         sm = self._suspending_sm(tmp_path, SuspendRun)
         orch = build(env, "no-susp", sm=sm, provenance=False)  # suspend_exc unset
         assert orch.run() == RunStatus.ERROR
+
+
+class TestTheErrorBlockNamesItsLog:
+    """"Check the runner log" was ambiguous, and on the cluster actively wrong.
+
+    Runs are driven by the always-on runner AND by on-demand workers from
+    scale_runners.sh. A NaCl run (3d545537) failed inside a scaled worker: its
+    whole run went to scale-runners.log interleaved with cron scaling chatter,
+    while the error block pointed readers at the bundle and the hint chain named
+    no log at all -- runner-ris.log, the file people actually open, contained
+    nothing about that run. The launcher is the only layer that knows where the
+    output went, so it says, via TWAIN_RUN_LOG.
+    """
+
+    def _block(self, monkeypatch, value=None):
+        if value is None:
+            monkeypatch.delenv("TWAIN_RUN_LOG", raising=False)
+        else:
+            monkeypatch.setenv("TWAIN_RUN_LOG", value)
+        classified = error_handler.classify(RuntimeError("boom"), state="EXECUTE")
+        return error_handler.format_for_researcher(
+            classified, session_id="s1", state="EXECUTE")
+
+    def test_the_log_is_named_when_the_launcher_says_so(self, monkeypatch):
+        block = self._block(monkeypatch, "/deploy/logs/workers/worker-20260804-1.log")
+        assert "log     : /deploy/logs/workers/worker-20260804-1.log" in block
+
+    def test_it_is_omitted_when_unset(self, monkeypatch):
+        """A local CLI run prints the block to the terminal; naming a log would lie."""
+        assert "  log     :" not in self._block(monkeypatch)
+
+    def test_a_blank_value_is_treated_as_unset(self, monkeypatch):
+        assert "  log     :" not in self._block(monkeypatch, "   ")
+
+    def test_the_existing_fields_are_untouched(self, monkeypatch):
+        """The block is parsed by humans, not machines, but order still matters."""
+        block = self._block(monkeypatch, "/x.log")
+        for field in ("session :", "stage   :", "type    :", "what    :",
+                      "do next :", "fallback:", "resumable:"):
+            assert field in block, field
+        # The log belongs with the other "where to look" fields, above resumable.
+        assert block.index("log     :") < block.index("resumable:")
