@@ -1328,3 +1328,92 @@ class TestParallelismIsRegistryDeclared:
         prompt = self._prompt(calculator="xtb", parallelism="threads")
         assert "TWAIN_ENGINE_LAUNCH" not in prompt
         assert "6N+1" not in prompt
+
+
+class TestEngineLaunchIsActuallyUsed:
+    """The payload publishes the allocation; nothing forced the script to spend it.
+
+    For the "engine" placement the driver runs single-process on purpose and the
+    ranks are handed over as TWAIN_ENGINE_LAUNCH. A script that ignores it is
+    correct and single-core -- it asks Slurm for N CPUs and uses one, which is how
+    a job that should take minutes takes hours (job 2601849 burned 2h12m).
+    """
+
+    IGNORES = ("from ase.calculators.nwchem import NWChem\n"
+               "def run():\n"
+               "    return NWChem(command='nwchem PREFIX.nwi > PREFIX.nwo')\n"
+               "if __name__ == '__main__':\n    run()\n")
+    USES = ("import os\n"
+            "from ase.calculators.nwchem import NWChem\n"
+            "def run():\n"
+            "    launch = os.environ.get('TWAIN_ENGINE_LAUNCH', '')\n"
+            "    return NWChem(command=f'{launch} nwchem PREFIX.nwi > PREFIX.nwo')\n"
+            "if __name__ == '__main__':\n    run()\n")
+
+    def _diags(self, source, parallelism):
+        brief = dict(_brief(), parallelism=parallelism)
+        return [d for d in ScriptDoctor(brief=brief).static_diagnostics(source)
+                if d.source == "engine-launch-ignored"]
+
+    def test_an_engine_run_that_ignores_the_launcher_is_flagged(self):
+        hits = self._diags(self.IGNORES, "engine")
+        assert hits, "a single-core run of an N-core allocation must be surfaced"
+        assert hits[0].line == 3, "point at where the command is built"
+
+    def test_reading_the_launcher_clears_it(self):
+        assert self._diags(self.USES, "engine") == []
+
+    def test_it_is_a_warning_not_an_error(self):
+        """The science is right; blocking the run over utilisation would be worse.
+
+        Phase 1 only repairs when an error exists, so an unfixable error here would
+        make an otherwise-good script `unrepairable` and stop EXECUTE.
+        """
+        assert self._diags(self.IGNORES, "engine")[0].severity == "warning"
+
+    def test_the_other_placements_never_flag(self):
+        """Wrapping is the payload's job for `interpreter`, and `threads` has no MPI."""
+        for placement in ("interpreter", "threads"):
+            assert self._diags(self.IGNORES, placement) == [], placement
+
+    def test_a_missing_placement_defaults_to_silent(self):
+        brief = _brief()          # no parallelism key at all
+        assert [d for d in ScriptDoctor(brief=brief).static_diagnostics(self.IGNORES)
+                if d.source == "engine-launch-ignored"] == []
+
+    def test_broken_source_yields_nothing(self):
+        """A syntax error is the compile check's finding, and it short-circuits."""
+        assert sd._engine_launch_ignored("def f(:\n", "engine") == []
+
+    def test_an_unlocalisable_finding_reports_no_line(self):
+        """Whole-file property: better no line than a misleading first import."""
+        source = ("from ase.calculators.nwchem import NWChem\n"
+                  "def run():\n    return NWChem(xc='b3lyp')\n"
+                  "if __name__ == '__main__':\n    run()\n")
+        hits = self._diags(source, "engine")
+        assert hits and hits[0].line is None
+
+    def test_it_points_at_a_profile_when_there_is_no_command_kwarg(self):
+        source = ("from ase.calculators.espresso import Espresso, EspressoProfile\n"
+                  "def run():\n"
+                  "    p = EspressoProfile(pseudo_dir='/x')\n"
+                  "    return Espresso(profile=p)\n"
+                  "if __name__ == '__main__':\n    run()\n")
+        assert self._diags(source, "engine")[0].line == 3
+
+    def test_a_runnable_but_wasteful_script_reaches_the_hardening_pass(self):
+        """Warnings act in phase 2, where a failed fix keeps the runnable script."""
+        seen = {}
+
+        def agent(prompt):
+            seen["prompt"] = prompt
+            return self.USES
+
+        doctor = ScriptDoctor(
+            brief=dict(_brief(), parallelism="engine"), agent=agent,
+            verifier=lambda src, brief: SmokeOutcome("pass"),
+            review=lambda src: [])
+        report = doctor.heal("import matgl\n" + self.IGNORES)
+        assert report.healthy, "a utilisation warning must never block the run"
+        assert "TWAIN_ENGINE_LAUNCH" in seen.get("prompt", ""), (
+            "the warning has to reach the model for it to be fixable")

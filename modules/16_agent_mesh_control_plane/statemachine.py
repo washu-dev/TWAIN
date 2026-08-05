@@ -2173,6 +2173,9 @@ class StateMachine:
                          or _first_metric_name(plan)
                          or "the requested property"),
             "material_desc": CodegenEngine._material_desc(material),
+            # Registry-declared placement, so the doctor can tell whether the
+            # script has to hand its ranks to the engine.
+            "parallelism": self._selected_parallelism(plan),
             "acceptance": plan.get("acceptance_metrics") or [],
             "output_file": "results.csv",
             # The researcher's own words: lets checks that enforce fast defaults
