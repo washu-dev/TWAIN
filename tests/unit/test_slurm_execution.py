@@ -344,6 +344,9 @@ def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
     adapter = _exec_adapter(
         tmp_path, _happy_cluster_runner(),
         env_pythons=["/envs/gpaw/bin/python", "/envs/default/bin/python"],
+        # GPAW is MPI-parallel in process, so this is the placement that wraps the
+        # interpreter; an external engine takes the serial path instead.
+        parallelism="interpreter",
     )
     bundle = _bundle(tmp_path)
     payload = adapter._payload(bundle, install_deps=True, run_smoke=True)
@@ -838,7 +841,7 @@ class TestMpiIsForInProcessEnginesOnly:
     already distinguishes them -- an external engine declares an `executable`.
     """
 
-    def _payload(self, tmp_path, *, external, max_time=240.0):
+    def _payload(self, tmp_path, *, parallelism, max_time=240.0):
         bundle = tmp_path / "b"
         bundle.mkdir(exist_ok=True)
         for name in ("main.py", "inline_tests.py"):
@@ -848,18 +851,33 @@ class TestMpiIsForInProcessEnginesOnly:
             ClusterProfile.load("compute2"), host="",
             request=SlurmRequest(cpu_count=2, gpu_count=0, max_time=max_time,
                                  ram=8000),
-            env_pythons=["/envs/nwchem/bin/python"], external_engine=external)
+            env_pythons=["/envs/nwchem/bin/python"], parallelism=parallelism)
         return adapter._env_payload(bundle, install_deps=True, run_smoke=True)
 
     def test_an_external_engine_is_not_launched_under_mpirun(self, tmp_path):
-        payload = self._payload(tmp_path, external=True)
-        assert "mpirun" not in payload, (
+        payload = self._payload(tmp_path, parallelism="engine")
+        assert "mpirun -np" not in payload.split("TWAIN_ENGINE_LAUNCH")[0], (
             "N ranks of a file-by-file driver script share one CWD and corrupt "
             "each other's engine inputs")
-        assert '"$PY" main.py' in payload
+        assert '$TWAIN_TIMEOUT "$PY" main.py' in payload
+
+    def test_the_engine_gets_the_ranks_instead(self, tmp_path):
+        """Serial driver, parallel engine: the cores must still be spent.
+
+        One uniform variable rather than a per-engine env var -- ASE takes the
+        command as a constructor argument for NWChem and ABINIT and only as an env
+        var for CP2K and DFTB+, so no single env var could reach them all.
+        """
+        payload = self._payload(tmp_path, parallelism="engine")
+        assert 'export TWAIN_ENGINE_LAUNCH="$BIN/mpirun -np' in payload
+
+    def test_a_threaded_engine_gets_neither(self, tmp_path):
+        payload = self._payload(tmp_path, parallelism="threads")
+        assert "TWAIN_ENGINE_LAUNCH" not in payload
+        assert "mpirun" not in payload
 
     def test_an_in_process_engine_still_gets_mpi(self, tmp_path):
-        payload = self._payload(tmp_path, external=False)
+        payload = self._payload(tmp_path, parallelism="interpreter")
         assert '"$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"' in payload
         assert "export OMP_NUM_THREADS=1" in payload
 
@@ -869,27 +887,28 @@ class TestMpiIsForInProcessEnginesOnly:
         Deriving the lookup from $PY alone would silently drop every layered run
         to serial -- the layered venv was added in this same series of changes.
         """
-        payload = self._payload(tmp_path, external=False)
+        payload = self._payload(tmp_path, parallelism="interpreter")
         assert ('if [ -n "$LAYERED" ]; then BIN="$(dirname "$BASE")";'
                 ' else BIN="$(dirname "$PY")"; fi') in payload
 
     def test_the_run_is_bounded_below_the_allocation(self, tmp_path):
         """Exit 124 a little short of the limit beats idling to the walltime."""
-        payload = self._payload(tmp_path, external=True, max_time=240.0)
+        payload = self._payload(tmp_path, parallelism="engine", max_time=240.0)
         assert "TWAIN_TIMEOUT=\"timeout --signal=TERM --kill-after=30 14280\"" in payload
         assert "$TWAIN_TIMEOUT" in payload
 
     def test_a_tiny_allocation_still_gets_a_positive_budget(self, tmp_path):
-        payload = self._payload(tmp_path, external=True, max_time=1.0)
+        payload = self._payload(tmp_path, parallelism="engine", max_time=1.0)
         assert "kill-after=30 60\"" in payload
 
-    def test_the_payload_is_valid_shell_both_ways(self, tmp_path):
+    def test_the_payload_is_valid_shell_for_every_placement(self, tmp_path):
         import subprocess
-        for external in (True, False):
-            proc = subprocess.run(["bash", "-n"],
-                                  input=self._payload(tmp_path, external=external),
-                                  text=True, capture_output=True)
-            assert proc.returncode == 0, proc.stderr
+        for placement in ("engine", "interpreter", "threads"):
+            proc = subprocess.run(
+                ["bash", "-n"],
+                input=self._payload(tmp_path, parallelism=placement),
+                text=True, capture_output=True)
+            assert proc.returncode == 0, f"{placement}: {proc.stderr}"
 
 
 class TestTheRegistryDecidesWhoGetsMpi:

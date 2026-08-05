@@ -595,7 +595,7 @@ so the module still imports where they are not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{spin_note}{thermo_note}{pseudo_note}{database_note}{smoke_instruction}
+{spin_note}{engine_note}{thermo_note}{pseudo_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "calculator", "property", and "output_file". Write the same \
 metrics as one CSV row to --output.
@@ -671,7 +671,7 @@ imports where it is not installed.
 directory to the script's own directory (`os.chdir(os.path.dirname(os.path.abspath(\
 __file__)))`) so relative outputs and calculator scratch files land next to the \
 script, never in the caller's working directory.
-{spin_note}{thermo_note}{database_note}{smoke_instruction}
+{spin_note}{engine_note}{thermo_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
 value(s)), plus "tool", "property", and "output_file"; print each metric WITH its \
 physical unit, and for any fitted or derived value also print a fit-quality / \
@@ -952,7 +952,8 @@ class CodegenEngine:
                  smoke_compute: bool = False,
                  require_synthesis: bool = False,
                  calculator_executable: Optional[str] = None,
-                 pseudo_library: Optional[str] = None) -> RunBundle:
+                 pseudo_library: Optional[str] = None,
+                 parallelism: str = "threads") -> RunBundle:
         """Build a :class:`RunBundle` from an ExecutionPlan.
 
         ``plan`` may be an ``ExecutionPlan`` dataclass, a plain dict, or a path
@@ -987,6 +988,7 @@ class CodegenEngine:
                 require_synthesis=require_synthesis,
                 calculator_executable=calculator_executable,
                 pseudo_library=pseudo_library,
+                parallelism=parallelism,
             )
         # Library-only run. Prefer a dedicated, tested template when one fits the
         # tool (Pymatgen/ASE/RDKit). Otherwise, if the plan asks for a real property
@@ -1081,7 +1083,8 @@ class CodegenEngine:
                                   *, intent, agent, smoke_compute: bool = False,
                                   require_synthesis: bool = False,
                                   calculator_executable: Optional[str] = None,
-                                  pseudo_library: Optional[str] = None) -> RunBundle:
+                                  pseudo_library: Optional[str] = None,
+                                  parallelism: str = "threads") -> RunBundle:
         generated_at = (plan.get("metadata") or {}).get("timestamp", "") or ""
         acceptance = plan.get("acceptance_metrics", []) or []
         requested_property = plan.get("requested_property") or "the requested property"
@@ -1128,6 +1131,10 @@ class CodegenEngine:
             # switches the prompt to resolve filenames and cutoffs through the
             # bundle's twain_pseudo.py instead of writing them out.
             "pseudo_library": pseudo_library,
+            # Where the engine's parallelism lives: decides whether the script must
+            # hand its ranks to the engine, and whether 6N+1 engine invocations for
+            # finite-difference frequencies are worth warning about.
+            "parallelism": parallelism,
             # True when the property is a formation/atomization/reaction enthalpy:
             # switches the prompt to assemble it through twain_thermo.py.
             "thermo_cycle": wants_cycle,
@@ -1396,6 +1403,32 @@ class CodegenEngine:
         # short and looks obvious, and both of its failure modes return a
         # plausible number: a dropped H(T)-E_elec term, or a stoichiometric
         # coefficient that does not match the molecule.
+        # How this engine is parallelised, from the registry. Two instructions
+        # depend on it, and both are about cost rather than correctness.
+        placement = brief.get("parallelism") or "threads"
+        if placement == "engine":
+            engine_note = (
+                "- PARALLELISM -- this engine is a separate program, and the job "
+                "gives its ranks to the ENGINE, not to this script. The script runs "
+                "single-process on purpose: several ranks of it would each drive "
+                "their own copy of the engine in this one directory and overwrite "
+                "each other's input and output files. Read "
+                "`os.environ.get('TWAIN_ENGINE_LAUNCH', '')` and, when it is "
+                "non-empty, prefix it onto the engine command you hand the "
+                "calculator (its `command=` argument, or its Profile's) so the "
+                "allocated cores are actually used -- e.g. "
+                "`cmd = f\"{os.environ.get('TWAIN_ENGINE_LAUNCH','')} pw.x\".strip()`. "
+                "Never call mpirun on python.\n"
+                "- FREQUENCIES ARE THE EXPENSIVE PART of any thermal correction. "
+                "`ase.vibrations.Vibrations` is finite-difference: it invokes the "
+                "engine 6N+1 separate times and caches each displacement to disk. "
+                "For a 3-atom molecule that is 19 engine runs, and every one pays "
+                "the engine's startup and SCF again. If this engine has its own "
+                "analytic frequency/Hessian task, use it and read the frequencies "
+                "back; only fall back to ase Vibrations when it does not, and say "
+                "in the output which route you took.\n")
+        else:
+            engine_note = ""
         if brief.get("thermo_cycle"):
             thermo_note = (
                 "- THERMOCHEMICAL CYCLE -- this property is assembled from "
@@ -1462,6 +1495,7 @@ class CodegenEngine:
             # Ignored by the library-only template, which has no such placeholder.
             pseudo_note=pseudo_note,
             thermo_note=thermo_note,
+            engine_note=engine_note,
             spin_note=_SPIN_GUIDANCE,
         )
 

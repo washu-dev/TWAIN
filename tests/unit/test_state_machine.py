@@ -1427,6 +1427,31 @@ class TestRegistryInvariantsHoldForNewEngines:
             f"pure-python calculators naming a binary: {spurious}; the import "
             f"check already proves these can run")
 
+    def test_every_calculator_declares_a_known_parallelism(self):
+        """A new engine must say where its ranks go.
+
+        The default is "threads" -- safe, because wrongly wrapping a serial driver
+        in mpirun corrupts its working directory -- but an engine that silently
+        takes the default gets one core out of the allocation, which is the quiet
+        half of the same bug.
+        """
+        allowed = {"interpreter", "engine", "threads"}
+        wrong = [(c.name, c.parallelism) for c in self._calculators()
+                 if c.parallelism not in allowed]
+        assert not wrong, f"unknown parallelism values: {wrong} (allowed: {allowed})"
+
+    def test_an_external_engine_never_wraps_the_interpreter(self):
+        """`executable` set means a separate binary, so the script stays serial.
+
+        Wrapping it would put N copies of the driver in one directory -- job
+        2601849's 0-byte .nwo and empty vib cache.
+        """
+        bad = [c.name for c in self._calculators()
+               if c.executable and c.parallelism == "interpreter"]
+        assert not bad, (
+            f"{bad} drive a separate binary but ask for the interpreter to be "
+            f"wrapped in mpirun")
+
     def test_every_pseudo_library_is_resolvable_and_fetchable(self):
         """A pseudo_library value needs a manifest reader AND a way to get the data."""
         root = Path(__file__).resolve().parents[2]

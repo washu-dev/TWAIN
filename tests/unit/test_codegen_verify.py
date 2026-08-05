@@ -1289,3 +1289,42 @@ class TestTheGateTestsWhatTheCodeNeeds:
         assert eng._imports_module("import ase.calculators.nwchem", "ase")
         assert eng._imports_module("import psi4", "psi4.driver")
         assert not eng._imports_module("import numpy", "psi4")
+
+
+class TestParallelismIsRegistryDeclared:
+    """Where the ranks go, and what finite-difference frequencies cost.
+
+    Job 2601849 launched a file-by-file NWChem driver under `mpirun -np 2`; the
+    two ranks clobbered each other's engine files and the run hung for 2h12m. The
+    fix is not "never mpirun" -- GPAW must still be wrapped -- so the placement is
+    registry data with three values, and the prompt follows it.
+    """
+
+    def _prompt(self, *, calculator, parallelism):
+        captured = []
+        CodegenEngine().generate(
+            _calc_plan(calculator=calculator,
+                       metric="standard_heat_of_formation_kJ_per_mol"),
+            agent=lambda p: (captured.append(p) or OK_SCRIPT),
+            parallelism=parallelism)
+        return captured[0]
+
+    def test_an_engine_placement_hands_the_ranks_to_the_engine(self):
+        prompt = self._prompt(calculator="NWChem", parallelism="engine")
+        assert "TWAIN_ENGINE_LAUNCH" in prompt
+        assert "Never call mpirun on python" in prompt
+
+    def test_an_engine_placement_warns_about_finite_difference_cost(self):
+        prompt = self._prompt(calculator="NWChem", parallelism="engine")
+        assert "6N+1" in prompt
+        assert "analytic frequency" in prompt
+
+    def test_an_in_process_engine_gets_neither_instruction(self):
+        """GPAW is wrapped by the payload; the script must not second-guess it."""
+        prompt = self._prompt(calculator="GPAW", parallelism="interpreter")
+        assert "TWAIN_ENGINE_LAUNCH" not in prompt
+
+    def test_a_threaded_engine_gets_neither_instruction(self):
+        prompt = self._prompt(calculator="xtb", parallelism="threads")
+        assert "TWAIN_ENGINE_LAUNCH" not in prompt
+        assert "6N+1" not in prompt

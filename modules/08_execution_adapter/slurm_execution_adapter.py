@@ -130,7 +130,7 @@ class SlurmExecutionAdapter:
         cluster_runner: Optional[Runner] = None,
         transfer_runner: Optional[Runner] = None,
         env_pythons: Optional[List[str]] = None,
-        external_engine: bool = False,
+        parallelism: str = "threads",
         sleep=None,
         should_abort=None,
     ):
@@ -156,11 +156,11 @@ class SlurmExecutionAdapter:
         self.max_wait = max_wait
         self.poll_interval = poll_interval
         self.env_pythons = list(env_pythons or [])
-        # True when the calculator is an external program the script drives file by
-        # file (NWChem, Quantum ESPRESSO, ABINIT, CP2K, DFTB+ -- the registry's
-        # `executable` field). Such a script must NOT be launched under mpirun: see
-        # _env_payload.
-        self.external_engine = bool(external_engine)
+        # Where the calculator's parallelism lives, from the registry:
+        # "interpreter" (mpirun the script), "engine" (the script stays serial and
+        # the engine command carries the ranks), or "threads" (no MPI). See
+        # CalculatorEntry.parallelism and _env_payload.
+        self.parallelism = parallelism or "threads"
         self._sleep = sleep
         # Terminate seam: zero-arg callable polled between squeue checks; True
         # means the researcher pressed Terminate -> scancel the job and return.
@@ -605,18 +605,35 @@ class SlurmExecutionAdapter:
         # The lookup uses the env the interpreter came FROM: with a layered venv
         # $PY lives in .venv/bin, which never contains mpirun, so deriving it from
         # $PY alone would silently disable MPI for every layered run.
-        if self.external_engine:
-            # No mpirun for an external engine: the ENGINE parallelizes itself,
-            # while N ranks of the driver script would be N copies of it in one
-            # directory, clobbering the fixed filenames it writes per calculation.
+        # The env the interpreter came FROM: with a layered venv $PY lives in
+        # .venv/bin, which never holds mpirun, so deriving this from $PY alone
+        # would silently disable MPI for every layered run.
+        lines.append('if [ -n "$LAYERED" ]; then BIN="$(dirname "$BASE")";'
+                     ' else BIN="$(dirname "$PY")"; fi')
+        if self.parallelism != "interpreter":
+            # The script stays serial. N ranks of a driver that invokes a separate
+            # binary per calculation would be N copies of it in one directory,
+            # clobbering the fixed filenames each writes (job 2601849: a 0-byte
+            # .nwo, an empty vib cache, then a crash and a 2h12m hung teardown).
+            #
+            # For "engine" the ranks go to the engine instead, through one uniform
+            # variable the generated code prefixes onto its engine command. That is
+            # the only portable seam: ASE takes the command as a constructor
+            # argument for NWChem and ABINIT, and only as an env var for CP2K and
+            # DFTB+, so there is no single env var the payload could set.
+            if self.parallelism == "engine":
+                lines += [
+                    'if [ -n "$BIN" ] && [ -x "$BIN/mpirun" ]; then',
+                    '  export TWAIN_ENGINE_LAUNCH="$BIN/mpirun -np'
+                    ' ${SLURM_CPUS_PER_TASK:-1} --map-by :OVERSUBSCRIBE'
+                    ' --bind-to none"',
+                    '  export OPAL_PREFIX="$(dirname "$BIN")"',
+                    '  export PMIX_PREFIX="$OPAL_PREFIX"',
+                    "fi",
+                ]
             lines.append('$TWAIN_TIMEOUT "$PY" main.py')
         else:
             lines += [
-                # The env the interpreter came FROM: with a layered venv $PY lives
-                # in .venv/bin, which never holds mpirun, so deriving the lookup
-                # from $PY alone would silently disable MPI for every layered run.
-                'if [ -n "$LAYERED" ]; then BIN="$(dirname "$BASE")";'
-                ' else BIN="$(dirname "$PY")"; fi',
                 'if [ -x "$BIN/mpirun" ]; then',
                 '  export OMP_NUM_THREADS=1',
                 # conda-forge OpenMPI finds its runtime data (PMIx/PRRTE help

@@ -2049,6 +2049,10 @@ class StateMachine:
                 # is either a crash after a queue wait or, worse, a real file for
                 # different physics.
                 pseudo_library=pseudo_library,
+                # Registry-declared: an engine that parallelises itself needs the
+                # script to hand it TWAIN_ENGINE_LAUNCH, and makes 6N+1
+                # finite-difference engine invocations worth warning about.
+                parallelism=(ce.parallelism if calc_name and ce else "threads"),
                 # A run that is going to EXECUTE must not fall back to the
                 # placeholder scaffold: it loads the tool, writes a stub and
                 # exits 0, so the job, the scheduler and TWAIN all report success
@@ -2382,11 +2386,16 @@ class StateMachine:
         name = (plan.get("selected_method") or {}).get("calculator")
         return find_calculator(name)
 
-    def _selected_calculator_executable(self, plan: dict):
-        """The plan calculator's own binary, or None for a python-package engine."""
+    def _selected_parallelism(self, plan: dict) -> str:
+        """Where the plan calculator's parallelism lives (registry-declared).
+
+        Defaults to "threads" for a library-only plan or an unknown calculator:
+        the conservative choice, since wrongly launching a serial driver under
+        mpirun corrupts its working directory.
+        """
         name = (plan.get("selected_method") or {}).get("calculator")
         entry = find_calculator(name) if name else None
-        return getattr(entry, "executable", None) if entry else None
+        return getattr(entry, "parallelism", "threads") or "threads"
 
     def _build_slurm_adapter(self):
         """A SlurmExecutionAdapter wired from the cluster profile + the plan.
@@ -2470,9 +2479,9 @@ class StateMachine:
             user=os.environ.get("TWAIN_SLURM_USER"),
             workspace_root=str(self.artifacts_dir),
             env_pythons=env_pythons,
-            # An engine driven as a separate binary must not have its DRIVER script
-            # launched under mpirun -- see the adapter's _env_payload.
-            external_engine=bool(self._selected_calculator_executable(plan)),
+            # Where this engine's parallelism lives, so the payload spends the
+            # allocated cores in the right place -- see the adapter's _env_payload.
+            parallelism=self._selected_parallelism(plan),
             # Poll for as long as the job may legitimately run (its wall time)
             # plus queue headroom -- otherwise a 4-hour DFT run outlives the
             # adapter's default 2-hour wait and EXECUTE reports a bogus timeout.

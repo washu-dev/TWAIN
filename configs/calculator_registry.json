@@ -41,7 +41,8 @@
         "linux-64"
       ],
       "license": "GPL-3.0-or-later",
-      "needs_external_data": false
+      "needs_external_data": false,
+      "parallelism": "interpreter"
     },
     {
       "id": "dftbplus",
@@ -81,7 +82,8 @@
       "license": "LGPL-3.0-only",
       "needs_external_data": true,
       "smoke_can_compute": true,
-      "executable": "dftb+"
+      "executable": "dftb+",
+      "parallelism": "engine"
     },
     {
       "id": "emt",
@@ -111,7 +113,8 @@
       "fidelity": 1,
       "platforms": [],
       "license": "LGPL-2.1-or-later",
-      "needs_external_data": false
+      "needs_external_data": false,
+      "parallelism": "threads"
     },
     {
       "id": "qe",
@@ -154,7 +157,8 @@
       "needs_external_data": true,
       "license": "GPL-2.0-or-later",
       "executable": "pw.x",
-      "pseudo_library": "sssp"
+      "pseudo_library": "sssp",
+      "parallelism": "engine"
     },
     {
       "id": "abinit",
@@ -196,7 +200,8 @@
       "needs_external_data": true,
       "license": "GPL-3.0-or-later",
       "executable": "abinit",
-      "pseudo_library": "pseudodojo"
+      "pseudo_library": "pseudodojo",
+      "parallelism": "engine"
     },
     {
       "id": "cp2k",
@@ -237,7 +242,8 @@
       ],
       "needs_external_data": true,
       "license": "GPL-2.0-or-later",
-      "executable": "cp2k.ssmp"
+      "executable": "cp2k.ssmp",
+      "parallelism": "threads"
     },
     {
       "id": "nwchem",
@@ -274,7 +280,8 @@
       ],
       "needs_external_data": false,
       "license": "ECL-2.0",
-      "executable": "nwchem"
+      "executable": "nwchem",
+      "parallelism": "engine"
     },
     {
       "id": "xtb",
@@ -309,7 +316,8 @@
         "osx-arm64"
       ],
       "needs_external_data": false,
-      "license": "LGPL-3.0-or-later"
+      "license": "LGPL-3.0-or-later",
+      "parallelism": "threads"
     },
     {
       "id": "matgl",
@@ -346,7 +354,8 @@
         "osx-arm64"
       ],
       "needs_external_data": false,
-      "license": "BSD-3-Clause"
+      "license": "BSD-3-Clause",
+      "parallelism": "threads"
     },
     {
       "id": "chgnet",
@@ -383,7 +392,8 @@
         "osx-arm64"
       ],
       "needs_external_data": false,
-      "license": "BSD-3-Clause"
+      "license": "BSD-3-Clause",
+      "parallelism": "threads"
     }
   ]
 }
