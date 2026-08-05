@@ -10,11 +10,15 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
-import { apiClient, Conversation } from '@/api/client';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { apiClient, Conversation, ConversationStatus } from '@/api/client';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
+
+// How often to re-read the list while any run is still going. The list is one
+// small query and only polls while something can actually change.
+const LIVE_POLL_MS = 5000;
 
 const TERMINAL_STATUSES = ['completed', 'error', 'rejected', 'cancelled'];
 
@@ -22,14 +26,24 @@ type Group = 'attention' | 'running' | 'done';
 
 // Friendly, jargon-free status per conversation status, plus which section it
 // belongs to and its accent color.
-const STATUS_META: Record<string, { label: string; group: Group; color: string }> = {
+// Typed as Record<ConversationStatus, ...> on purpose: a status the backend can
+// write but this map has no entry for used to fall through to DEFAULT_META and
+// render as "Unknown". That is what a terminated run showed -- the runner writes
+// 'cancelled' (runner.py _finalize_cancelled) and only this map was missing it.
+// Keying on the union makes the next such omission a compile error instead of a
+// word the researcher has to interpret.
+const STATUS_META: Record<ConversationStatus, { label: string; group: Group; color: string }> = {
   awaiting_approval: { label: 'Needs approval', group: 'attention', color: '#B8860B' },
   awaiting_input: { label: 'Needs your reply', group: 'attention', color: '#B8860B' },
   running: { label: 'Running', group: 'running', color: '#0B69C7' },
+  cancelling: { label: 'Stopping…', group: 'running', color: C.textSecondary },
   completed: { label: 'Completed', group: 'done', color: C.washuGreen },
   error: { label: 'Failed', group: 'done', color: C.washuRed },
   rejected: { label: 'Rejected', group: 'done', color: C.textSecondary },
+  cancelled: { label: 'Terminated', group: 'done', color: C.textSecondary },
 };
+// Still needed: `status` arrives as JSON, so a value outside the union is
+// possible at runtime even though the map is exhaustive at compile time.
 const DEFAULT_META = { label: 'Unknown', group: 'done' as Group, color: C.textSecondary };
 
 // Raw state-machine states → plain phase names (only shown for running runs).
@@ -60,7 +74,13 @@ const FILTERS: { key: 'all' | 'active' | 'done'; label: string }[] = [
 ];
 
 function metaFor(status: string) {
-  return STATUS_META[status] ?? DEFAULT_META;
+  // `status` is JSON off the wire, so it is a plain string here even though
+  // STATUS_META is keyed on the union. Check membership rather than casting the
+  // map to Record<string, ...>, which would give up the exhaustiveness that
+  // makes a missing label a compile error.
+  return Object.prototype.hasOwnProperty.call(STATUS_META, status)
+    ? STATUS_META[status as ConversationStatus]
+    : DEFAULT_META;
 }
 
 function relativeTime(iso: string): string {
@@ -117,6 +137,44 @@ export const BrowseScreen: React.FC = () => {
       cancelled = true;
     };
   }, []);
+
+  // Re-read without touching `loading`, so a background sweep never flashes the
+  // spinner over a list the researcher is reading. Failures are swallowed: the
+  // next tick retries, and a transient blip must not replace a good list with an
+  // error banner.
+  const refresh = useCallback(async () => {
+    try {
+      setItems(await apiClient.listConversations());
+    } catch {
+      /* transient -- the next tick or a focus change retries */
+    }
+  }, []);
+
+  // A status that changes on the server has to change here. Previously the only
+  // way to see a run finish, fail, or be terminated was to press Refresh, so the
+  // list confidently showed "Running" for something that had ended minutes ago.
+  // Polling is gated on there being something live, so a screen full of finished
+  // runs issues no requests at all.
+  const anyLive = useMemo(
+    () => items.some((item) => metaFor(item.status).group !== 'done'),
+    [items],
+  );
+  useEffect(() => {
+    if (!anyLive) return;
+    const timer = setInterval(() => {
+      void refresh();
+    }, LIVE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [anyLive, refresh]);
+
+  // Coming back to this tab re-reads once, which covers the case the poll cannot:
+  // everything was finished when the list was last drawn, so nothing was polling,
+  // and a run was started or terminated from another screen meanwhile.
+  useFocusEffect(
+    useCallback(() => {
+      void refresh();
+    }, [refresh]),
+  );
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
