@@ -303,3 +303,66 @@ class TestSuggestedCpuCount:
     def test_a_bad_ratio_falls_back_to_one_per_atom(self, monkeypatch, bad):
         monkeypatch.setenv("TWAIN_CORES_PER_ATOM", bad)
         assert SM._suggest_cpu_count(21, 64) == 20
+
+
+class TestPeriodicCoreFloor:
+    """Atoms-per-core points the WRONG WAY for a periodic cell.
+
+    The dominant parallel dimension of a plane-wave run is its k-points, and the
+    mesh a cell needs scales inversely with the cell's size -- a small primitive
+    cell wants a dense mesh and therefore has the most parallelism to spend.
+    CaPt2 was the worst case: the atom count comes from the formula (CaPt2 -> 3,
+    while the C15 primitive cell holds 6), so one core per atom asked for 3,
+    snapped down to 2, and job 2625288 ran ~26x slower than the same study on 24
+    cores (e496cf22).
+    """
+
+    def _capt2(self, **kw):
+        return SM._suggest_cpu_count(3, 64, **kw)   # 3 == _atom_count("CaPt2")
+
+    def test_the_capt2_regression(self):
+        assert self._capt2() == 2                                    # the old answer
+        assert self._capt2(periodic=True, scales_with_ranks=True) == 24
+
+    def test_a_molecule_keeps_atom_scaling(self):
+        """A gas-phase molecule has one k-point; extra ranks buy little."""
+        assert self._capt2(periodic=False, scales_with_ranks=True) == 2
+
+    def test_a_threads_only_calculator_is_not_widened(self):
+        """Registry says extra ranks do nothing -- they would sit idle."""
+        assert self._capt2(periodic=True, scales_with_ranks=False) == 2
+
+    def test_it_is_a_floor_not_a_cap(self):
+        """A big periodic cell still gets its larger atoms-derived width."""
+        assert SM._suggest_cpu_count(
+            200, 64, periodic=True, scales_with_ranks=True) == 64
+        assert SM._suggest_cpu_count(
+            40, 64, periodic=True, scales_with_ranks=True) == 40
+
+    def test_it_still_respects_the_node(self):
+        for ceiling in (2, 8, 16):
+            assert SM._suggest_cpu_count(
+                3, ceiling, periodic=True, scales_with_ranks=True) <= ceiling
+
+    def test_the_floor_is_tunable(self, monkeypatch):
+        monkeypatch.setenv("TWAIN_PERIODIC_MIN_CORES", "8")
+        assert self._capt2(periodic=True, scales_with_ranks=True) == 8
+
+    @pytest.mark.parametrize("bad", ["", "abc", "0", "-3", "1"])
+    def test_a_bad_floor_falls_back(self, monkeypatch, bad):
+        monkeypatch.setenv("TWAIN_PERIODIC_MIN_CORES", bad)
+        assert self._capt2(periodic=True, scales_with_ranks=True) == 24
+
+    @pytest.mark.parametrize("descriptors,expected", [
+        ({"kind": "crystal", "formula": "CaPt2"}, True),
+        ({"crystal": {"formula": "CaPt2", "space_group": "Fd-3m"}}, True),
+        ({"kind": "CRYSTAL"}, True),
+        ({"kind": "molecule", "molecule": {"name": "aspirin"}}, False),
+        ({"formula": "C9H8O4"}, False),
+        ({"crystal": {}}, False),
+        ({}, False),
+        (None, False),
+        ("CaPt2", False),
+    ])
+    def test_is_periodic(self, descriptors, expected):
+        assert SM._is_periodic(descriptors) is expected

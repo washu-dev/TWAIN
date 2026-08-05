@@ -242,16 +242,59 @@ def _cores_per_atom() -> float:
     return ratio if ratio > 0 else 1.0
 
 
-def _suggest_cpu_count(atoms: int, max_cpus: int) -> int:
+def _periodic_min_cores() -> int:
+    """Cores a periodic run should get regardless of how few atoms it has.
+
+    ``TWAIN_PERIODIC_MIN_CORES``, default 24. Measured rather than guessed: the
+    CaPt2 C15 study spread its 10x10x10 mesh over 12 k-point groups x 2 domains =
+    24 ranks, and the identical study on 2 ranks ran about 26x slower (job
+    2625288 against e496cf22). A non-positive or unparseable value falls back.
+    """
+    try:
+        value = int(float(os.environ.get("TWAIN_PERIODIC_MIN_CORES", "24")))
+    except (TypeError, ValueError):
+        return 24
+    return value if value >= 2 else 24
+
+
+def _is_periodic(system_descriptors) -> bool:
+    """Whether the target is a periodic solid rather than an isolated molecule."""
+    if not isinstance(system_descriptors, dict):
+        return False
+    if str(system_descriptors.get("kind") or "").strip().lower() == "crystal":
+        return True
+    crystal = system_descriptors.get("crystal")
+    return isinstance(crystal, dict) and bool(crystal)
+
+
+def _suggest_cpu_count(atoms: int, max_cpus: int, *,
+                       periodic: bool = False,
+                       scales_with_ranks: bool = False) -> int:
     """A parallel-friendly core count for an ``atoms``-atom system.
 
     Scales with system size, snaps DOWN to a width that decomposes cleanly (so
     21 atoms asks for 20 rather than 21), and clamps to [2, ``max_cpus``].
     Snapping down rather than up keeps a queue request from exceeding what the
     calculation can actually use.
+
+    Atom count alone is the wrong proxy for a periodic cell, and not merely
+    imprecise -- it points the wrong way. The dominant parallel dimension of a
+    plane-wave run is its k-points, and the mesh a cell needs scales INVERSELY
+    with the cell's size: a small primitive cell wants a dense mesh and so has
+    the MOST parallelism to spend. CaPt2 is the worst case of that, because the
+    atom count comes from the formula (CaPt2 -> 3, while the C15 primitive cell
+    holds 6), so 1 core/atom asked for 3, snapped down to 2, and the run took
+    ~26x longer than the same study on 24 cores.
+
+    So a periodic system whose calculator actually gains from extra ranks gets a
+    floor instead of an atoms-derived trickle. ``scales_with_ranks`` comes from
+    the registry's ``parallelism`` field: for a "threads" calculator more ranks
+    do nothing, and a wider request would only idle allocated cores.
     """
     ceiling = max(2, int(max_cpus))
     raw = max(2, int(round(atoms * _cores_per_atom())))
+    if periodic and scales_with_ranks:
+        raw = max(raw, _periodic_min_cores())
     if raw >= ceiling:
         return ceiling
     friendly = [w for w in _PARALLEL_WIDTHS if w <= raw and w <= ceiling]
@@ -1810,16 +1853,37 @@ class StateMachine:
         atoms = _atom_count(intent.get("system_descriptors"))
         if atoms:
             max_cpus = _cluster_node_limits().get("cpu_count") or 64
-            cores = _suggest_cpu_count(atoms, max_cpus)
+            periodic = _is_periodic(intent.get("system_descriptors"))
+            # Registry-declared: a "threads" calculator gains nothing from extra
+            # ranks, so widening its request would only idle allocated cores.
+            parallelism = getattr(calc_entry, "parallelism", "threads") or "threads"
+            scales_with_ranks = parallelism in ("interpreter", "engine")
+            cores = _suggest_cpu_count(atoms, max_cpus, periodic=periodic,
+                                       scales_with_ranks=scales_with_ranks)
             execution_plan.slurm_request.cpu_count = cores
-            execution_plan.slurm_rationale = {
-                "cpu_count": (
+            if periodic and scales_with_ranks and cores > atoms:
+                why = (
+                    f"TWAIN's suggestion: {cores} cores. This is a periodic cell run "
+                    f"by {parallelism}-parallel {getattr(calc_entry, 'name', 'the calculator')}, "
+                    f"so the cores go to k-points rather than to atoms -- and a small "
+                    f"cell needs a DENSE k-mesh, which is why {atoms} formula atoms do "
+                    f"not mean a small job. Capped at the node's {max_cpus}. Change it "
+                    f"freely; fewer cores mostly just makes it slower."
+                )
+            else:
+                why = (
                     f"TWAIN's suggestion: {cores} cores for a {atoms}-atom system "
                     f"(about {_cores_per_atom():g} per atom, rounded to a "
                     f"parallel-friendly width, capped at the node's {max_cpus}). "
                     f"A rough proxy for available parallelism -- change it freely."
-                ),
-            }
+                )
+            execution_plan.slurm_rationale = {"cpu_count": why}
+            # compute_estimate was derived inside synthesize() from the DEFAULT core
+            # count, and cpu_count/max_time have both been rewritten since. Left
+            # alone it reports the cost of an allocation nobody asked for -- the
+            # budget and the approval card would quote different jobs.
+            execution_plan.compute_estimate.cpu_hours = round(
+                cores * float(execution_plan.slurm_request.max_time), 4)
         # A Materials Project retrieval is credential-gated: without MP_API_KEY
         # in the runner's environment the generated lookup script cannot run.
         # Say so ON THE APPROVAL CARD, before any build or queue time is spent.
