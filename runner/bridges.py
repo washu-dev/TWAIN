@@ -402,13 +402,24 @@ def _cluster_limits(cluster: str) -> dict | None:
     return limits or None
 
 
+# Events that tell every client the run is over: the SSE stream refetches on them
+# and each one flips sessions.status to a terminal value.
+_TERMINAL_EVENTS = ("run.completed", "run.error")
+
+
 class PgEventSink:
-    """Duck-typed event bus: persist events and mirror UI-facing state."""
+    """Duck-typed event bus: persist events and mirror UI-facing state.
+
+    ``flush_artifacts`` is set by the runner once the orchestrator exists (the
+    sink is built first and handed *into* it). See :meth:`publish` for why the
+    sink, rather than the runner's finally block, has to be the one to call it.
+    """
 
     def __init__(self, db: RunnerDB, session_id: str):
         self.db = db
         self.session_id = session_id
         self._seq = 0
+        self.flush_artifacts = None
 
     def publish(self, event, priority=None) -> None:  # noqa: ARG002 (bus signature)
         try:
@@ -416,6 +427,17 @@ class PgEventSink:
         except (ValueError, TypeError):
             payload = {"raw": str(getattr(event, "payload", ""))}
         event_type = getattr(event, "event_type", "unknown")
+        # Persist the run's outputs BEFORE anything announces that it finished.
+        # Artifact capture used to happen only in the runner's finally block, i.e.
+        # after this event and after the status flip, so for 3-8 seconds a run
+        # advertised itself as done while its results did not exist yet (measured
+        # on e496cf22: status 'completed' at 05:22:40.19, last artifact at
+        # 05:22:47.86). Every consumer saw the gap -- a report opened in that
+        # window showed no result and never re-fetched, and the completion email
+        # went out inside it too. The runner still captures in its finally as a
+        # backstop for suspends and hard failures; upsert_artifact is idempotent.
+        if event_type in _TERMINAL_EVENTS:
+            self._flush()
         self.db.insert_run_event(self.session_id, event_type, payload or {}, seq=self._seq)
         self._seq += 1
 
@@ -429,3 +451,13 @@ class PgEventSink:
             self.db.set_conversation_status(self.session_id, "running")
         # run.suspended: keep the awaiting_input / awaiting_approval status the ask
         # bridge just set — the run is paused, not running.
+
+    def _flush(self) -> None:
+        """Commit artifacts, never failing the run over it (as the finally does)."""
+        if self.flush_artifacts is None:
+            return
+        try:
+            self.flush_artifacts()
+        except Exception as exc:  # noqa: BLE001 - a run must not die over capture
+            print(f"[runner] pre-terminal artifact capture failed for "
+                  f"{self.session_id}: {exc}")

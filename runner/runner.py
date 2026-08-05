@@ -316,18 +316,24 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
 
 def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier, cancel):
     """Wire an orchestrator for this session with the chat/event/store bridges."""
-    return engine.build_orchestrator(
+    sink = PgEventSink(db, session_id)
+    orch = engine.build_orchestrator(
         session_id=session_id,
         researcher_id=params.get("researcher_id", ""),
         request=params.get("request"),
         ask=DbAsk(db, session_id, notifier=notifier),
-        sink=PgEventSink(db, session_id),
+        sink=sink,
         store=PgStore(db),
         # Terminate button: checked between stages (raises RunCancelled).
         cancel=cancel,
         # Per-run budget override (falls back to the deployment default in engine).
         max_cost=params.get("max_cost"),
     )
+    # The sink commits artifacts before it announces a terminal state, so that a
+    # client which sees "finished" can always read the results. It can only be
+    # given the orchestrator now: the sink is built first and passed *into* it.
+    sink.flush_artifacts = lambda: capture_artifacts(db, session_id, orch)
+    return orch
 
 
 def process_job(job: dict, db: RunnerDB, engine=None) -> None:

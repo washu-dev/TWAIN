@@ -437,6 +437,29 @@ class ScriptDoctor:
                 "`os.environ.get('TWAIN_ENGINE_LAUNCH', '')` and prefix it onto the "
                 "engine command handed to the calculator (its `command=` argument, "
                 "or its Profile's) so the allocated cores are actually used.", line))
+        for calc_name, missing, line in _element_limited_calculator(
+                source, self.brief.get("formula")):
+            supported = " ".join(sorted(_ELEMENT_LIMITED_CALCULATORS[calc_name]))
+            diags.append(Diagnostic(
+                "element-coverage", "error",
+                f"uses {calc_name} for a material containing "
+                f"{', '.join(missing)}, which {calc_name} has no parameters for "
+                f"(it covers only: {supported}). The first energy evaluation "
+                f"raises NotImplementedError from inside initialize(), and if "
+                f"that is swallowed the next one fails as \"'{calc_name}' object "
+                f"has no attribute 'nl'\" -- an error that says nothing about the "
+                f"real cause. Use a potential that covers these elements, or let "
+                f"the missing library fail so the method can be replanned.", line))
+        for attempted, fallback, line in _silent_calculator_substitution(source):
+            diags.append(Diagnostic(
+                "calculator-substitution", "error",
+                f"falls back from '{attempted}' to a calculator from '{fallback}' "
+                f"when the import fails. That silently changes the method: the run "
+                f"reports whatever the provenance string claims while a different "
+                f"potential produced the number, and a wrong-but-successful result "
+                f"is worse than a failed one. Import the planned library "
+                f"unconditionally and let a missing one raise, so REPLAN can "
+                f"choose a method this cluster has.", line))
         for line in _uncorrelated_method_for_thermochemistry(
                 source, self.brief.get("property")):
             diags.append(Diagnostic(
@@ -1240,3 +1263,164 @@ def _undefined_names(source: str) -> List[Tuple[str, int]]:
 
     _Scan().visit(tree)
     return [(name, line) for name, line in used.items() if name not in defined]
+
+
+# --------------------------------------------------------------------------- #
+# calculators that only cover some elements
+
+# Every chemical symbol, so a formula-shaped string that is not actually a
+# formula cannot be mistaken for one. Without this, "Foo" parses as the symbol
+# "Fo" and would be reported as an element no potential supports.
+_ELEMENT_SYMBOLS = frozenset("""
+H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn
+Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La
+Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po
+At Rn Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg
+Cn Nh Fl Mc Lv Ts Og
+""".split())
+
+# Calculators whose parameter tables cover a fixed, small set of elements. ASE's
+# EMT is the one that matters in practice, because it is the natural "always
+# available, no setup" fallback and so is exactly what a script reaches for when
+# its real potential is missing. Cross-checked against ase.calculators.emt in the
+# test suite so an ASE update that adds an element cannot leave this stale.
+_ELEMENT_LIMITED_CALCULATORS = {
+    "EMT": frozenset("Ag Al Au C Cu H N Ni O Pd Pt".split()),
+}
+
+# Digits, brackets, hydrate dots and charges: the non-symbol characters a real
+# formula may contain. Anything else means the string is prose.
+_FORMULA_PUNCTUATION = "()[]{}·.,+-*/0123456789"
+
+
+def formula_elements(formula) -> frozenset:
+    """The element symbols in a formula, or empty if it is not a formula.
+
+    The whole string has to be consumable as a formula, not merely to contain
+    something symbol-shaped. Scanning for ``[A-Z][a-z]?`` is not enough: it finds
+    "Ca" inside "Calcium diplatinide" and would report calcium as an unsupported
+    element for a run whose brief happened to carry a name instead of a formula.
+    Since these diagnostics are errors that can block a run, an unrecognised
+    string must yield nothing at all.
+    """
+    if not isinstance(formula, str):
+        return frozenset()
+    text = formula.strip()
+    if not text or any(ch.isspace() for ch in text):
+        return frozenset()
+    symbols, i = set(), 0
+    while i < len(text):
+        ch = text[i]
+        if ch.isupper():
+            symbol = ch
+            if i + 1 < len(text) and text[i + 1].islower():
+                symbol += text[i + 1]
+                i += 1
+            if symbol not in _ELEMENT_SYMBOLS:
+                return frozenset()
+            symbols.add(symbol)
+        elif ch not in _FORMULA_PUNCTUATION:
+            # A lowercase run that is not part of a symbol: prose, not a formula.
+            return frozenset()
+        i += 1
+    return frozenset(symbols)
+
+
+def _element_limited_calculator(source: str, formula) -> List[tuple]:
+    """(calculator, sorted missing elements, line) for a guaranteed failure.
+
+    A script that can reach EMT for a material EMT has no parameters for fails at
+    its first energy evaluation, and it fails *misleadingly*: ASE raises
+    ``NotImplementedError: No EMT-potential for Ca`` from inside ``initialize()``,
+    after ``Calculator.calculate`` has already cached ``self.atoms``. If the script
+    swallows that (a bare ``except`` around a relaxation, say) the next evaluation
+    on a new Atoms with the same species sees no ``'numbers'`` change, skips
+    ``initialize`` and dies on ``AttributeError: 'EMT' object has no attribute
+    'nl'`` -- three layers from the cause, and what REPAIR would try to fix.
+
+    Job 2611227 lost its allocation to exactly this: MACE was absent, the script
+    fell back to EMT, and the material contained Ca.
+    """
+    elements = formula_elements(formula)
+    if not elements:
+        return []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    out: List[tuple] = []
+    for node in ast.walk(tree):
+        name = None
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            name = node.func.id
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            name = node.func.attr
+        if name not in _ELEMENT_LIMITED_CALCULATORS:
+            continue
+        missing = sorted(elements - _ELEMENT_LIMITED_CALCULATORS[name])
+        if missing:
+            out.append((name, missing, getattr(node, "lineno", None)))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# silent calculator substitution
+
+def _silent_calculator_substitution(source: str) -> List[tuple]:
+    """(attempted module, fallback module, line) for a swapped-in calculator.
+
+    ``try: from mace.calculators import mace_mp / except ModuleNotFoundError:
+    from ase.calculators.emt import EMT; return EMT()`` is not a fallback. A
+    universal machine-learned potential and a 1980s effective-medium pair
+    potential are different experiments, and the substitution happens silently at
+    runtime, so the result is labelled with whichever tool the script's provenance
+    string names -- in job 2611227, "MACE-MP interatomic potential", for a run
+    that never loaded MACE. Had the material been one EMT does cover, that run
+    would have SUCCEEDED and reported a foundation-model number produced by a pair
+    potential, which is worse than the crash.
+
+    A missing library has to fail loudly so REPLAN can pick a method the cluster
+    actually has. Matched narrowly: the handler must both import a different
+    top-level package and produce an object, so aliasing fallbacks
+    (``except ImportError: import tomli as tomllib``) are not flagged.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    def roots(body) -> set:
+        found = set()
+        for node in body:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.ImportFrom) and sub.module:
+                    found.add(sub.module.split(".")[0])
+                elif isinstance(sub, ast.Import):
+                    found.update(a.name.split(".")[0] for a in sub.names)
+        return found
+
+    def builds_an_object(body) -> bool:
+        for node in body:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Call):
+                    return True
+                if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call):
+                    return True
+        return False
+
+    out: List[tuple] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        attempted = roots(node.body)
+        if not attempted:
+            continue
+        for handler in node.handlers:
+            names = {n.id for n in ast.walk(handler) if isinstance(n, ast.Name)}
+            if not ({"ImportError", "ModuleNotFoundError"} & names):
+                continue
+            fallback = roots(handler.body) - attempted
+            if fallback and builds_an_object(handler.body):
+                out.append((sorted(attempted)[0], sorted(fallback)[0],
+                            getattr(handler, "lineno", None)))
+    return out
