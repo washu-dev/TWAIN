@@ -130,6 +130,7 @@ class SlurmExecutionAdapter:
         cluster_runner: Optional[Runner] = None,
         transfer_runner: Optional[Runner] = None,
         env_pythons: Optional[List[str]] = None,
+        parallelism: str = "threads",
         sleep=None,
         should_abort=None,
     ):
@@ -155,6 +156,11 @@ class SlurmExecutionAdapter:
         self.max_wait = max_wait
         self.poll_interval = poll_interval
         self.env_pythons = list(env_pythons or [])
+        # Where the calculator's parallelism lives, from the registry:
+        # "interpreter" (mpirun the script), "engine" (the script stays serial and
+        # the engine command carries the ranks), or "threads" (no MPI). See
+        # CalculatorEntry.parallelism and _env_payload.
+        self.parallelism = parallelism or "threads"
         self._sleep = sleep
         # Terminate seam: zero-arg callable polled between squeue checks; True
         # means the researcher pressed Terminate -> scancel the job and return.
@@ -573,39 +579,87 @@ class SlurmExecutionAdapter:
         lines.append('if [ -z "$LAYERED" ]; then twain_use_env "$PY"; fi')
         if run_smoke and (bundle / "inline_tests.py").is_file():
             lines.append('"$PY" inline_tests.py')
+        # Bound the run. A wedged engine or a hung MPI teardown otherwise burns the
+        # whole allocation: job 2601849 did about a minute of work, crashed inside
+        # ASE's Vibrations, and then idled 2h12m of a 4h limit before being killed
+        # by hand. Exiting 124 a little short of the limit turns that into a
+        # diagnosable timeout instead of silence.
+        budget = max(60, int(self.request.max_time * 60) - 120)
+        lines.append(
+            f'TWAIN_TIMEOUT="timeout --signal=TERM --kill-after=30 {budget}"')
         # Run the real payload under MPI when the selected env ships mpirun
         # (e.g. the openmpi GPAW build): DFT engines parallelize over k-points
         # via MPI ranks, which scales far better than OpenMP threading. One
         # thread per rank so ranks*threads never oversubscribes the allocation.
-        lines += [
-            'BIN="$(dirname "$PY")"',
-            'if [ -x "$BIN/mpirun" ]; then',
-            '  export OMP_NUM_THREADS=1',
-            # conda-forge OpenMPI finds its runtime data (PMIx/PRRTE help
-            # files, plugins) via OPAL_PREFIX, normally set by env activation
-            # -- we invoke by path without activating, so set it explicitly.
-            '  export OPAL_PREFIX="$(dirname "$BIN")"',
-            '  export PMIX_PREFIX="$OPAL_PREFIX"',
-            # The sbatch asks for --ntasks=1 --cpus-per-task=N (the right shape
-            # for threaded serial runs), so OpenMPI sees ONE slot and refuses
-            # -np N. Oversubscribe the slot count: the job's cgroup still pins
-            # us to the N allocated cores, one rank per core in practice.
-            # GPAW refuses a plain interpreter with >1 ranks ("Please use
-            # gpaw python to run in parallel"). `$PY -m gpaw python` is the
-            # wrapper's documented equivalent (gpaw/__main__.py selects the
-            # cgpaw MPI backend) and, unlike the $BIN/gpaw entry script, can't
-            # be broken by a stale relative shebang in the cluster env.
-            '  if [ -x "$BIN/gpaw" ]; then LAUNCH="$PY -m gpaw python";'
-            ' else LAUNCH="$PY"; fi',
-            # --bind-to none: with OVERSUBSCRIBE over one nominal slot, OpenMPI
-            # otherwise stacks every rank on the same core (observed ~40x
-            # slowdown); unbound ranks spread over the cgroup's real cores.
-            '  "$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"'
-            ' --map-by :OVERSUBSCRIBE --bind-to none $LAUNCH main.py',
-            "else",
-            '  "$PY" main.py',
-            "fi",
-        ]
+        #
+        # NOT for an external engine. GPAW is MPI-parallel *in process*, so every
+        # rank cooperates in one calculation. An engine driven as a separate binary
+        # is different: the script does many sequential calculations (a relaxation,
+        # then 6N finite-difference displacements) and each writes fixed filenames
+        # in the CWD. N ranks then run N copies of the whole script in one
+        # directory and clobber each other -- job 2601849 left nwchem_CO.nwo at 0
+        # bytes and an empty vib cache, so ASE read a displacement no rank had
+        # written, raised, and the MPI teardown hung for 2h12m of a 4h allocation.
+        # The engine parallelizes itself; the driver script must stay serial.
+        #
+        # The lookup uses the env the interpreter came FROM: with a layered venv
+        # $PY lives in .venv/bin, which never contains mpirun, so deriving it from
+        # $PY alone would silently disable MPI for every layered run.
+        # The env the interpreter came FROM: with a layered venv $PY lives in
+        # .venv/bin, which never holds mpirun, so deriving this from $PY alone
+        # would silently disable MPI for every layered run.
+        lines.append('if [ -n "$LAYERED" ]; then BIN="$(dirname "$BASE")";'
+                     ' else BIN="$(dirname "$PY")"; fi')
+        if self.parallelism != "interpreter":
+            # The script stays serial. N ranks of a driver that invokes a separate
+            # binary per calculation would be N copies of it in one directory,
+            # clobbering the fixed filenames each writes (job 2601849: a 0-byte
+            # .nwo, an empty vib cache, then a crash and a 2h12m hung teardown).
+            #
+            # For "engine" the ranks go to the engine instead, through one uniform
+            # variable the generated code prefixes onto its engine command. That is
+            # the only portable seam: ASE takes the command as a constructor
+            # argument for NWChem and ABINIT, and only as an env var for CP2K and
+            # DFTB+, so there is no single env var the payload could set.
+            if self.parallelism == "engine":
+                lines += [
+                    'if [ -n "$BIN" ] && [ -x "$BIN/mpirun" ]; then',
+                    '  export TWAIN_ENGINE_LAUNCH="$BIN/mpirun -np'
+                    ' ${SLURM_CPUS_PER_TASK:-1} --map-by :OVERSUBSCRIBE'
+                    ' --bind-to none"',
+                    '  export OPAL_PREFIX="$(dirname "$BIN")"',
+                    '  export PMIX_PREFIX="$OPAL_PREFIX"',
+                    "fi",
+                ]
+            lines.append('$TWAIN_TIMEOUT "$PY" main.py')
+        else:
+            lines += [
+                'if [ -x "$BIN/mpirun" ]; then',
+                '  export OMP_NUM_THREADS=1',
+                # conda-forge OpenMPI finds its runtime data (PMIx/PRRTE help
+                # files, plugins) via OPAL_PREFIX, normally set by env activation
+                # -- we invoke by path without activating, so set it explicitly.
+                '  export OPAL_PREFIX="$(dirname "$BIN")"',
+                '  export PMIX_PREFIX="$OPAL_PREFIX"',
+                # The sbatch asks for --ntasks=1 --cpus-per-task=N (the right shape
+                # for threaded serial runs), so OpenMPI sees ONE slot and refuses
+                # -np N. Oversubscribe the slot count: the job's cgroup still pins
+                # us to the N allocated cores, one rank per core in practice.
+                # GPAW refuses a plain interpreter with >1 ranks ("Please use
+                # gpaw python to run in parallel"). `$PY -m gpaw python` is the
+                # wrapper's documented equivalent and, unlike the $BIN/gpaw entry
+                # script, can't be broken by a stale relative shebang.
+                '  if [ -x "$BIN/gpaw" ]; then LAUNCH="$PY -m gpaw python";'
+                ' else LAUNCH="$PY"; fi',
+                # --bind-to none: with OVERSUBSCRIBE over one nominal slot,
+                # OpenMPI otherwise stacks every rank on the same core (observed
+                # ~40x slowdown); unbound ranks spread over the cgroup's cores.
+                '  $TWAIN_TIMEOUT "$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"'
+                ' --map-by :OVERSUBSCRIBE --bind-to none $LAUNCH main.py',
+                "else",
+                '  $TWAIN_TIMEOUT "$PY" main.py',
+                "fi",
+            ]
         return "\n".join(lines)
 
     def _read_log(self, local_dir, job_name: str, job_id: str) -> str:

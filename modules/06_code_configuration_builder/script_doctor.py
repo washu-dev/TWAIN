@@ -299,9 +299,16 @@ class ScriptDoctor:
         # -- phase 2: proactive hardening (one LLM review of a runnable script) -
         if self.agent is not None and self.review_enabled:
             findings = self.review(source)
-            actionable = [d for d in findings if d.severity == "error"]
+            # Static warnings ride along here rather than in phase 1. Phase 1 only
+            # repairs when an error exists, and promoting a warning to an error
+            # would let an unfixable resource-utilisation nit block a
+            # scientifically-correct run. Here a failed fix keeps the runnable
+            # script, which is the right trade for "correct but wasteful".
+            warnings = [d for d in self.static_diagnostics(source)
+                        if d.severity == "warning"]
+            actionable = [d for d in findings if d.severity == "error"] + warnings
             if actionable:
-                fixed = self._repair(source, findings)
+                fixed = self._repair(source, findings + warnings)
                 # A hardening fix must not regress the script -- neither the hard
                 # static checks NOR the runtime. Static-only acceptance let a review
                 # that introduced a bad-but-syntactically-valid API call (e.g.
@@ -408,6 +415,19 @@ class ScriptDoctor:
                 'numbers and raises TypeError at calculator init. For a '
                 'frozen-occupations band-structure pass use '
                 '{"name": "fixed-uniform"} instead.', line))
+        for line in _engine_launch_ignored(
+                source, str(self.brief.get("parallelism") or "threads")):
+            diags.append(Diagnostic(
+                "engine-launch-ignored", "warning",
+                "never reads TWAIN_ENGINE_LAUNCH, so this run will use one core of "
+                "the allocation. This engine is a separate program and the job "
+                "gives its ranks to the ENGINE, not to this script -- the script is "
+                "run single-process on purpose, because several ranks of it would "
+                "each drive their own copy of the engine in this one directory and "
+                "overwrite each other's files. Read "
+                "`os.environ.get('TWAIN_ENGINE_LAUNCH', '')` and prefix it onto the "
+                "engine command handed to the calculator (its `command=` argument, "
+                "or its Profile's) so the allocated cores are actually used.", line))
         for line in _uncorrelated_method_for_thermochemistry(
                 source, self.brief.get("property")):
             diags.append(Diagnostic(
@@ -925,6 +945,40 @@ def _uncorrelated_method_for_thermochemistry(source: str,
                 and str(node.value.value).strip().lower() in _UNCORRELATED_METHODS):
             lines.append(node.lineno)
     return sorted(set(lines))
+
+
+def _engine_launch_ignored(source: str,
+                           parallelism: str) -> List[Optional[int]]:
+    """Lines building an engine command that ignores the ranks the job allocated.
+
+    For the "engine" placement the payload deliberately runs this script
+    single-process -- several ranks of a driver that invokes a separate binary per
+    calculation would overwrite each other's files in the one working directory --
+    and publishes the allocation as ``TWAIN_ENGINE_LAUNCH`` instead. A script that
+    never reads it is correct and single-core: it asks Slurm for N CPUs and uses
+    one, which is how a job that should take minutes takes hours.
+
+    Not an error. The science is right, so blocking the run over it would be worse
+    than running it slowly; it rides into the proactive-hardening pass, where a
+    failed fix keeps the runnable script.
+    """
+    if parallelism != "engine" or "TWAIN_ENGINE_LAUNCH" in source:
+        return []
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    # Point at where the command is set, when the script says so explicitly.
+    lines = sorted({lineno for lineno, key, _ in _keyword_bindings(tree)
+                    if key in ("command", "commands")})
+    if not lines:
+        lines = sorted({node.lineno for node in ast.walk(tree)
+                        if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id.endswith("Profile")})
+    # None, not line 1: this is a property of the whole file, and pointing a reader
+    # at an unrelated first import is worse than pointing nowhere.
+    return lines[:1] or [None]
 
 
 def _ambiguous_spin_specification(source: str) -> List[int]:

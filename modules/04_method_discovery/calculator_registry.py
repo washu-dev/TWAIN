@@ -209,6 +209,24 @@ class CalculatorEntry:
     # unguessable yet looks guessable, and inventing one either crashes hours into
     # a queued job or names a real file for different physics.
     pseudo_library: Optional[str] = None
+    # WHERE this calculator's parallelism lives, which decides how the Slurm
+    # payload spends the allocated cores:
+    #
+    #   "interpreter" -- MPI-parallel inside python (GPAW). Every rank cooperates
+    #                    in one calculation, so the payload runs
+    #                    `mpirun -np N python main.py`.
+    #   "engine"      -- a separate binary the script drives file by file. The
+    #                    script must stay SERIAL (N ranks of it would be N copies
+    #                    in one directory, clobbering the fixed filenames each
+    #                    calculation writes -- job 2601849) and the ENGINE command
+    #                    carries the ranks instead, via TWAIN_ENGINE_LAUNCH.
+    #   "threads"     -- no MPI at all: shared-memory threads only, sized by
+    #                    OMP_NUM_THREADS (xTB, Psi4, the ML surrogates, and the
+    #                    glibc-pinned nompi CP2K build we provision).
+    #
+    # Declared here rather than inferred because the answer is a property of the
+    # engine and its build, not of anything visible in the generated source.
+    parallelism: str = "threads"
 
     def covers(self, property_key: str) -> bool:
         """Whether this calculator can compute ``property_key`` (case-insensitive)."""
