@@ -43,6 +43,7 @@ try:  # pragma: no cover - import shim (mirrors local_adapter)
     from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
     from execution_adapter.local_adapter import _DEP_ERROR_MARKERS, _safe_name
     from execution_adapter.slurm_adapter import (
+        THREAD_ENV_VARS,
         JobSpec,
         JobState,
         Runner,
@@ -57,6 +58,7 @@ except ImportError:  # pragma: no cover
     from execution_result import ExecutionResult, ExecutionStatus
     from local_adapter import _DEP_ERROR_MARKERS, _safe_name
     from slurm_adapter import (
+        THREAD_ENV_VARS,
         JobSpec,
         JobState,
         Runner,
@@ -610,6 +612,27 @@ class SlurmExecutionAdapter:
         # would silently disable MPI for every layered run.
         lines.append('if [ -n "$LAYERED" ]; then BIN="$(dirname "$BASE")";'
                      ' else BIN="$(dirname "$PY")"; fi')
+        # The header exported every thread knob as the full core count, which is
+        # right while the allocation belongs to one threaded process and wrong the
+        # moment it is handed to MPI ranks: ranks x threads must not exceed the
+        # cores we own. 24 ranks that each opened 24 BLAS threads put 576 spinning
+        # threads on 24 cores and made a GPAW iteration 250x slower (job 2608808:
+        # 185 s/iter against 0.7 s/iter for the same cell) -- and because the
+        # spinning threads report ~2400% CPU, the job looks busy rather than
+        # broken. Pinning OMP_NUM_THREADS alone does not fix it: OpenBLAS reads
+        # OPENBLAS_NUM_THREADS first and would have stayed at 24.
+        #
+        # Taking the share from the rank count rather than hardcoding 1 keeps this
+        # correct if a caller ever launches fewer ranks than it has cores.
+        lines += [
+            "twain_pin_threads() {",
+            '  _twain_per=$(( ${SLURM_CPUS_PER_TASK:-1} / $1 ))',
+            '  if [ "$_twain_per" -lt 1 ]; then _twain_per=1; fi',
+            f'  for _twain_v in {" ".join(THREAD_ENV_VARS)}; do',
+            '    export "$_twain_v=$_twain_per"',
+            "  done",
+            "}",
+        ]
         if self.parallelism != "interpreter":
             # The script stays serial. N ranks of a driver that invokes a separate
             # binary per calculation would be N copies of it in one directory,
@@ -627,6 +650,9 @@ class SlurmExecutionAdapter:
                     '  export TWAIN_ENGINE_LAUNCH="$BIN/mpirun -np'
                     ' ${SLURM_CPUS_PER_TASK:-1} --map-by :OVERSUBSCRIBE'
                     ' --bind-to none"',
+                    # The engine gets the ranks, so the engine (and the driver it
+                    # inherits from) must stop threading over the same cores.
+                    '  twain_pin_threads "${SLURM_CPUS_PER_TASK:-1}"',
                     '  export OPAL_PREFIX="$(dirname "$BIN")"',
                     '  export PMIX_PREFIX="$OPAL_PREFIX"',
                     "fi",
@@ -635,7 +661,7 @@ class SlurmExecutionAdapter:
         else:
             lines += [
                 'if [ -x "$BIN/mpirun" ]; then',
-                '  export OMP_NUM_THREADS=1',
+                '  twain_pin_threads "${SLURM_CPUS_PER_TASK:-1}"',
                 # conda-forge OpenMPI finds its runtime data (PMIx/PRRTE help
                 # files, plugins) via OPAL_PREFIX, normally set by env activation
                 # -- we invoke by path without activating, so set it explicitly.

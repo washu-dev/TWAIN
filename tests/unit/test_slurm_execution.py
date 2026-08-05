@@ -21,6 +21,7 @@ import pytest
 from execution_adapter.cluster_profile import ClusterProfile
 from execution_adapter.execution_result import ExecutionStatus
 from execution_adapter.slurm_adapter import (
+    THREAD_ENV_VARS,
     CommandResult,
     JobState,
     SlurmAdapter,
@@ -370,7 +371,7 @@ def test_payload_prefers_preprovisioned_envs_with_venv_fallback(tmp_path):
     assert 'if [ -x "$BIN/gpaw" ]; then LAUNCH="$PY -m gpaw python";' in payload
     assert ('"$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"'
             ' --map-by :OVERSUBSCRIBE --bind-to none $LAUNCH main.py') in payload
-    assert "export OMP_NUM_THREADS=1" in payload
+    assert '  twain_pin_threads "${SLURM_CPUS_PER_TASK:-1}"' in payload
     # OpenMPI needs OPAL_PREFIX when invoked by path without env activation.
     assert 'export OPAL_PREFIX="$(dirname "$BIN")"' in payload
     # Serial fallback branch, now bounded: a wedged engine or a hung MPI teardown
@@ -879,7 +880,37 @@ class TestMpiIsForInProcessEnginesOnly:
     def test_an_in_process_engine_still_gets_mpi(self, tmp_path):
         payload = self._payload(tmp_path, parallelism="interpreter")
         assert '"$BIN/mpirun" -np "${SLURM_CPUS_PER_TASK:-1}"' in payload
-        assert "export OMP_NUM_THREADS=1" in payload
+        assert '  twain_pin_threads "${SLURM_CPUS_PER_TASK:-1}"' in payload
+
+    @pytest.mark.parametrize("parallelism", ["interpreter", "engine"])
+    def test_handing_the_cores_to_ranks_pins_every_thread_knob(
+            self, tmp_path, parallelism):
+        """ranks x threads must not exceed the cores we own.
+
+        The header exports every knob as the full core count, which is right for a
+        threaded serial run. Whoever then launches N ranks has to undo all of it:
+        24 ranks x 24 BLAS threads spun 576 threads over 24 cores and cost 250x
+        (job 2608808, 185 s/iter against 0.7 s/iter for the same cell), while
+        reporting ~2400% CPU so it read as busy rather than broken.
+
+        Pinning OMP_NUM_THREADS alone was the actual bug: OpenBLAS reads
+        OPENBLAS_NUM_THREADS first, so BLAS stayed at 24 threads per rank.
+        """
+        payload = self._payload(tmp_path, parallelism=parallelism)
+        assert '  twain_pin_threads "${SLURM_CPUS_PER_TASK:-1}"' in payload
+        for var in THREAD_ENV_VARS:
+            assert var in payload, f"{var} is never re-pinned for MPI ranks"
+
+    def test_the_pin_shares_the_cores_out_by_rank_count(self, tmp_path):
+        """Derived from the rank count, so fewer ranks than cores still threads."""
+        payload = self._payload(tmp_path, parallelism="interpreter")
+        assert '_twain_per=$(( ${SLURM_CPUS_PER_TASK:-1} / $1 ))' in payload
+        assert 'if [ "$_twain_per" -lt 1 ]; then _twain_per=1; fi' in payload
+
+    def test_a_threaded_run_keeps_the_whole_allocation_for_threads(self, tmp_path):
+        """Nothing takes the ranks, so the header's full-core count must stand."""
+        payload = self._payload(tmp_path, parallelism="threads")
+        assert "twain_pin_threads " not in payload
 
     def test_the_mpirun_lookup_survives_a_layered_venv(self, tmp_path):
         """A venv's bin/ holds python and pip, never mpirun.
