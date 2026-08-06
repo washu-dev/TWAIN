@@ -1636,3 +1636,82 @@ class TestSilentCalculatorSubstitution:
         sources = {d.source for d in diags if d.severity == "error"}
         assert "calculator-substitution" in sources
         assert "element-coverage" in sources
+
+
+class TestACalculationNeedsAPlannedCalculator:
+    """A library-only plan must not have a script that computes energies.
+
+    The mirror of the existing "never references the required calculator import"
+    check: that one catches a script IGNORING the planned engine, this catches one
+    INVENTING an engine the plan never chose. A NaCl2 heat-of-formation run planned
+    as Pymatgen with calculator=null generated a script that tried MACE, then
+    CHGNet, then M3GNet, and died in EXECUTE on "No module named matgl" -- none of
+    the three is provisioned, and none was in requirements.txt because none was in
+    the plan (Slurm job 2633871). It is the second run lost to this.
+    """
+
+    LIBRARY_ONLY = {"library": "Pymatgen", "library_import": "pymatgen",
+                    "calculator": None, "calculator_import": None,
+                    "property": "total_energy", "acceptance": [],
+                    "output_file": "results.csv"}
+
+    def _script(self, body):
+        return ("import pymatgen\n"
+                f"def main():\n{body}"
+                "if __name__ == '__main__':\n    main()\n")
+
+    def _findings(self, body, brief=None):
+        script = self._script(body)
+        #  would treat an EMPTY brief as absent -- which is the
+        # exact case one test below is checking.
+        chosen = self.LIBRARY_ONLY if brief is None else brief
+        diags = ScriptDoctor(brief=chosen).static_diagnostics(script)
+        return [d for d in diags if d.source == "calculator-not-planned"]
+
+    def test_attaching_a_calculator_is_an_error(self):
+        hits = self._findings("    atoms.calc = something()\n")
+        assert len(hits) == 1 and hits[0].severity == "error"
+        assert ".calc" in hits[0].message
+
+    def test_asking_for_an_energy_is_an_error(self):
+        hits = self._findings("    e = atoms.get_potential_energy()\n")
+        assert len(hits) == 1
+        assert "get_potential_energy" in hits[0].message
+
+    @pytest.mark.parametrize("call", [
+        "get_forces", "get_stress", "get_dipole_moment", "get_magnetic_moments",
+    ])
+    def test_other_calculator_only_quantities(self, call):
+        assert self._findings(f"    x = atoms.{call}()\n")
+
+    def test_silent_when_the_plan_selected_a_calculator(self):
+        """With an engine planned it is resourced and provisioned -- and the
+        existing check already insists the script actually uses it."""
+        planned = {**self.LIBRARY_ONLY, "calculator": "GPAW",
+                   "calculator_import": "gpaw"}
+        assert not self._findings("    atoms.calc = GPAW()\n"
+                                  "    e = atoms.get_potential_energy()\n", planned)
+
+    def test_silent_for_a_genuine_library_only_script(self):
+        """A lookup or a descriptor pass computes nothing and must not be flagged."""
+        for body in (
+            "    from mp_api.client import MPRester\n    print('lookup')\n",
+            "    from pymatgen.core import Composition\n"
+            "    print(Composition('NaCl').weight)\n",
+            "    from rdkit import Chem\n    print(Chem.MolFromSmiles('CCO'))\n",
+            "    print(structure.volume, structure.density)\n",
+        ):
+            assert not self._findings(body), body
+
+    def test_silent_when_the_brief_carries_no_plan(self):
+        """Other callers pass no plan; they must not be second-guessed."""
+        assert not self._findings("    atoms.calc = x\n", brief={})
+
+    def test_it_reports_where(self):
+        hits = self._findings("    atoms.calc = x\n")
+        assert hits[0].line is not None
+
+    def test_a_syntax_error_does_not_crash_it(self):
+        diags = ScriptDoctor(brief=self.LIBRARY_ONLY).static_diagnostics("def f(:\n")
+        assert [d for d in diags if d.source == "compile"]
+        assert not [d for d in diags if d.source == "calculator-not-planned"]
