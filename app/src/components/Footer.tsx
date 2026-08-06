@@ -8,9 +8,10 @@ export const Footer: React.FC = () => {
   return (
     <View style={styles.container}>
       <View style={styles.topBar} />
+      {/* One line. The postal address was ~90pt of every screen, phone included,
+          and nobody opens a simulation planner to find out where St. Louis is. */}
       <View style={styles.content}>
         <Text style={styles.brandName}>Washington University in St. Louis</Text>
-        <Text style={styles.address}>One Brookings Drive, St. Louis, MO 63130</Text>
       </View>
     </View>
   );
@@ -27,19 +28,13 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.four,
+    paddingVertical: Spacing.two,
     alignItems: 'center',
-    gap: Spacing.one,
   },
   brandName: {
     color: C.textOnDark,
-    fontSize: 14,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  address: {
-    color: C.textOnDarkMuted,
-    fontSize: 12,
+    fontSize: 13,
+    fontWeight: '600',
     textAlign: 'center',
   },
 });

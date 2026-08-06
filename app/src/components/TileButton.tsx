@@ -9,6 +9,10 @@ interface TileButtonProps {
   description: string;
   onPress?: () => void;
   accentColor?: string;
+  /** `hero` for the one action the screen exists for: same tile, more weight, so
+      the hierarchy is visible before anything is read. Everything else is a
+      `row`, and the genuinely minor destinations are an IconTile instead. */
+  variant?: 'hero' | 'row';
 }
 
 export const TileButton: React.FC<TileButtonProps> = ({
@@ -16,7 +20,9 @@ export const TileButton: React.FC<TileButtonProps> = ({
   description,
   onPress,
   accentColor = C.washuRed,
+  variant = 'row',
 }) => {
+  const hero = variant === 'hero';
   return (
     <TouchableOpacity
       style={[styles.container, { borderLeftColor: accentColor }]}
@@ -27,14 +33,16 @@ export const TileButton: React.FC<TileButtonProps> = ({
       accessibilityHint={description}
       accessibilityRole="button"
     >
-      <View style={[styles.accentBar, { backgroundColor: accentColor }]} />
+      <View
+        style={[styles.accentBar, hero && styles.accentBarHero, { backgroundColor: accentColor }]}
+      />
 
-      <View style={styles.contentContainer}>
-        <Text style={styles.title}>{title}</Text>
-        <Text style={styles.description}>{description}</Text>
+      <View style={[styles.contentContainer, hero && styles.contentContainerHero]}>
+        <Text style={[styles.title, hero && styles.titleHero]}>{title}</Text>
+        <Text style={[styles.description, hero && styles.descriptionHero]}>{description}</Text>
       </View>
 
-      <Text style={[styles.arrow, { color: accentColor }]}>→</Text>
+      <Text style={[styles.arrow, hero && styles.arrowHero, { color: accentColor }]}>→</Text>
     </TouchableOpacity>
   );
 };
@@ -59,6 +67,9 @@ const styles = StyleSheet.create({
     width: 6,
     alignSelf: 'stretch',
   },
+  accentBarHero: {
+    width: 8,
+  },
   contentContainer: {
     flex: 1,
     paddingVertical: Spacing.three,
@@ -78,5 +89,18 @@ const styles = StyleSheet.create({
   arrow: {
     fontSize: 22,
     paddingRight: Spacing.three,
+  },
+  contentContainerHero: {
+    paddingVertical: Spacing.four,
+  },
+  titleHero: {
+    fontSize: 22,
+  },
+  descriptionHero: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  arrowHero: {
+    fontSize: 26,
   },
 });

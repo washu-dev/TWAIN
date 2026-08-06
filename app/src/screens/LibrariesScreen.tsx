@@ -11,7 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { apiClient, LibraryAvailability, LibraryInfo } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
-import { Colors, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -76,7 +76,7 @@ export const LibrariesScreen: React.FC = () => {
         >
           <Text style={styles.back}>‹ Back</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>What TWAIN can run</Text>
+        <Text style={styles.title}>{APP_STRINGS.librariesScreenTitle}</Text>
         <View style={{ width: 48 }} />
       </View>
 
