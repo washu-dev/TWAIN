@@ -43,6 +43,13 @@ export const DashboardScreen: React.FC = () => {
           onPress={() => router.push('/browse')}
         />
 
+        <TileButton
+          title={APP_STRINGS.tutorial}
+          description={APP_STRINGS.tutorialDesc}
+          accentColor={TileAccent.reads}
+          onPress={() => router.push('/tutorial')}
+        />
+
         {/* The minor three, at the weight they deserve: reachable in one tap,
             visibly not the point of the screen. Reporting an issue keeps a label
             rather than a stripe here, but it is still the one that leaves TWAIN
