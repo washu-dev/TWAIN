@@ -401,6 +401,28 @@ class ScriptDoctor:
             diags.append(Diagnostic(
                 "calculator", "error",
                 f"never references the required calculator import '{calc}'."))
+        # The mirror of the check above. That one catches a script IGNORING the
+        # planned calculator; this catches a script INVENTING one the plan never
+        # selected -- and only fires when the brief actually carries a plan, so
+        # other callers are unaffected.
+        if "calculator" in self.brief and not self.brief.get("calculator"):
+            sites = _energy_evaluation_sites(source)
+            if sites:
+                shown = ", ".join(f"{what} (line {line})" for what, line in sites[:3])
+                diags.append(Diagnostic(
+                    "calculator-not-planned", "error",
+                    f"evaluates energies but the plan selected no calculator "
+                    f"(tool_name='{self.brief.get('library')}', calculator=null): "
+                    f"{shown}. A library-only plan carries no engine and its "
+                    f"requirements.txt lists none, so whatever this imports is "
+                    f"absent at run time -- a NaCl2 run reached EXECUTE and died on "
+                    f"'No module named matgl' after trying MACE, CHGNet and M3GNet, "
+                    f"none of which is provisioned (Slurm job 2633871). Either "
+                    f"compute the property with the planned libraries alone, or "
+                    f"retrieve it rather than calculating it. Do NOT import an "
+                    f"engine the plan did not choose: the plan is what was "
+                    f"approved, resourced and provisioned for.",
+                    sites[0][1]))
         for name, line in _undefined_names(source):
             diags.append(Diagnostic(
                 "undefined-name", "error",
@@ -1263,6 +1285,47 @@ def _undefined_names(source: str) -> List[Tuple[str, int]]:
 
     _Scan().visit(tree)
     return [(name, line) for name, line in used.items() if name not in defined]
+
+
+# --------------------------------------------------------------------------- #
+# a calculation in a plan that has no calculator
+
+# Attaching a calculator, or asking for a quantity only a calculator can produce.
+# These are the honest signals that a script is COMPUTING rather than reading:
+# a database lookup, a descriptor pass or a structure manipulation needs none of
+# them, so they are safe to key on without recognising any engine by name --
+# which matters, because the registry's EMT entry imports as plain "ase".
+_CALCULATOR_METHODS = frozenset({
+    "get_potential_energy", "get_potential_energies", "get_forces", "get_stress",
+    "get_stresses", "get_dipole_moment", "get_magnetic_moment",
+    "get_magnetic_moments", "get_charges",
+})
+
+
+def _energy_evaluation_sites(source: str) -> List[tuple]:
+    """``(what, line)`` for each place the script performs a calculation.
+
+    Deliberately not a search for engine imports: the calculator registry spells
+    EMT's import as "ase", so importing ASE at all would look like a calculator
+    and every library-only script imports ASE. Attaching ``.calc`` or calling
+    ``get_potential_energy()`` cannot be explained any other way.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    out: List[tuple] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr == "calc":
+                    out.append(("attaches a calculator with `.calc = ...`",
+                                getattr(node, "lineno", None)))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in _CALCULATOR_METHODS:
+                out.append((f"calls `.{node.func.attr}()`",
+                            getattr(node, "lineno", None)))
+    return sorted(out, key=lambda pair: (pair[1] or 0))
 
 
 # --------------------------------------------------------------------------- #
