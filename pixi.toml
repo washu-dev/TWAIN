@@ -18,8 +18,6 @@ dev = "bash dev.sh"
 # modules/ and tests/ are deliberately NOT included: neither is linted in CI, and
 # they carry ~1200 pre-existing findings that would bury a real one. Add them only
 # alongside a pass to clear them.
-lint = "ruff check runner api"
-lint-fix = "ruff check runner api --fix"
 # Fetch the DFTB+ Slater-Koster (.skf) parameter files into <repo>/slako/ (see
 # runner/fetch_slako.sh). Not committed (CC-BY-SA data); run once after checkout.
 fetch-slako = "bash runner/fetch_slako.sh"
@@ -37,11 +35,6 @@ DFTB_PREFIX = "$PIXI_PROJECT_ROOT/slako/"
 python = "3.12.*"
 jsonschema = "*"
 pytest = "*"
-# The linter CI gates on (`pixi run lint`). Unpinned like the other dev tools --
-# pixi.lock fixes the actual version -- but note the workflows install it with a
-# bare `pip install ruff`, so CI can float ahead of the lock and a ruff release
-# that adds rules will fail there after passing here. Pin both to close that.
-ruff = "*"
 python-dotenv = ">=1.2.2,<2"
 requests = ">=2.34.2,<3"
 pymatgen = ">=2026.5.4,<2027"
@@ -85,6 +78,29 @@ dscribe = "*"
 phonopy = "*"
 spglib = "*"
 quacc = "*"
+
+# Lint, isolated so CI can gate on the SAME ruff the lock pins without solving the
+# scientific stack. `pixi run lint` uses it through the default environment (which
+# includes this feature), and CI runs `pixi run -e lint lint` -- an environment of
+# one package, seconds to install, instead of psi4 + rdkit + pyscf + openmm.
+#
+# This is what makes pixi.lock the single source of truth: the workflows used to
+# `pip install ruff` unpinned, so CI could float ahead of the lock and a release
+# that adds rules would fail there after passing locally.
+[feature.lint.dependencies]
+ruff = "*"
+
+[feature.lint.tasks]
+# Lint what CI lints, so a clean run here means a clean run there. Ruff resolves
+# configuration per file, so this single invocation from the root still applies
+# runner/ruff.toml and api/ruff.toml to their own trees -- confirmed by S603
+# (flake8-bandit, off by default) firing under runner/.
+#
+# modules/ and tests/ are deliberately NOT included: neither is linted in CI, and
+# they carry ~1200 pre-existing findings that would bury a real one. Add them only
+# alongside a pass to clear them.
+lint = "ruff check runner api"
+lint-fix = "ruff check runner api --fix"
 
 # Per-workstream features: branches add their own dependencies here as needed,
 # e.g. [feature.workflows.dependencies] quacc/jobflow for WorkflowManagers.
@@ -162,7 +178,11 @@ gpaw = "*"
 dftd3-python = "*"
 
 [environments]
-default = []
+# The lint feature rides along so `pixi run lint` works in the env developers
+# already have installed.
+default = ["lint"]
+# Just ruff, for CI: `pixi run -e lint lint`.
+lint = { features = ["lint"], no-default-feature = true }
 # Isolated 3.11 calculator stack; the default 3.12 env keeps its exact deps
 # untouched. Runnable on both linux-64 (GPAW + DFTB+) and osx-arm64 (DFTB+).
 sim = { features = ["sim"], no-default-feature = true }

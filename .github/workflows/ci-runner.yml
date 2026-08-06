@@ -35,10 +35,27 @@ jobs:
       - name: Install test dependencies
         # Unit tests use in-memory fakes (no Postgres, no pixi engine); psycopg2
         # is imported at module load, so the binary wheel is enough here.
-        run: pip install psycopg2-binary pytest ruff
+        run: pip install psycopg2-binary pytest
 
-      - name: Lint — ruff
-        run: ruff check runner
+      # Lint through pixi so CI gates on the SAME ruff pixi.lock pins. A bare
+      # `pip install ruff` floated ahead of the lock, so a release that adds rules
+      # failed here after `pixi run lint` passed locally -- which is the whole
+      # reason the local task exists.
+      #
+      # The `lint` environment is ruff and nothing else: 18 packages, ~3s to
+      # install, against 411 for the default scientific stack. Cached on pixi.lock.
+      - name: Set up pixi (lint environment only)
+        uses: prefix-dev/setup-pixi@v0.10.1
+        with:
+          environments: lint
+          cache: true
+          # Install strictly from pixi.lock, and fail if the manifest and
+          # lock disagree -- otherwise CI could resolve its own ruff and the
+          # drift this change removes would come straight back.
+          locked: true
+
+      - name: Lint — ruff (pixi run lint)
+        run: pixi run -e lint lint
 
       - name: Unit tests
         run: pytest runner/tests -v
