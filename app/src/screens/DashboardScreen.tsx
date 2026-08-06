@@ -91,6 +91,11 @@ const styles = StyleSheet.create({
   },
   content: {
     flexGrow: 1,
+    // Centred vertically: with only three groups the leftover space all collected
+    // at the bottom, which read as a page that had failed to load the rest of
+    // itself. flexGrow only ever expands, so on a short screen this still scrolls
+    // from the top rather than clipping the first tile.
+    justifyContent: 'center',
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,

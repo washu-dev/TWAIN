@@ -36,7 +36,10 @@ export const IconTile: React.FC<IconTileProps> = ({ label, glyph, hint, onPress 
     <Text style={styles.glyph} aria-hidden accessibilityElementsHidden importantForAccessibility="no">
       {glyph}
     </Text>
-    <Text style={styles.label} numberOfLines={1}>
+    {/* Two lines: at a third of a 375pt screen "Report an issue" does not fit on
+        one at this size, and it truncated to "Report an is...". Wrapping keeps the
+        label honest; every tile is the same height, so nothing shifts. */}
+    <Text style={styles.label} numberOfLines={2}>
       {label}
     </Text>
   </TouchableOpacity>
@@ -47,24 +50,24 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: Spacing.one,
-    paddingVertical: Spacing.three,
+    gap: Spacing.two,
+    paddingVertical: Spacing.four,
     paddingHorizontal: Spacing.one,
     backgroundColor: C.background,
     borderRadius: 6,
     borderWidth: 1,
     borderColor: C.border,
-    // 44pt is the smallest comfortable touch target; the padding above clears it
-    // at every text size, so a tile never becomes decoration you cannot press.
-    minHeight: 64,
+    // Comfortably past the 44pt touch minimum. "Minor" is about rank on the page,
+    // not about being small enough to miss with a thumb.
+    minHeight: 96,
   },
   glyph: {
-    fontSize: 20,
-    lineHeight: 24,
+    fontSize: 28,
+    lineHeight: 32,
     color: C.textSecondary,
   },
   label: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '600',
     color: C.textSecondary,
     textAlign: 'center',
