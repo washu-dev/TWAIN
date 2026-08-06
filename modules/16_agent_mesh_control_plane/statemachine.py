@@ -30,7 +30,7 @@ from cross_validation.baseline_validator import (
     ChainedBaselines,
     Prediction,
 )
-from cross_validation import mp_reference
+from cross_validation import mp_reference, plausibility
 from cross_validation.mp_reference import MaterialsProjectBaselines
 from self_correction.failure_classifier import RunEvidence
 from self_correction.reflection import reflect
@@ -3333,6 +3333,27 @@ class StateMachine:
                 and not isinstance(m.get("value"), bool)
                 and math.isfinite(m["value"])]
 
+    def _implausible_metrics(self, normalized: dict) -> list:
+        """Metrics that cannot be values of the quantity they claim to be.
+
+        Reads the RAW primary/secondary metrics rather than
+        ``_normalized_metrics``, which drops non-finite values: a NaN primary
+        should be reported as unusable, not silently leave nothing to grade.
+        Never raises -- a broken range table must not fail a finished run.
+        """
+        if not plausibility.enabled():
+            return []
+        metrics = []
+        if isinstance(normalized.get("primary_metric"), dict):
+            metrics.append(normalized["primary_metric"])
+        metrics.extend(m for m in normalized.get("secondary_metrics") or []
+                       if isinstance(m, dict))
+        try:
+            return plausibility.check_metrics(metrics)
+        except Exception as exc:  # noqa: BLE001 - a backstop must not become a hazard
+            logger.info("[validate] plausibility check skipped: %s", exc)
+            return []
+
     def _baseline_db(self):
         """The curated snapshot, backed by live Materials Project values.
 
@@ -3449,6 +3470,25 @@ class StateMachine:
                 artifact["rationale"] = (
                     f"{artifact['rationale']} Held to the run's own acceptance "
                     f"criteria, which are stricter: {own_rationale}")
+        # Last, and able to override any of the three branches above: a value that
+        # is not physically possible. Every check so far is comparative, so a novel
+        # system with a null acceptance target reaches this point graded "accepted"
+        # on the honest grounds that nothing could grade it -- which is how a CO2
+        # heat of formation of -27452 kJ/mol was delivered as a result. A bound
+        # needs no reference value, so it is the only check that covers that case.
+        implausible = self._implausible_metrics(normalized)
+        if implausible:
+            status = "rejected"
+            artifact["acceptance_status"] = status
+            artifact["plausibility"] = [asdict(f) for f in implausible]
+            artifact["rationale"] = (
+                "Rejected on physical grounds: "
+                + " ".join(f.message() for f in implausible)
+                + f" (Previous verdict, on agreement alone: {artifact['rationale']})")
+            # No relative error to report: the value is not near a reference, it
+            # is off the scale. Leaving gap None earns exactly one correction pass
+            # (see _gate_rerun), which is what a regenerated script needs.
+            gap = None
         artifact["gap"] = gap
         artifact["gap_basis"] = basis
         logger.info("[validate] %s -- %s", status, artifact["rationale"])

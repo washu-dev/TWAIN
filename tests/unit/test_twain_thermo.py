@@ -430,3 +430,132 @@ class TestTheNotationChemistsActuallyWrite:
         assert entry["counts"] == {"Mg": 1, "O": 2, "H": 2}
         assert entry["formula"] == "H2MgO2"          # canonical, elements sorted
         assert tt.canonical_formula("Mg(OH)2") == tt.canonical_formula("MgO2H2")
+
+
+class TestUnitsAreStatedNotAssumed:
+    """The units failure, pinned with run 1cd39ffd's real Psi4 numbers.
+
+    That script converted Hartree -> eV -> kJ/mol and then called species(), so
+    formation_enthalpy_via_reaction applied EV_TO_KJ_PER_MOL a second time to the
+    reaction term while the kJ/mol reference enthalpies were untouched. CO2's
+    standard heat of formation came back as -27452 kJ/mol instead of -393.8.
+    An earlier run of the same prompt on the same engine passed eV and got
+    -397.3, so a docstring saying "eV" -- which is what existed -- is not a fix.
+    """
+
+    # Psi4 B3LYP/6-311+G(2d,p) total energies in HARTREE, from the run's log.
+    E_HA = {"CO2": -188.6506214983544, "CO": -113.3519988959608,
+            "O2": -150.3746548968684}
+    # H(T)-E_elec in eV, as ase.thermochemistry.IdealGasThermo returns them.
+    CORR_EV = {"CO2": 0.41399, "CO": 0.22283, "O2": 0.19692}
+    REFS = {"CO": -110.53, "O2": 0.0}               # kJ/mol, NIST
+    EXPERIMENT = -393.5
+
+    def _cycle(self, energies, corrections, **unit_kwargs):
+        reactants = [
+            tt.species(["C", "O"], energies["CO"], correction=corrections["CO"],
+                       coefficient=1.0, **unit_kwargs),
+            tt.species(["O", "O"], energies["O2"], correction=corrections["O2"],
+                       coefficient=0.5, **unit_kwargs),
+        ]
+        products = [
+            tt.species(["C", "O", "O"], energies["CO2"],
+                       correction=corrections["CO2"], coefficient=1.0,
+                       **unit_kwargs),
+        ]
+        return tt.formation_enthalpy_via_reaction(
+            ["C", "O", "O"], reactants, products, self.REFS)
+
+    def test_hartree_in_gives_the_experimental_answer(self):
+        """What the failing script should have written: name the units, convert
+        nothing. Energy in Hartree, ASE's correction in eV."""
+        got = self._cycle(self.E_HA, self.CORR_EV,
+                          unit="Hartree", correction_unit="eV")
+        assert got == pytest.approx(self.EXPERIMENT, abs=1.0)
+
+    def test_ev_in_is_unchanged_by_the_new_argument(self):
+        """Every existing bundle passes eV and no unit=; that must keep working."""
+        ev = {k: v * tt.ENERGY_UNITS["hartree"] for k, v in self.E_HA.items()}
+        assert self._cycle(ev, self.CORR_EV) == pytest.approx(self.EXPERIMENT, abs=1.0)
+
+    def test_a_declared_kj_mol_energy_is_no_longer_double_converted(self):
+        """The script's own numbers -- pre-converted to kJ/mol -- now give the
+        right answer BECAUSE they say so, instead of -27452."""
+        factor = tt.ENERGY_UNITS["hartree"] * tt.EV_TO_KJ_PER_MOL
+        kj = {k: v * factor for k, v in self.E_HA.items()}
+        corr_kj = {k: v * tt.EV_TO_KJ_PER_MOL for k, v in self.CORR_EV.items()}
+        assert self._cycle(kj, corr_kj, unit="kJ/mol") == pytest.approx(
+            self.EXPERIMENT, abs=1.0)
+
+    def test_the_undeclared_double_conversion_still_reproduces_the_bug(self):
+        """Not a defect to fix here: with no unit stated, kJ/mol IS read as eV.
+        Pinned so the size of the error is on record -- ~70x, not slightly off --
+        which is why the plausibility backstop in module 11 exists as well."""
+        factor = tt.ENERGY_UNITS["hartree"] * tt.EV_TO_KJ_PER_MOL
+        kj = {k: v * factor for k, v in self.E_HA.items()}
+        corr_kj = {k: v * tt.EV_TO_KJ_PER_MOL for k, v in self.CORR_EV.items()}
+        got = self._cycle(kj, corr_kj)
+        assert got == pytest.approx(-27452, abs=200)
+        assert abs(got / self.EXPERIMENT) > 50
+
+    @pytest.mark.parametrize("spelling", [
+        "eV", "ev", "Hartree", "hartree", "Ha", "a.u.", "AU", "Eh", "E_h",
+        "Rydberg", "Ry", "ryd", "kJ/mol", "kj/mol", "kJ mol", "kJ_mol",
+        "kcal/mol", "kcal mol",
+    ])
+    def test_the_spellings_a_calculator_actually_prints_are_accepted(self, spelling):
+        assert tt.energy_in_ev(1.0, spelling) > 0
+
+    @pytest.mark.parametrize("factor,unit", [
+        (27.211386245988, "Hartree"),
+        (13.605693122994, "Rydberg"),
+        (1.0 / 96.48533212, "kJ/mol"),
+        (4.184 / 96.48533212, "kcal/mol"),
+    ])
+    def test_the_conversion_factors_are_right(self, factor, unit):
+        assert tt.energy_in_ev(1.0, unit) == pytest.approx(factor, rel=1e-9)
+
+    def test_rydberg_is_half_a_hartree(self):
+        """The slip most likely to pass unnoticed: a factor of two reads as a
+        physical disagreement, not a bug."""
+        assert tt.energy_in_ev(2.0, "Ry") == pytest.approx(
+            tt.energy_in_ev(1.0, "Ha"), rel=1e-12)
+
+    def test_an_unknown_unit_raises_instead_of_guessing(self):
+        with pytest.raises(tt.ThermoError) as excinfo:
+            tt.species("CO2", -188.65, correction=0.0, unit="hartrees per mole")
+        assert "unknown energy unit" in str(excinfo.value)
+        assert "kJ/mol" in str(excinfo.value)      # names what IS accepted
+
+    def test_energy_and_correction_can_have_different_units(self):
+        """The real pairing: Psi4 returns Hartree, IdealGasThermo returns eV."""
+        mixed = tt.species("CO2", -188.65, correction=0.414,
+                           unit="Hartree", correction_unit="eV")
+        assert mixed["correction"] == pytest.approx(0.414, rel=1e-12)
+        assert mixed["energy"] == pytest.approx(-5133.428, abs=0.01)
+
+    def test_the_correction_follows_the_energy_unit_by_default(self):
+        both_kj = tt.species("CO2", -100.0, correction=-10.0, unit="kJ/mol")
+        assert both_kj["correction"] == pytest.approx(
+            -10.0 / tt.EV_TO_KJ_PER_MOL, rel=1e-12)
+
+    def test_a_missing_correction_is_still_allowed_to_be_none(self):
+        """None means "an atom, supply 5/2 kT" and must not become 0.0 eV."""
+        assert tt.species("C", -37.0, unit="Hartree")["correction"] is None
+
+    def test_atomization_takes_units_too(self):
+        ha = tt.atomization_enthalpy(
+            "CO2", self.E_HA["CO2"], {"C": -37.8, "O": -75.0},
+            molecule_correction=0.414, unit="Hartree", correction_unit="eV")
+        ev = tt.atomization_enthalpy(
+            "CO2", self.E_HA["CO2"] * tt.ENERGY_UNITS["hartree"],
+            {"C": -37.8 * tt.ENERGY_UNITS["hartree"],
+             "O": -75.0 * tt.ENERGY_UNITS["hartree"]},
+            molecule_correction=0.414)
+        assert ha == pytest.approx(ev, rel=1e-9)
+
+    def test_formation_enthalpy_takes_units_too(self):
+        in_ev = tt.formation_enthalpy("CO2", 16.66, DHF_ATOMS)
+        in_kj = tt.formation_enthalpy("CO2", 16.66 * tt.EV_TO_KJ_PER_MOL,
+                                      DHF_ATOMS, unit="kJ/mol")
+        assert in_ev == pytest.approx(in_kj, rel=1e-9)

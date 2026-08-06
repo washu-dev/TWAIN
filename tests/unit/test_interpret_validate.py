@@ -1321,3 +1321,112 @@ class TestAcceptOrLoopGate:
 
         routed = machine.validate()
         assert (routed == State.REPLAN) is expect_rerun
+
+
+# -- physically impossible results ---------------------------------------------
+
+class TestImplausibleValuesAreNotDelivered:
+    """The gap run 1cd39ffd fell through.
+
+    A CO2 heat of formation of -27452 kJ/mol (experiment -393.5) reached the
+    researcher labelled "accepted": the plan's acceptance metric carried
+    target_value: null and no literature baseline covered the molecule, so both
+    comparative branches of _cross_validate honestly had nothing to say. A bound
+    on what the quantity can physically be is the only check that needs no
+    reference value.
+    """
+
+    BAD = -27452.226
+    GOOD = -395.6064420439893
+
+    def _seed_thermo_run(self, machine, tmp_path, value, *, criteria=None,
+                         unit=None, name="standard_heat_of_formation_kJ_mol"):
+        plan = _plan_for("carbon dioxide", criteria if criteria is not None else [
+            # Exactly what the run carried: a metric named, nothing to check it
+            # against. Nullable targets are legal, so this is not a bad plan.
+            {"metric_name": "standard_heat_of_formation",
+             "target_value": None, "tolerance": None},
+        ])
+        _seed(machine, tmp_path, "execution_plan", plan)
+        _seed(machine, tmp_path, "normalized_result", {
+            "primary_metric": {"name": name, "value": value,
+                               "uncertainty": abs(value) * 0.1,
+                               "uncertainty_method": "fallback", "unit": unit},
+            "secondary_metrics": [],
+            "metadata": {"parser": "csv"},
+        })
+
+    def test_the_impossible_value_is_rejected(self, machine, tmp_path):
+        self._seed_thermo_run(machine, tmp_path, self.BAD)
+        assert machine.validate() != State.ACCEPT
+
+        report = machine._load_artifact("validation_report")
+        assert report["acceptance_status"] == "rejected"
+        assert "not physically possible" in report["rationale"]
+        assert report["plausibility"], "the finding must be on the record"
+
+    def test_the_verdict_it_overrode_is_preserved(self, machine, tmp_path):
+        """The old rationale was true -- nothing COULD grade it -- so it stays
+        readable next to the new one rather than being overwritten."""
+        self._seed_thermo_run(machine, tmp_path, self.BAD)
+        machine.validate()
+        rationale = machine._load_artifact("validation_report")["rationale"]
+        assert "without external validation" in rationale
+        assert rationale.index("physically possible") < rationale.index(
+            "without external validation")
+
+    def test_the_report_names_the_likely_unit_slip(self, machine, tmp_path):
+        self._seed_thermo_run(machine, tmp_path, self.BAD)
+        machine.validate()
+        rationale = machine._load_artifact("validation_report")["rationale"]
+        assert "unit slip" in rationale
+        assert "96.4853" in rationale          # the factor that actually caused it
+
+    def test_the_run_that_was_right_is_still_accepted(self, machine, tmp_path):
+        """The regression that matters: a backstop which flags the good runs is
+        worse than none. -395.6 is the answer the NWChem run delivered."""
+        self._seed_thermo_run(machine, tmp_path, self.GOOD)
+        assert machine.validate() == State.ACCEPT
+        report = machine._load_artifact("validation_report")
+        assert report["acceptance_status"] == "accepted"
+        assert "plausibility" not in report
+
+    def test_a_stated_unit_that_differs_is_not_second_guessed(self, machine, tmp_path):
+        """-94060 kcal/mol IS -393.5 kJ/mol; judging it against a kJ/mol bound
+        would invent a failure."""
+        self._seed_thermo_run(machine, tmp_path, -94060.0, unit="kcal/mol",
+                              name="standard_heat_of_formation")
+        assert machine.validate() == State.ACCEPT
+
+    def test_a_non_finite_metric_is_not_delivered_as_a_result(self, machine, tmp_path):
+        """NaN survives extraction but is dropped by _normalized_metrics, so it
+        used to leave nothing to grade -- i.e. "accepted"."""
+        self._seed_thermo_run(machine, tmp_path, float("nan"))
+        assert machine.validate() != State.ACCEPT
+        report = machine._load_artifact("validation_report")
+        assert report["acceptance_status"] == "rejected"
+
+    def test_it_still_defers_to_a_stricter_real_criterion(self, machine, tmp_path):
+        """When the plan CAN grade the value, that verdict is not weakened: the
+        bound only ever makes a verdict worse."""
+        self._seed_thermo_run(machine, tmp_path, self.GOOD, criteria=[
+            {"metric_name": "standard_heat_of_formation",
+             "target_value": -393.5, "tolerance": 0.1}])
+        assert machine.validate() != State.ACCEPT
+        assert machine._load_artifact(
+            "validation_report")["acceptance_status"] == "rejected"
+
+    def test_the_env_switch_restores_the_old_behaviour(self, machine, tmp_path,
+                                                      monkeypatch):
+        """An escape hatch, so a deployment with a legitimately out-of-bounds
+        property never has to edit the pipeline."""
+        monkeypatch.setenv("TWAIN_PLAUSIBILITY_CHECK", "0")
+        self._seed_thermo_run(machine, tmp_path, self.BAD)
+        assert machine.validate() == State.ACCEPT
+
+    def test_a_broken_range_table_does_not_fail_a_finished_run(self, machine,
+                                                               tmp_path):
+        with patch.object(SM.plausibility, "check_metrics",
+                          side_effect=RuntimeError("table on fire")):
+            self._seed_thermo_run(machine, tmp_path, self.GOOD)
+            assert machine.validate() == State.ACCEPT
