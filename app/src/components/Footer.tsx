@@ -8,10 +8,12 @@ export const Footer: React.FC = () => {
   return (
     <View style={styles.container}>
       <View style={styles.topBar} />
-      {/* One line. The postal address was ~90pt of every screen, phone included,
-          and nobody opens a simulation planner to find out where St. Louis is. */}
+      {/* The address stays -- it is institutional attribution, not filler. What
+          was actually costing ~90pt of every screen was the padding around it, so
+          that is what shrank: same two lines, a little over half the height. */}
       <View style={styles.content}>
         <Text style={styles.brandName}>Washington University in St. Louis</Text>
+        <Text style={styles.address}>One Brookings Drive, St. Louis, MO 63130</Text>
       </View>
     </View>
   );
@@ -28,13 +30,22 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
+    paddingTop: Spacing.two,
+    // A little more underneath than above, so the last line never sits flush
+    // against a phone's home indicator.
+    paddingBottom: Spacing.three,
     alignItems: 'center',
+    gap: Spacing.half,
   },
   brandName: {
     color: C.textOnDark,
     fontSize: 13,
     fontWeight: '600',
+    textAlign: 'center',
+  },
+  address: {
+    color: C.textOnDarkMuted,
+    fontSize: 12,
     textAlign: 'center',
   },
 });

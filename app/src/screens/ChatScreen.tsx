@@ -8,13 +8,15 @@ import {
   StyleSheet,
   ActivityIndicator,
   Modal,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { apiClient, Conversation, Message, RunIssue } from '@/api/client';
 import { IssueModal } from '@/components/IssueModal';
+import { PlanCard, parsePlanSummary } from '@/components/PlanCard';
 import { ReportIssueModal } from '@/components/ReportIssueModal';
+import { PIPELINE_STATES, StateStepper } from '@/components/StateStepper';
+import { WallTimeField } from '@/components/WallTimeField';
 import { useAuth } from '@/hooks/useAuth';
 import { useNow } from '@/hooks/useNow';
 import {
@@ -29,12 +31,6 @@ const C = Colors.light;
 // modules/16_agent_mesh_control_plane/statemachine.py — keep in sync). The
 // approval card keys off it to offer a one-tap GitHub provisioning request.
 const ENGINE_UNAVAILABLE_PREFIX = 'ENGINE UNAVAILABLE ON THIS DEPLOYMENT: ';
-
-// The happy-path pipeline states shown in the stepper (loops CORRECT/REPLAN omitted).
-const PIPELINE_STATES = [
-  'INTAKE', 'CLARIFY', 'DECOMPOSE', 'DISCOVER', 'PLAN',
-  'BUILD', 'EXECUTE', 'INTERPRET', 'VALIDATE', 'ACCEPT', 'TERMINATE',
-];
 
 // Where the off-spine loop states sit on the happy path. Without this, a run
 // that ended while looping (e.g. current_state REPAIR) resolved to index -1 and
@@ -98,57 +94,6 @@ type SlurmDraft = {
   max_time: string;
   max_time_unit: DurationUnit;
 };
-
-type PlanSummary = {
-  compute_target?: string;
-  slurm_cluster?: string;
-  summary?: string | null;
-  goal_id?: string | null;
-  target_system?: {
-    formula?: string;
-    kind?: string;
-    crystal?: { name?: string; phase?: string };
-  } | null;
-  requested_property?: string | null;
-  selected_method?: {
-    tool_name?: string;
-    tool_version?: string | number;
-    calculator?: string;
-    libraries?: string[];
-  } | null;
-  cost_estimate?: { min_cost?: number } | null;
-  compute_estimate?: { cpu_hours?: number } | null;
-  slurm_request?: {
-    cpu_count?: number;
-    gpu_count?: number;
-    ram?: number;
-    max_time?: number;
-  };
-  // Per-node ceilings of the cluster (same units as slurm_request), shown on
-  // the editable fields and used to clamp what the user can request.
-  slurm_limits?: {
-    cpu_count?: number;
-    gpu_count?: number;
-    ram?: number;
-    max_time?: number;
-  } | null;
-  // Why each suggested figure is what it is, keyed by slurm_request field.
-  slurm_rationale?: Record<string, string> | null;
-  // Whose ceilings slurm_limits are ("compute2 node" / "this machine").
-  limits_source?: string | null;
-  acceptance_metrics?: { metric_name?: string; target_value?: number; tolerance?: number }[] | null;
-  safety_notes?: string[] | null;
-  note?: string;
-};
-
-function parsePlanSummary(content: string): PlanSummary | null {
-  try {
-    const parsed = JSON.parse(content);
-    return typeof parsed === 'object' && parsed ? parsed : null;
-  } catch {
-    return null;
-  }
-}
 
 export const ChatScreen: React.FC = () => {
   const router = useRouter();
@@ -1060,81 +1005,6 @@ const SlurmField: React.FC<{
  * "10 minutes" came out as 10 hours, or as 0.1666 if you did the division
  * yourself. Two controls, so neither the keyboard nor the reader has to guess.
  */
-const WallTimeField: React.FC<{
-  label: string;
-  value: string;
-  unit: DurationUnit;
-  onChange: (value: string, unit: DurationUnit) => void;
-}> = ({ label, value, unit, onChange }) => (
-  <View style={styles.slurmField}>
-    <Text style={styles.slurmFieldLabel}>{label}</Text>
-    <View style={styles.wallTimeRow}>
-      <TextInput
-        style={[styles.slurmFieldInput, styles.wallTimeInput]}
-        value={value}
-        onChangeText={(v) => onChange(v, unit)}
-        keyboardType="decimal-pad"
-        accessibilityLabel={`${label}, amount`}
-      />
-      {/* radio, not button: a one-of-two choice, and the role is what carries the
-          state to a screen reader. Written with the ARIA props rather than
-          accessibilityState because that is what react-native-web 0.21 forwards
-          (checked verified in the DOM) -- accessibilityState={{selected}} on a
-          button emitted NOTHING, leaving the red fill as the only cue for which
-          unit was active. RN 0.85 maps aria-checked to native state, so this is
-          the portable spelling, not a web-only patch. */}
-      <View style={styles.unitToggle} role="radiogroup">
-        {(['m', 'h'] as DurationUnit[]).map((option) => {
-          const active = unit === option;
-          return (
-            <TouchableOpacity
-              key={option}
-              style={[styles.unitOption, active && styles.unitOptionActive]}
-              onPress={() => onChange(value, option)}
-              role="radio"
-              aria-checked={active}
-              aria-label={option === 'm' ? 'minutes' : 'hours'}
-            >
-              <Text style={[styles.unitOptionText, active && styles.unitOptionTextActive]}>
-                {option === 'm' ? 'min' : 'hours'}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
-    </View>
-  </View>
-);
-
-const StateStepper: React.FC<{ current: string; status?: string }> = ({ current, status }) => {
-  const currentIndex = PIPELINE_STATES.indexOf(current);
-  return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      style={styles.stepper}
-      contentContainerStyle={styles.stepperContent}
-    >
-      {PIPELINE_STATES.map((state, i) => {
-        const done = currentIndex > i || status === 'completed';
-        const active = currentIndex === i && status !== 'completed';
-        return (
-          <View key={state} style={styles.step}>
-            <View
-              style={[
-                styles.dot,
-                done && styles.dotDone,
-                active && styles.dotActive,
-              ]}
-            />
-            <Text style={[styles.stepLabel, active && styles.stepLabelActive]}>{state}</Text>
-          </View>
-        );
-      })}
-    </ScrollView>
-  );
-};
-
 /**
  * The user's approval decision, in words.
  *
@@ -1197,104 +1067,6 @@ const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   );
 };
 
-// Renders the approval-gate plan: leads with the plain-language summary of what
-// the run will do, then the concrete method / system / cost / notes.
-const PlanCard: React.FC<{ content: string }> = ({ content }) => {
-  const plan = parsePlanSummary(content);
-  if (!plan) {
-    return (
-      <View style={styles.planCard}>
-        <Text style={styles.planTitle}>Proposed execution plan</Text>
-        <Text style={styles.planBody}>{content}</Text>
-      </View>
-    );
-  }
-
-  const method = plan.selected_method ?? undefined;
-  const methodText = method?.tool_name
-    ? [
-        `${method.tool_name}${method.tool_version ? ` ${method.tool_version}` : ''}`,
-        method.calculator ? `+ ${method.calculator}` : '',
-      ]
-        .filter(Boolean)
-        .join(' ')
-    : undefined;
-  const libs = method?.libraries?.length ? method.libraries.join(' + ') : undefined;
-
-  const sys = plan.target_system ?? undefined;
-  const sysText = sys
-    ? [sys.formula ?? sys.crystal?.name, sys.crystal?.phase, sys.kind].filter(Boolean).join(', ')
-    : undefined;
-
-  const cost = plan.cost_estimate?.min_cost;
-  const cpu = plan.compute_estimate?.cpu_hours;
-  const costText = [
-    cost != null ? `$${Number(cost).toFixed(2)} LLM` : null,
-    cpu != null ? `${Number(cpu).toFixed(2)} CPU·h` : null,
-  ]
-    .filter(Boolean)
-    .join(' + ');
-
-  const metrics = plan.acceptance_metrics ?? [];
-  const notes = plan.safety_notes ?? [];
-  const slurm = plan.slurm_request;
-
-  return (
-    <View style={styles.planCard}>
-      <Text style={styles.planTitle}>Proposed execution plan</Text>
-      {plan.compute_target === 'slurm' && (
-        <Text style={styles.planTarget}>
-          Will submit to RIS / Slurm
-          {plan.slurm_cluster ? ` (${plan.slurm_cluster})` : ''}
-        </Text>
-      )}
-      {plan.summary ? <Text style={styles.planSummary}>{plan.summary}</Text> : null}
-      {sysText ? <PlanRow label="System" value={sysText} /> : null}
-      {plan.requested_property ? <PlanRow label="Property" value={plan.requested_property} /> : null}
-      {methodText ? (
-        <PlanRow label="Method" value={libs ? `${methodText}  ·  ${libs}` : methodText} />
-      ) : null}
-      {costText ? <PlanRow label="Estimated cost" value={costText} /> : null}
-      {slurm ? (
-        <PlanRow
-          label="Slurm ask"
-          value={`${slurm.cpu_count ?? '—'} CPU, ${slurm.gpu_count ?? 0} GPU, ${
-            slurm.ram ?? '—'
-          } GB RAM, ${
-            (slurm.max_time != null && formatDurationHours(slurm.max_time)) || '—'
-          } wall`}
-        />
-      ) : null}
-      {plan.goal_id ? <PlanRow label="Goal" value={plan.goal_id} /> : null}
-      {metrics.length > 0 ? (
-        <PlanRow
-          label="Accept if"
-          value={metrics
-            .map((m) => `${m.metric_name} ≈ ${m.target_value} ± ${m.tolerance}`)
-            .join('; ')}
-        />
-      ) : null}
-      {notes.length > 0 ? (
-        <View style={styles.planNotes}>
-          <Text style={styles.planNotesLabel}>Notes</Text>
-          {notes.map((n, i) => (
-            <Text key={`note-${i}`} style={styles.planNote}>
-              • {n}
-            </Text>
-          ))}
-        </View>
-      ) : null}
-    </View>
-  );
-};
-
-const PlanRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-  <View style={styles.planRow}>
-    <Text style={styles.planRowLabel}>{label}</Text>
-    <Text style={styles.planRowValue}>{value}</Text>
-  </View>
-);
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
   topBar: {
@@ -1343,14 +1115,6 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   targetBadgeSlurm: { color: C.washuGreen },
-  stepper: { maxHeight: 62, backgroundColor: C.backgroundElement, flexGrow: 0 },
-  stepperContent: { alignItems: 'center', paddingHorizontal: Spacing.three, gap: Spacing.three },
-  step: { alignItems: 'center', gap: 4, paddingVertical: Spacing.two },
-  dot: { width: 12, height: 12, borderRadius: 6, backgroundColor: C.borderStrong },
-  dotDone: { backgroundColor: C.washuGreen },
-  dotActive: { backgroundColor: C.washuRed, transform: [{ scale: 1.3 }] },
-  stepLabel: { fontSize: 9, color: C.textSecondary },
-  stepLabelActive: { color: C.washuRed, fontWeight: '700' },
   scroll: { flex: 1 },
   scrollContent: { padding: Spacing.three, gap: Spacing.two },
   hint: { color: C.textSecondary, fontSize: 15, lineHeight: 22, padding: Spacing.two },
@@ -1360,34 +1124,6 @@ const styles = StyleSheet.create({
   bubbleTag: { fontSize: 10, fontWeight: '700', color: C.washuGreen, marginBottom: 4 },
   bubbleText: { fontSize: 15, color: C.text, lineHeight: 21 },
   userBubbleText: { color: C.washuWhite },
-  planCard: {
-    alignSelf: 'stretch',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: C.washuGreen,
-    padding: Spacing.three,
-    backgroundColor: C.washuWhite,
-  },
-  planTitle: { fontSize: 14, fontWeight: '700', color: C.washuGreen, marginBottom: Spacing.two },
-  planTarget: { fontSize: 13, fontWeight: '700', color: C.washuRed, marginBottom: Spacing.one },
-  planBody: {
-    fontSize: 12,
-    color: C.text,
-    fontFamily: Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' }),
-  },
-  planSummary: { fontSize: 14, color: C.text, lineHeight: 20, marginBottom: Spacing.two },
-  planRow: { flexDirection: 'row', gap: Spacing.two, paddingVertical: 3 },
-  planRowLabel: { fontSize: 12, color: C.textSecondary, fontWeight: '600', width: 96 },
-  planRowValue: { fontSize: 13, color: C.text, flex: 1 },
-  planNotes: { marginTop: Spacing.two, gap: 3 },
-  planNotesLabel: {
-    fontSize: 11,
-    color: C.washuGreen,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  planNote: { fontSize: 12, color: C.textSecondary, lineHeight: 17 },
   working: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, padding: Spacing.two },
   workingText: { color: C.textSecondary, fontSize: 13 },
   // Tabular figures so a ticking counter doesn't shuffle its own width each
@@ -1501,22 +1237,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: C.text,
   },
-  // Wall time: the number and the unit control share one line, the number taking
-  // the slack so the two unit buttons keep a constant, tappable width.
-  wallTimeRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
-  wallTimeInput: { flex: 1 },
-  unitToggle: {
-    flexDirection: 'row',
-    borderWidth: 1,
-    borderColor: C.border,
-    borderRadius: 8,
-    overflow: 'hidden',
-    backgroundColor: C.washuWhite,
-  },
-  unitOption: { paddingHorizontal: Spacing.two, paddingVertical: Spacing.one },
-  unitOptionActive: { backgroundColor: C.washuRed },
-  unitOptionText: { fontSize: 12, color: C.textSecondary, fontWeight: '600' },
-  unitOptionTextActive: { color: C.washuWhite },
   approvalButtons: { flexDirection: 'row', gap: Spacing.two },
   approveBtn: {
     flex: 1,

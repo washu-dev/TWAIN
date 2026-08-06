@@ -43,6 +43,13 @@ export const DashboardScreen: React.FC = () => {
           onPress={() => router.push('/browse')}
         />
 
+        <TileButton
+          title={APP_STRINGS.tutorial}
+          description={APP_STRINGS.tutorialDesc}
+          accentColor={TileAccent.reads}
+          onPress={() => router.push('/tutorial')}
+        />
+
         {/* The minor three, at the weight they deserve: reachable in one tap,
             visibly not the point of the screen. Reporting an issue keeps a label
             rather than a stripe here, but it is still the one that leaves TWAIN
@@ -91,6 +98,11 @@ const styles = StyleSheet.create({
   },
   content: {
     flexGrow: 1,
+    // Centred vertically: with only three groups the leftover space all collected
+    // at the bottom, which read as a page that had failed to load the rest of
+    // itself. flexGrow only ever expands, so on a short screen this still scrolls
+    // from the top rather than clipping the first tile.
+    justifyContent: 'center',
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,

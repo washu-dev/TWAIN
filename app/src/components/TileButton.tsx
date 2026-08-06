@@ -91,10 +91,10 @@ const styles = StyleSheet.create({
     paddingRight: Spacing.three,
   },
   contentContainerHero: {
-    paddingVertical: Spacing.four,
+    paddingVertical: Spacing.five,
   },
   titleHero: {
-    fontSize: 22,
+    fontSize: 24,
   },
   descriptionHero: {
     fontSize: 14,
