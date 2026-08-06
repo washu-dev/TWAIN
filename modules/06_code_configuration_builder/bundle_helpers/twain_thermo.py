@@ -28,6 +28,10 @@ obvious, and has two failure modes that produce a *plausible* number.
 2. Stoichiometry. ``E(C) + 2 E(O)`` has to match the molecule, and a hand-written
    coefficient is one edit away from wrong. Here it is counted from the structure.
 
+3. Units. The algebra works in eV, and saying so in every docstring was not
+   enough -- see the ``ENERGY_UNITS`` comment. Pass the number your calculator
+   returned and NAME its unit (``unit="Hartree"``); never convert first.
+
 Sign convention throughout: an atomization enthalpy is positive (energy required
 to pull a stable molecule apart), and a formation enthalpy is negative for a
 molecule more stable than its constituent elements.
@@ -40,10 +44,12 @@ from collections import Counter
 from typing import Dict, Iterable, Mapping, Optional
 
 __all__ = [
+    "ENERGY_UNITS",
     "EV_TO_KJ_PER_MOL",
     "ThermoError",
     "atomization_enthalpy",
     "canonical_formula",
+    "energy_in_ev",
     "formation_enthalpy",
     "formation_enthalpy_via_reaction",
     "monatomic_enthalpy_correction",
@@ -57,6 +63,78 @@ __all__ = [
 EV_TO_KJ_PER_MOL = 96.48533212
 # Boltzmann constant in eV/K, so corrections stay in the calculators' own unit.
 _KB_EV_PER_K = 8.617333262e-5
+
+
+# --------------------------------------------------------------------------- #
+# Units
+# --------------------------------------------------------------------------- #
+# Failure mode 3, and the only one that survived being written down. The algebra
+# below works in eV, which every docstring said and the codegen prompt spelled out
+# as ``energy_eV`` -- and a generated script still converted Psi4's Hartrees all
+# the way to kJ/mol before calling species(). formation_enthalpy_via_reaction then
+# applied EV_TO_KJ_PER_MOL again, so the reaction term was multiplied by 96.485
+# twice while the reference enthalpies (already kJ/mol) were not, and CO2's
+# standard heat of formation came back as -27452 kJ/mol instead of -393.8 (run
+# 1cd39ffd). An earlier run of the same prompt on the same engine passed eV and
+# got -397.3, so this is not something a caller gets wrong once and learns: there
+# was no way to SAY which unit was meant, only a convention to remember.
+#
+# So say it. ``unit=`` is checked against this table and converted here, which
+# makes the mistake unrepresentable rather than merely documented: a script that
+# has kJ/mol says kJ/mol, and one that pre-converts and *also* declares Hartree
+# gets a number wrong by 2625x -- loud, not plausible.
+ENERGY_UNITS = {
+    "ev": 1.0,
+    # Psi4, PySCF, NWChem and CP2K all report total energies in Hartree.
+    "hartree": 27.211386245988,
+    # Quantum ESPRESSO reports Rydberg -- half a Hartree, so mistaking one for
+    # the other is a factor of 2, the size of a plausible physical disagreement.
+    "rydberg": 13.605693122994,
+    "kj/mol": 1.0 / EV_TO_KJ_PER_MOL,
+    # Psi4 prints its thermochemistry tables in kcal/mol beside kJ/mol.
+    "kcal/mol": 4.184 / EV_TO_KJ_PER_MOL,
+}
+
+_UNIT_ALIASES = {
+    "electronvolt": "ev", "electronvolts": "ev",
+    "ha": "hartree", "hartrees": "hartree", "eh": "hartree", "e_h": "hartree",
+    "au": "hartree", "a.u.": "hartree", "atomicunits": "hartree",
+    "ry": "rydberg", "ryd": "rydberg", "rydbergs": "rydberg",
+    "kjmol": "kj/mol", "kj/mole": "kj/mol", "kjpermol": "kj/mol",
+    "kjmol^1": "kj/mol", "kj/mol^1": "kj/mol",
+    "kcalmol": "kcal/mol", "kcal/mole": "kcal/mol", "kcalpermol": "kcal/mol",
+    "kcalmol^1": "kcal/mol", "kcal/mol^1": "kcal/mol",
+}
+
+
+def _unit_factor(unit) -> float:
+    """``unit`` -> how many eV one of it is, or raise naming the accepted spellings."""
+    text = str(unit).strip().lower().replace(" ", "").replace("_", "")
+    text = text.replace("-", "").replace("**", "^")
+    key = _UNIT_ALIASES.get(text, text)
+    if key not in ENERGY_UNITS:
+        raise ThermoError(
+            f"unknown energy unit {unit!r}. Accepted: "
+            f"{', '.join(sorted(ENERGY_UNITS))} (aliases Ha, a.u., Eh, Ry, "
+            f"kJ/mol, kcal/mol). State the unit your calculator actually "
+            f"returned instead of converting first -- converting twice is the "
+            f"error this argument exists to make impossible.")
+    return ENERGY_UNITS[key]
+
+
+def energy_in_ev(value: float, unit: str = "eV") -> float:
+    """``value`` expressed in eV, the unit this module's algebra works in.
+
+    >>> round(energy_in_ev(-188.65062, "Hartree"), 4)      # CO2, B3LYP
+    -5133.4449
+    >>> round(energy_in_ev(-393.5, "kJ/mol"), 6)           # CO2's dHf
+    -4.07834
+    >>> round(energy_in_ev(-4.07834), 6)                   # already eV: unchanged
+    -4.07834
+    >>> round(energy_in_ev(-1.0, "Ry") / energy_in_ev(-1.0, "Ha"), 6)
+    0.5
+    """
+    return float(value) * _unit_factor(unit)
 
 
 class ThermoError(ValueError):
@@ -288,20 +366,31 @@ def atomization_enthalpy(
     molecule_correction: float = 0.0,
     temperature: float = 298.15,
     atom_corrections: Optional[Mapping[str, float]] = None,
+    unit: str = "eV",
+    correction_unit: Optional[str] = None,
 ) -> float:
     """``sum H(atoms) - H(molecule)`` at ``temperature``, in eV (positive).
 
-    ``molecule_energy`` and ``atom_energies`` are electronic energies in eV, as a
-    calculator returns them. ``molecule_correction`` is the molecule's
-    ``H(T) - E_elec`` (its ZPE plus thermal terms, e.g. from
-    ``ase.thermochemistry.IdealGasThermo.get_enthalpy(T) - E_elec``).
+    ``molecule_energy`` and ``atom_energies`` are electronic energies in ``unit``,
+    as the calculator returned them -- name the unit rather than converting (see
+    :func:`species`). ``molecule_correction`` is the molecule's ``H(T) - E_elec``
+    (its ZPE plus thermal terms, e.g. from
+    ``ase.thermochemistry.IdealGasThermo.get_enthalpy(T) - E_elec``), in
+    ``correction_unit`` if its unit differs from the energies'.
 
     Each reference atom's ``H(T) - E_elec`` is added automatically -- pass
     ``atom_corrections`` only to override an element (e.g. to include an
-    electronic-degeneracy term), never to zero one out.
+    electronic-degeneracy term), never to zero one out. Overrides are read in
+    ``correction_unit`` too.
     """
     counts = stoichiometry(atoms_or_symbols)
-    atom_energies = _by_species(atom_energies)
+    corr_unit = unit if correction_unit is None else correction_unit
+    molecule_energy = energy_in_ev(molecule_energy, unit)
+    molecule_correction = energy_in_ev(molecule_correction, corr_unit)
+    atom_energies = {el: energy_in_ev(e, unit)
+                     for el, e in _by_species(atom_energies).items()}
+    atom_corrections = {el: energy_in_ev(c, corr_unit) for el, c
+                        in _by_species(atom_corrections or {}).items()}
     missing = sorted(el for el in counts if el not in atom_energies)
     if missing:
         raise ThermoError(
@@ -312,8 +401,9 @@ def atomization_enthalpy(
     default_correction = monatomic_enthalpy_correction(temperature)
     total_atoms = 0.0
     for element, n in counts.items():
-        correction = _by_species(atom_corrections or {}).get(
-            element, default_correction)
+        # atom_corrections was normalised and converted above, so no second
+        # _by_species pass here -- it would be a no-op on canonical keys.
+        correction = atom_corrections.get(element, default_correction)
         total_atoms += n * (atom_energies[element] + correction)
     return total_atoms - (molecule_energy + molecule_correction)
 
@@ -322,13 +412,21 @@ def formation_enthalpy(
     atoms_or_symbols,
     atomization_enthalpy_ev: float,
     atom_formation_enthalpies_kj: Mapping[str, float],
+    *,
+    unit: str = "eV",
 ) -> float:
     """Standard formation enthalpy of the molecule, in kJ/mol.
 
     ``dHf(molecule) = sum n_i dHf(atom_i, g) - atomization_enthalpy``.
 
+    ``atomization_enthalpy_ev`` is read in ``unit`` -- eV by default, which is what
+    :func:`atomization_enthalpy` returns, so the pair composes with no conversion.
+    Say ``unit="kJ/mol"`` rather than dividing by ``EV_TO_KJ_PER_MOL`` on the way
+    in: the parameter name records the default, not a requirement.
+
     ``atom_formation_enthalpies_kj`` are the standard formation enthalpies of the
-    GASEOUS atoms at the same temperature, in kJ/mol, and are reference data the
+    GASEOUS atoms at the same temperature, in kJ/mol (they are reference data, not
+    calculator output, and tables are published in kJ/mol) -- reference data the
     caller supplies (NIST-JANAF / CODATA -- e.g. C(g) 716.68, O(g) 249.18 at
     298.15 K). They are deliberately not tabulated here: this module owns the
     algebra, not the thermochemical data.
@@ -343,7 +441,7 @@ def formation_enthalpy(
             f"supply one per element from NIST-JANAF/CODATA rather than "
             f"omitting it")
     total = sum(n * atom_formation_enthalpies_kj[el] for el, n in counts.items())
-    return total - atomization_enthalpy_ev * EV_TO_KJ_PER_MOL
+    return total - energy_in_ev(atomization_enthalpy_ev, unit) * EV_TO_KJ_PER_MOL
 
 
 # --------------------------------------------------------------------------- #
@@ -356,16 +454,38 @@ def formation_enthalpy(
 # those errors cancel between the two sides, which is why it reaches useful
 # accuracy at the same cost.
 def species(symbols, energy: float, *, correction: Optional[float] = None,
-            coefficient: float = 1.0) -> dict:
+            coefficient: float = 1.0, unit: str = "eV",
+            correction_unit: Optional[str] = None) -> dict:
     """One participant in a reaction.
 
-    ``energy`` is the electronic energy in eV. ``correction`` is that species'
-    ``H(T) - E_elec`` in eV; leave it None for a single ATOM (5/2 kT is supplied)
-    but pass it for anything polyatomic -- omitting it there silently drops the
-    zero-point energy, which is tens of kJ/mol.
+    ``energy`` is that species' electronic energy, in ``unit``. ``correction`` is
+    its ``H(T) - E_elec``, in ``correction_unit`` (defaulting to ``unit``); leave
+    it None for a single ATOM (5/2 kT is supplied) but pass it for anything
+    polyatomic -- omitting it there silently drops the zero-point energy, which
+    is tens of kJ/mol.
+
+    Pass what your calculator returned and name that unit. Do NOT convert first:
+
+        species(sym, psi4.energy(...), unit="Hartree",          # right
+                correction=thermo.get_enthalpy(T), correction_unit="eV")
+
+    ``correction_unit`` exists for exactly that pairing, which is the common one
+    and has no single answer -- Psi4 hands back Hartree while ASE's
+    ``IdealGasThermo`` hands back eV, so one unit for both would force a
+    conversion right back into the caller.
+
+    >>> ha = species("CO2", -188.65062, correction=0.4218,
+    ...              unit="Hartree", correction_unit="eV")
+    >>> ev = species("CO2", -5133.4449, correction=0.4218)
+    >>> round(ha["energy"] - ev["energy"], 3), round(ha["correction"], 4)
+    (0.0, 0.4218)
     """
     counts = stoichiometry(symbols)
-    return {"counts": counts, "formula": _formula(counts), "energy": float(energy),
+    if correction is not None:
+        correction = energy_in_ev(
+            correction, unit if correction_unit is None else correction_unit)
+    return {"counts": counts, "formula": _formula(counts),
+            "energy": energy_in_ev(energy, unit),
             "correction": correction, "coefficient": float(coefficient)}
 
 

@@ -1,0 +1,206 @@
+{
+  "version": "2026.08.06",
+  "$comment": [
+    "Physically POSSIBLE ranges per property -- not accuracy targets. A value",
+    "outside one of these is not 'inaccurate', it is not a value of that quantity",
+    "at all, and the usual cause is a unit slip in a generated script.",
+    "",
+    "Why this table exists: a CO2 heat-of-formation run reported -27452 kJ/mol",
+    "(experiment: -393.5) because the script pre-converted energies to kJ/mol",
+    "before handing them to twain_thermo, which converts again. It was delivered",
+    "as 'accepted' -- the plan set target_value and tolerance to null, and no",
+    "literature baseline covered the molecule, so nothing in VALIDATE had anything",
+    "to compare against. A bound that needs no reference value is the only check",
+    "that could have caught it (run 1cd39ffd).",
+    "",
+    "Bounds are deliberately loose -- roughly 2-4x the most extreme real value --",
+    "so they can only ever fire on the impossible. That is enough: the smallest",
+    "unit slip in play (eV <-> kJ/mol, 96.5x) leaves any real value far outside.",
+    "",
+    "Only properties with a defensible physical bound appear. total_energy and",
+    "cohesive_energy are deliberately ABSENT: a total energy's magnitude scales",
+    "with electron count and basis set, so no fixed bound distinguishes a unit",
+    "error from a bigger molecule."
+  ],
+  "ranges": [
+    {
+      "property": "standard_heat_of_formation",
+      "aliases": [
+        "dhf",
+        "enthalpy_of_formation",
+        "formation_enthalpy",
+        "heat_of_formation",
+        "standard_enthalpy_of_formation",
+        "standard_formation_enthalpy"
+      ],
+      "unit": "kJ/mol",
+      "min": -20000.0,
+      "max": 20000.0,
+      "reason": "a formation enthalpy per mole of formula unit stays within a few thousand kJ/mol",
+      "why": "Per mole of formula unit. The most exothermic formations of common species reach a few thousand kJ/mol (large hydrated oxides); C60 sits near +2500. 20000 leaves >4x headroom, while an eV->kJ/mol slip trips it for any |dHf| above 207 kJ/mol -- i.e. essentially every formation enthalpy anyone runs."
+    },
+    {
+      "property": "band_gap",
+      "aliases": [
+        "bandgap",
+        "eg",
+        "electronic_band_gap",
+        "fundamental_gap",
+        "gap"
+      ],
+      "unit": "eV",
+      "min": 0.0,
+      "max": 20.0,
+      "reason": "a band gap is non-negative and no known material exceeds ~14 eV",
+      "why": "A gap is non-negative by definition (a metal is 0); the widest insulators reach ~14 eV (LiF 14.2). A negative value means the band ordering was read wrong, and an eV->kJ/mol slip exceeds 20 for any gap above 0.2 eV."
+    },
+    {
+      "property": "bulk_modulus",
+      "aliases": [
+        "b0",
+        "bulkmodulus",
+        "incompressibility",
+        "k0"
+      ],
+      "unit": "GPa",
+      "min": 0.0,
+      "max": 1000.0,
+      "reason": "a stable phase has a positive bulk modulus, and diamond -- the stiffest known -- is 443 GPa",
+      "why": "Positive for any mechanically stable phase; diamond is 443 GPa and c-BN ~400, so 1000 is over 2x the stiffest known material. Catches a GPa/MPa/Pa slip, which is the common one for an EOS fit."
+    },
+    {
+      "property": "logS",
+      "aliases": [
+        "aqueous_solubility",
+        "aqueous_solubility_log_mol_per_l",
+        "aqueous_solubility_logs",
+        "log_s",
+        "log_solubility",
+        "log_solubility_mol_l",
+        "logs",
+        "solubility",
+        "solubility_logs"
+      ],
+      "unit": "log10(mol/L)",
+      "min": -15.0,
+      "max": 2.0,
+      "reason": "logS is a base-10 logarithm of a molar solubility",
+      "why": "Already a log, so the bound is tight and safe: -15 is below anything measurable, and +2 would be 100 mol/L, which no solute reaches. Catches a raw concentration reported where a log was asked for."
+    },
+    {
+      "property": "density",
+      "aliases": [
+        "crystal_density",
+        "mass_density",
+        "rho"
+      ],
+      "unit": "g/cm^3",
+      "min": 0.0,
+      "max": 30.0,
+      "reason": "osmium, the densest element at ambient conditions, is 22.59 g/cm^3",
+      "why": "Positive, and osmium (22.59) is the densest element at ambient conditions. Catches the kg/m^3 slip, a factor of 1000."
+    },
+    {
+      "property": "lattice_constant",
+      "aliases": [
+        "a0",
+        "cell_length",
+        "lattice_constant_a",
+        "lattice_parameter"
+      ],
+      "unit": "ang",
+      "min": 0.0,
+      "max": 100.0,
+      "reason": "a lattice constant is positive, and even large MOF cells stay well under 100 A",
+      "why": "Positive; even large zeolite and MOF cells stay well under 100 A. Catches an A->pm slip (100x) but NOT an A->nm slip (0.1x) -- an upper bound only sees errors in one direction, which is why this table is a backstop and not a substitute for stating units."
+    },
+    {
+      "property": "formation_energy_per_atom",
+      "aliases": [
+        "e_form_per_atom",
+        "formation_energy"
+      ],
+      "unit": "eV/atom",
+      "min": -10.0,
+      "max": 10.0,
+      "reason": "Materials Project's entire distribution lies inside +/-5 eV/atom",
+      "why": "Materials Project's whole distribution lies inside +/-5 eV/atom. Catches a per-cell energy reported as per-atom for a large cell, and any eV/kJ confusion."
+    }
+  ],
+  "conversion_hints": {
+    "$comment": [
+      "Factors tried against an out-of-range value to name the likely cause.",
+      "Each is scoped to the units it could possibly apply to: offering",
+      "'Hartree -> kJ/mol' as an explanation for a bulk modulus in GPa is",
+      "noise, and a wrong hint is worse than none. '*' would mean any unit.",
+      "All matching candidates are reported, never a single ranked guess --",
+      "loose bounds mean several factors fit, and the check cannot tell which."
+    ],
+    "factors": [
+      {
+        "label": "Hartree -> kJ/mol applied to a value already in kJ/mol",
+        "factor": 2625.4996394798254,
+        "units": [
+          "kJ/mol",
+          "eV",
+          "eV/atom"
+        ]
+      },
+      {
+        "label": "eV -> kJ/mol applied to a value already in kJ/mol",
+        "factor": 96.48533212,
+        "units": [
+          "kJ/mol",
+          "eV",
+          "eV/atom"
+        ]
+      },
+      {
+        "label": "Hartree -> eV applied twice",
+        "factor": 27.211386245988,
+        "units": [
+          "kJ/mol",
+          "eV",
+          "eV/atom"
+        ]
+      },
+      {
+        "label": "Rydberg -> eV applied twice",
+        "factor": 13.605693122994,
+        "units": [
+          "kJ/mol",
+          "eV",
+          "eV/atom"
+        ]
+      },
+      {
+        "label": "kcal/mol read as kJ/mol",
+        "factor": 4.184,
+        "units": [
+          "kJ/mol",
+          "eV",
+          "eV/atom"
+        ]
+      },
+      {
+        "label": "an SI prefix, e.g. GPa read as MPa or kJ as J",
+        "factor": 1000.0,
+        "units": [
+          "kJ/mol",
+          "eV",
+          "eV/atom",
+          "GPa",
+          "g/cm^3",
+          "ang"
+        ]
+      },
+      {
+        "label": "angstrom read as picometre",
+        "factor": 100.0,
+        "units": [
+          "ang"
+        ]
+      }
+    ]
+  }
+}
