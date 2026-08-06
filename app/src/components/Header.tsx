@@ -1,6 +1,8 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { APP_STRINGS, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
+
+const C = Colors.light;
 
 interface HeaderProps {
   onTestPress?: () => void;
@@ -53,11 +55,11 @@ export const Header: React.FC<HeaderProps> = ({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
     paddingVertical: Spacing.three,
     paddingHorizontal: Spacing.four,
     borderBottomWidth: 4,
-    borderBottomColor: '#215732',
+    borderBottomColor: C.washuGreen,
   },
   content: {
     flexDirection: 'row',
@@ -77,7 +79,7 @@ const styles = StyleSheet.create({
   appTitle: {
     fontSize: 28,
     fontWeight: 'bold',
-    color: '#FFFFFF',
+    color: C.washuWhite,
     letterSpacing: 0.5,
   },
   appSubtitle: {
@@ -95,12 +97,12 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.two,
     borderRadius: 4,
     borderWidth: 2,
-    borderColor: '#FFFFFF',
+    borderColor: C.washuWhite,
     minWidth: 80,
     alignItems: 'center',
   },
   buttonOutlineText: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 14,
     fontWeight: '600',
   },
@@ -108,12 +110,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     borderRadius: 4,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     minWidth: 80,
     alignItems: 'center',
   },
   buttonSolidText: {
-    color: '#BA0C2F',
+    color: C.washuRed,
     fontSize: 14,
     fontWeight: '700',
   },

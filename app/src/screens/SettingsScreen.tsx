@@ -12,9 +12,11 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Header, Footer } from '@/components';
-import { APP_STRINGS, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
 import { apiClient, NOTIFY_KINDS, NotifyKind } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
+
+const C = Colors.light;
 
 // What each runner notification kind means, in the user's words.
 const KIND_LABELS: Record<NotifyKind, { title: string; description: string }> = {
@@ -124,7 +126,7 @@ export const SettingsScreen: React.FC = () => {
             <Switch
               value={enabled}
               onValueChange={setEnabled}
-              trackColor={{ true: '#BA0C2F' }}
+              trackColor={{ true: C.washuRed }}
               accessibilityLabel="Send me emails"
             />
           </View>
@@ -143,7 +145,7 @@ export const SettingsScreen: React.FC = () => {
                 onValueChange={(value) =>
                   setKinds((prev) => ({ ...prev, [kind]: value }))
                 }
-                trackColor={{ true: '#BA0C2F' }}
+                trackColor={{ true: C.washuRed }}
                 accessibilityLabel={KIND_LABELS[kind].title}
               />
             </View>
@@ -164,7 +166,7 @@ export const SettingsScreen: React.FC = () => {
 
         {loading && (
           <View style={styles.loading}>
-            <ActivityIndicator size="large" color="#BA0C2F" accessibilityLabel="Loading" />
+            <ActivityIndicator size="large" color={C.washuRed} accessibilityLabel="Loading" />
           </View>
         )}
       </ScrollView>
@@ -177,7 +179,7 @@ export const SettingsScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F5F5F5',
+    backgroundColor: C.washuLightGray,
   },
   scroll: {
     flex: 1,
@@ -198,29 +200,29 @@ const styles = StyleSheet.create({
   backText: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#BA0C2F',
+    color: C.washuRed,
   },
   pageTitle: {
     fontSize: 24,
     fontWeight: '700',
-    color: '#222',
+    color: C.textStrong,
     marginBottom: Spacing.three,
   },
   card: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     borderRadius: 8,
     padding: Spacing.four,
     borderWidth: 1,
-    borderColor: '#E0E0E0',
+    borderColor: C.border,
   },
   sectionTitle: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#222',
+    color: C.textStrong,
   },
   sectionDesc: {
     fontSize: 14,
-    color: '#555',
+    color: C.textSecondary,
     marginTop: Spacing.one,
     marginBottom: Spacing.three,
   },
@@ -240,21 +242,21 @@ const styles = StyleSheet.create({
   rowTitle: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#222',
+    color: C.textStrong,
   },
   rowDesc: {
     fontSize: 13,
-    color: '#666',
+    color: C.textSecondary,
     marginTop: 2,
   },
   divider: {
     height: 1,
-    backgroundColor: '#EEEEEE',
+    backgroundColor: C.divider,
     marginVertical: Spacing.two,
   },
   saveButton: {
     marginTop: Spacing.three,
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
     borderRadius: 6,
     paddingVertical: Spacing.two,
     alignItems: 'center',
@@ -263,14 +265,14 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   saveButtonText: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 16,
     fontWeight: '600',
   },
   status: {
     marginTop: Spacing.two,
     fontSize: 14,
-    color: '#215732',
+    color: C.washuGreen,
     textAlign: 'center',
   },
   loading: {

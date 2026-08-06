@@ -1,6 +1,8 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { Spacing } from '@/constants/theme';
+import { Colors, Spacing } from '@/constants/theme';
+
+const C = Colors.light;
 
 export const Footer: React.FC = () => {
   return (
@@ -16,12 +18,12 @@ export const Footer: React.FC = () => {
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#1A1A1A',
+    backgroundColor: C.surfaceDark,
     marginTop: Spacing.four,
   },
   topBar: {
     height: 4,
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
   },
   content: {
     paddingHorizontal: Spacing.four,
@@ -30,13 +32,13 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   brandName: {
-    color: '#FFFFFF',
+    color: C.textOnDark,
     fontSize: 14,
     fontWeight: '700',
     textAlign: 'center',
   },
   address: {
-    color: '#AAAAAA',
+    color: C.textOnDarkMuted,
     fontSize: 12,
     textAlign: 'center',
   },

@@ -7,7 +7,9 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
-import { Spacing } from '@/constants/theme';
+import { Colors, Spacing } from '@/constants/theme';
+
+const C = Colors.light;
 
 interface MessageModalProps {
   visible: boolean;
@@ -77,24 +79,24 @@ const styles = StyleSheet.create({
     padding: Spacing.four,
   },
   dialog: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     borderRadius: 8,
     width: Platform.OS === 'web' ? 420 : '100%',
     maxWidth: 480,
     overflow: 'hidden',
-    shadowColor: '#000',
+    shadowColor: C.shadow,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 12,
     elevation: 8,
   },
   header: {
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
   },
   title: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 16,
     fontWeight: '700',
     letterSpacing: 0.3,
@@ -114,35 +116,35 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
     marginTop: 5,
   },
   messageText: {
     flex: 1,
     fontSize: 15,
-    color: '#1A1A1A',
+    color: C.textStrong,
     lineHeight: 22,
   },
   emptyText: {
     fontSize: 14,
-    color: '#5A5A5A',
+    color: C.textSecondary,
     fontStyle: 'italic',
   },
   footer: {
     borderTopWidth: 1,
-    borderTopColor: '#EEEEEE',
+    borderTopColor: C.divider,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
     alignItems: 'flex-end',
   },
   closeButton: {
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
     borderRadius: 4,
   },
   closeButtonText: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 14,
     fontWeight: '600',
   },
