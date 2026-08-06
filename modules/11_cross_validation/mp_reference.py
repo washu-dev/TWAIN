@@ -138,6 +138,43 @@ def canonical_property(name: Any) -> Optional[str]:
     return key if key in MP_PROPERTIES else None
 
 
+def formula_is_known(formula: str, *, api_key: Optional[str] = None,
+                     client_factory: Optional[Callable[[str], Any]] = None,
+                     timeout: int = DEFAULT_TIMEOUT_SECONDS) -> Optional[bool]:
+    """Whether Materials Project holds ANY entry for ``formula``.
+
+    ``None`` means "could not tell" -- no key, no network, an unusable formula --
+    and is deliberately distinct from ``False``. Callers must not treat the two
+    alike: absence of evidence is not evidence of absence.
+
+    Used as a plausibility signal on a requested composition. It is a WARNING and
+    never a veto, for two reasons. MP is not exhaustive, and it is not the right
+    authority for a molecule at all. But zero entries is a strong hint: measured
+    against MP, NaCl2 (which cannot exist -- sodium is monovalent) returns nothing,
+    while every real compound tried returns something, including the intermetallics
+    CaPt2, FeAl and Ni3Al. Oxidation-state reasoning was the obvious alternative and
+    is unusable here: it calls CaPt2, FeAl and Ni3Al all implausible, so it would
+    have blocked the CaPt2 run that validated against MP to 1.4%.
+    """
+    key = api_key if api_key is not None else os.environ.get("MP_API_KEY")
+    if not key or not isinstance(formula, str) or not formula.strip():
+        return None
+    try:
+        if client_factory is not None:
+            rester = client_factory(key)
+        else:
+            from mp_api.client.routes.materials.summary import SummaryRester
+            rester = SummaryRester(api_key=key, timeout=timeout,
+                                   notify_db_version=False, mute_progress_bars=True)
+        with rester as client:
+            docs = client.search(formula=formula.strip(), fields=["material_id"])
+        return bool(docs)
+    except Exception as exc:  # noqa: BLE001 - a hint must never fail a run
+        logger.info("[plan] could not check %s against Materials Project: %s",
+                    formula, exc)
+        return None
+
+
 class MaterialsProjectBaselines:
     """Live MP reference values for ONE material, shaped like a ``BaselineDB``.
 

@@ -372,8 +372,14 @@ class TestLLMPickedLibrary:
         assert any("Psi4" in n and "not installed" in n for n in plan["safety_notes"])
 
     def test_uninstalled_supporting_library_is_requested_and_dropped(self, tmp_path):
+        # Names a calculator because ASE is a DRIVER, not an engine: a band-gap plan
+        # of ASE alone has nothing to compute with, and plan() now refuses it rather
+        # than letting codegen invent an engine (see the NaCl2 run, Slurm job
+        # 2633871). EMT keeps this hermetic -- pure ASE, available on every platform
+        # -- and the assertions here are about library bookkeeping either way.
         m, gh = machine(tmp_path, uninstalled=["Psi4"],
-                            agent=self._agent("ASE", supporting=["Psi4"]))
+                            agent=self._agent("ASE", supporting=["Psi4"],
+                                              calculator="EMT"))
         m.plan()
         plan = plan_of(m)
 

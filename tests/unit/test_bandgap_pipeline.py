@@ -746,3 +746,97 @@ class TestNoPresetTemplates:
         # as a comment so the file still records the whole toolset.
         assert "ase==" in reqs
         assert "dftbplus==" not in reqs and "# dftbplus: conda-only" in reqs
+
+
+class TestPlanRefusesToPromiseWhatItCannotCompute:
+    """End to end through plan(): the NaCl2 shape, and the cases that must pass."""
+
+    NACL2_INTENT = {
+        "objective": "Compute the standard heat of formation of NaCl2",
+        "domain": "materials",
+        "system_descriptors": {"kind": "crystal", "formula": "NaCl2",
+                               "crystal": {"formula": "NaCl2",
+                                           "name": "Sodium dichloride"}},
+        "acceptance_metrics": [{"metric_name": "standard_heat_of_formation",
+                                "target_value": None, "tolerance": None}],
+        "metadata": {"ambiguity": False,
+                     "confidence_scores": {"objective_confidence": 0.95}},
+    }
+
+    def _agent(self, library, calculator=None):
+        reply = json.dumps({"library": library, "supporting_libraries": [],
+                            "calculator": calculator, "reasoning": "best fit"})
+        return lambda prompt: reply
+
+    def test_a_driver_only_plan_for_a_calculated_property_is_refused(self, tmp_path):
+        """Pymatgen is a DRIVER: calculators plug into it, it computes nothing."""
+        m = _machine(tmp_path, agent=self._agent("Pymatgen"))
+        _seed_intent(m, tmp_path, self.NACL2_INTENT)
+        m.decompose()
+        m.discover()
+        with pytest.raises(Exception, match="needs a calculator it does not have"):
+            with patch.object(SM, "current_platform", return_value="linux-64"):
+                m.plan()
+
+    def test_a_self_contained_engine_is_allowed(self, tmp_path):
+        """PySCF computes an electronic structure itself -- nothing to attach.
+
+        The false positive that a tags-only rule would produce, since ASE claims
+        electronic_structure too.
+        """
+        m = _machine(tmp_path, agent=self._agent("PySCF"))
+        _seed_intent(m, tmp_path, self.NACL2_INTENT)
+        m.decompose()
+        m.discover()
+        with patch.object(SM, "current_platform", return_value="linux-64"):
+            m.plan()          # must not raise
+        assert m._load_artifact("execution_plan") is not None
+
+    def test_a_retrieval_is_not_refused(self, tmp_path):
+        """RETRIEVING a value needs no engine, and TWAIN can now do that. Refusing
+        a Materials Project lookup for having no calculator would refuse the
+        correct plan."""
+        intent = {**self.NACL2_INTENT,
+                  "objective": "Look up the standard heat of formation of NaCl2 "
+                               "from the Materials Project database"}
+        m = _machine(tmp_path, agent=self._agent("Pymatgen"))
+        _seed_intent(m, tmp_path, intent)
+        m.decompose()
+        m.discover()
+        with patch.object(SM, "current_platform", return_value="linux-64"):
+            m.plan()          # must not raise
+        assert m._load_artifact("execution_plan") is not None
+
+    def test_a_driver_with_an_engine_attached_is_allowed(self, tmp_path):
+        m = _machine(tmp_path, agent=self._agent("ASE", calculator="EMT"))
+        _seed_intent(m, tmp_path, self.NACL2_INTENT)
+        m.decompose()
+        m.discover()
+        with patch.object(SM, "current_platform", return_value="linux-64"):
+            m.plan()
+        plan = m._load_artifact("execution_plan")
+        assert plan["selected_method"]["calculator"] == "EMT"
+
+
+class TestUnrunnableMlipsAreNotPlannedForTheCluster:
+    """matgl/chgnet are on PyPI but pull multi-GB torch at job start.
+
+    The cluster veto read "pip can serve it" as "the job can get it", so a plan
+    could name a calculator no provisioned env has and nothing could install in
+    time -- which is how MACE/CHGNet/M3GNet came to be reached for at all.
+    """
+
+    def test_the_veto_now_blocks_them(self):
+        assert SM._cluster_cannot_run("matgl") is True
+        assert SM._cluster_cannot_run("chgnet") is True
+
+    def test_provisioned_engines_are_still_runnable(self):
+        """The veto must not start blocking the engines that ARE provisioned."""
+        for engine in ("gpaw", "nwchem", "espresso", "abinit", "cp2k", "dftbplus"):
+            assert SM._cluster_cannot_run(engine) is False, engine
+
+    def test_it_reads_the_env_specs_so_provisioning_undoes_it(self):
+        """Provision an env for one and it comes off the list by itself."""
+        provided = SM._cluster_env_packages()
+        assert "matgl" not in provided and "chgnet" not in provided
+        assert {"gpaw", "nwchem", "psi4"} <= provided
