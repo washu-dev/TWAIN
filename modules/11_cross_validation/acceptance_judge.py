@@ -45,8 +45,16 @@ class Verdict:
 def _verdict_for(comparison: PairComparison, thresholds: AcceptanceThresholds) -> str:
     rel = comparison.relative_error
     if rel is None:
-        # literature value is 0: relative error undefined -> can't confirm ACCEPT
-        return NEEDS_REVIEW
+        # The literature value is 0, so there is no relative error to compare --
+        # but there IS an answer: matching a zero reference exactly is the best
+        # possible agreement, not a marginal one. A band gap of 0 for silver (a
+        # metal, and 0.0 in Materials Project mp-124) came back "needs_review"
+        # because dividing by zero is undefined, which read as doubt about a
+        # result that was exactly right.
+        #
+        # Anything else against a zero reference stays NEEDS_REVIEW: without a
+        # scale there is no way to say whether an absolute error of 0.3 is close.
+        return ACCEPTED if comparison.absolute_error == 0 else NEEDS_REVIEW
     if rel < thresholds.accept_below:
         return ACCEPTED
     if rel < thresholds.review_below:
@@ -75,19 +83,37 @@ def judge(
     rp = f"{thresholds.review_below * 100:.0f}%"
     offenders = [c for c, v in per if v != ACCEPTED]
 
+    def describe(c: PairComparison) -> str:
+        if c.relative_error is not None:
+            return f"{c.molecule}/{c.property} rel err {c.relative_error * 100:.1f}%"
+        # Say what is actually known. The old text read "rel err n/a (literature
+        # 0)" inside a sentence claiming the result was "within 30% but not 15%"
+        # -- a band it had not computed and could not have.
+        return (f"{c.molecule}/{c.property} matched against a reference of 0, so "
+                f"there is no relative error; absolute error "
+                f"{c.absolute_error:.4g}")
+
     if worst == ACCEPTED:
+        exact = [c for c, v in per if v == ACCEPTED and c.relative_error is None]
         rationale = f"All {len(per)} molecule(s) agree within {ap} relative error."
+        if exact:
+            # Otherwise "agree within 15%" is asserted about a comparison whose
+            # relative error was never defined.
+            names = ", ".join(f"{c.molecule}/{c.property}" for c in exact)
+            rationale = (
+                f"All {len(per)} molecule(s) agree with their reference"
+                + (f" within {ap} relative error" if len(exact) < len(per) else "")
+                + f". {names} matched a reference of 0 exactly."
+            )
+    elif worst == REJECTED:
+        rationale = f"Rejected: at least one molecule exceeds {rp} relative error. " \
+                    + "; ".join(describe(c) for c in offenders)
     else:
-        detail = "; ".join(
-            f"{c.molecule}/{c.property} "
-            + ("rel err n/a (literature 0)" if c.relative_error is None
-               else f"rel err {c.relative_error * 100:.1f}%")
-            for c in offenders
-        )
-        if worst == REJECTED:
-            rationale = f"Rejected: at least one molecule exceeds {rp} relative error. {detail}"
-        else:
-            rationale = f"Needs review: agreement is marginal (within {rp} but not {ap}). {detail}"
+        quantified = [c for c in offenders if c.relative_error is not None]
+        lead = (f"Needs review: agreement is marginal (within {rp} but not {ap})."
+                if quantified else
+                "Needs review: agreement could not be quantified.")
+        rationale = lead + " " + "; ".join(describe(c) for c in offenders)
 
     return Verdict(worst, rationale)
 

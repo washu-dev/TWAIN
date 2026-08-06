@@ -31,6 +31,22 @@ SEED_CONTEXT = {
 }
 
 
+def _as_number(value):
+    """A float, or None for anything that is not one.
+
+    None is a legal acceptance target (the schema allows null), so an empty field
+    must round-trip as "no bar" rather than collapsing to 0.0 -- which would be a
+    bar, and a very strict one.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     """Read a boolean env var (1/true/yes/on -> True); ``default`` when unset."""
     v = os.environ.get(name)
@@ -236,6 +252,46 @@ class _RealEngine:
             hours = float(overrides["max_time"])
             current["max_time"] = max(MIN_WALL_MINUTES / 60.0, hours)
         plan["slurm_request"] = current
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(plan, f, indent=2)
+
+    def apply_acceptance_overrides(self, orch, metrics) -> None:
+        """Patch ``acceptance_metrics`` on the on-disk plan with the researcher's.
+
+        This is the bar the result is judged against at VALIDATE, and it is the one
+        thing on the approval card only the researcher can supply: TWAIN often has
+        no defensible target and writes ``target_value: null``, which leaves nothing
+        to check the answer against. A silver band gap ran with a null target and
+        was graded only against a literature baseline (run 913c1ee9).
+
+        Matched by metric_name so a partial list edits one metric and leaves the
+        rest; an unknown name is appended, because asking for a bar TWAIN did not
+        propose is a legitimate request. Null target/tolerance are preserved --
+        clearing a bar is as meaningful as setting one, and the plan schema allows
+        both (schemas/execution_plan.schema.json).
+        """
+        if not isinstance(metrics, list) or not metrics:
+            return
+        path = orch.sm.context.artifacts.get("execution_plan")
+        if not path or not os.path.isfile(path):
+            return
+        with open(path, encoding="utf-8") as f:
+            plan = json.load(f)
+        current = list(plan.get("acceptance_metrics") or [])
+        by_name = {str(m.get("metric_name")): i for i, m in enumerate(current)
+                   if isinstance(m, dict)}
+        for edit in metrics:
+            if not isinstance(edit, dict) or not edit.get("metric_name"):
+                continue
+            name = str(edit["metric_name"])
+            patch = {"metric_name": name,
+                     "target_value": _as_number(edit.get("target_value")),
+                     "tolerance": _as_number(edit.get("tolerance"))}
+            if name in by_name:
+                current[by_name[name]] = {**current[by_name[name]], **patch}
+            else:
+                current.append(patch)
+        plan["acceptance_metrics"] = current
         with open(path, "w", encoding="utf-8") as f:
             json.dump(plan, f, indent=2)
 
