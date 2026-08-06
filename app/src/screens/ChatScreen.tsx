@@ -17,7 +17,9 @@ import { IssueModal } from '@/components/IssueModal';
 import { ReportIssueModal } from '@/components/ReportIssueModal';
 import { useAuth } from '@/hooks/useAuth';
 import { useNow } from '@/hooks/useNow';
-import { formatDurationHours, formatElapsed, parseDurationHours } from '@/utils/duration';
+import {
+  DurationUnit, durationToHours, formatDurationHours, formatElapsed, splitDurationHours,
+} from '@/utils/duration';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -59,6 +61,12 @@ type RerunDraft = {
   slurm: SlurmDraft | null;
 };
 
+/** Hours -> the two draft fields that hold them, so seeding reads in one line. */
+const wallTimeFields = (hours: number): Pick<SlurmDraft, 'max_time' | 'max_time_unit'> => {
+  const { amount, unit } = splitDurationHours(hours);
+  return { max_time: amount, max_time_unit: unit };
+};
+
 // Stages that run after plan synthesis, so the plan on disk survives the rewind
 // and an edited resource request still means something. Mirrors the API's own
 // check, which is the authority.
@@ -83,7 +91,12 @@ type SlurmDraft = {
   cpu_count: string;
   gpu_count: string;
   ram: string;
+  /** Wall time as a bare NUMBER; `max_time_unit` says what it counts. Split in
+      two because the field is numeric-only on purpose: the keypad a phone shows
+      for a number has no letters on it, so "90m" was unenterable there and the
+      label asking for it was a dead end. */
   max_time: string;
+  max_time_unit: DurationUnit;
 };
 
 type PlanSummary = {
@@ -252,9 +265,9 @@ export const ChatScreen: React.FC = () => {
         cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
         gpu_count: String(approvalPlan.slurm_request.gpu_count ?? 0),
         ram: String(Math.max(MIN_RAM_GB, approvalPlan.slurm_request.ram ?? 16)),
-        // Seeded readably: a 10-minute cap shows as "10m", not "0.17". The field
-        // accepts either form back (parseDurationHours).
-        max_time: formatDurationHours(approvalPlan.slurm_request.max_time ?? 0.17),
+        // Seeded readably: a 10-minute cap opens as 10 with "min" selected, not
+        // as 0.1666 in an hours box.
+        ...wallTimeFields(approvalPlan.slurm_request.max_time ?? 0.17),
       }
     : null;
   const slurmDraft =
@@ -391,14 +404,13 @@ export const ChatScreen: React.FC = () => {
           cpu_count: cap(Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8), slurmLimits?.cpu_count),
           gpu_count: cap(Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0), slurmLimits?.gpu_count),
           ram: cap(Math.max(MIN_RAM_GB, parseInt(slurmDraft.ram, 10) || MIN_RAM_GB), slurmLimits?.ram),
-          // Accepts "90m" / "1.5h" / a bare number of hours (see
-          // parseDurationHours: a bare number stays HOURS, so an existing plan
-          // cannot silently shrink 60x). An unparseable entry falls back to the
-          // plan's own suggestion rather than to zero.
+          // The number is typed, the unit is chosen -- so there is no guessing
+          // about what a bare "10" meant. An empty or unusable entry falls back
+          // to the plan's own suggestion rather than to zero.
           max_time: cap(
             Math.max(
               10 / 60,
-              parseDurationHours(slurmDraft.max_time)
+              durationToHours(slurmDraft.max_time, slurmDraft.max_time_unit)
                 ?? approvalPlan?.slurm_request?.max_time
                 ?? 0.17,
             ),
@@ -447,7 +459,7 @@ export const ChatScreen: React.FC = () => {
               cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
               gpu_count: String(approvalPlan.slurm_request.gpu_count ?? 0),
               ram: String(Math.max(MIN_RAM_GB, approvalPlan.slurm_request.ram ?? 16)),
-              max_time: formatDurationHours(approvalPlan.slurm_request.max_time ?? 0.17),
+              ...wallTimeFields(approvalPlan.slurm_request.max_time ?? 0.17),
             }
           : null,
     });
@@ -466,7 +478,7 @@ export const ChatScreen: React.FC = () => {
             ram: Math.max(MIN_RAM_GB, parseInt(slurm.ram, 10) || MIN_RAM_GB),
             max_time: Math.max(
               10 / 60,
-              parseDurationHours(slurm.max_time)
+              durationToHours(slurm.max_time, slurm.max_time_unit)
                 ?? approvalPlan?.slurm_request?.max_time
                 ?? 0.17,
             ),
@@ -554,14 +566,6 @@ export const ChatScreen: React.FC = () => {
           <Text style={[styles.targetBadge, styles.targetBadgeSlurm]}>
             {`RIS / Slurm${approvalPlan?.slurm_cluster ? ` · ${approvalPlan.slurm_cluster}` : ''}`}
           </Text>
-          {/* Live running time. A multi-hour DFT job is otherwise indistinguishable
-              from a hung one, which is what sent us looking at the cluster by hand.
-              Paired with the wall-time cap when the plan is at hand, so the number
-              the researcher set on the approval card is visible against the clock
-              it is racing. Ticks only while the run is active. */}
-          {runElapsed && (
-            <Text style={[styles.targetBadge, styles.elapsedBadge]}>{runElapsed}</Text>
-          )}
         </View>
       )}
 
@@ -587,6 +591,13 @@ export const ChatScreen: React.FC = () => {
                   ? 'Waiting for your answer…'
                   : 'Working…'}
             </Text>
+            {/* Live running time, next to the spinner that says the run is alive --
+                the two answer one question together ("is it still going, and for
+                how long?"), and up in the header the number sat far from the thing
+                it described. Paired with the wall-time cap when the plan is at
+                hand, so the clock is visible against the limit it races. Ticks
+                only while the run is active (see useNow). */}
+            {runElapsed && <Text style={styles.workingElapsed}>{runElapsed}</Text>}
           </View>
         )}
       </ScrollView>
@@ -652,7 +663,8 @@ export const ChatScreen: React.FC = () => {
                     slurmLimits.cpu_count != null ? `${slurmLimits.cpu_count} CPUs` : null,
                     slurmLimits.gpu_count != null ? `${slurmLimits.gpu_count} GPUs` : null,
                     slurmLimits.ram != null ? `${slurmLimits.ram} GB RAM` : null,
-                    slurmLimits.max_time != null ? `${slurmLimits.max_time} h wall` : null,
+                    slurmLimits.max_time != null
+                      ? `${formatDurationHours(slurmLimits.max_time)} wall` : null,
                   ]
                     .filter(Boolean)
                     .join(' · ')}`}
@@ -680,10 +692,18 @@ export const ChatScreen: React.FC = () => {
                   value={slurmDraft.ram}
                   onChange={(v) => setSlurmDraft({ ...slurmDraft, ram: v })}
                 />
-                <SlurmField
-                  label={`Wall time — e.g. 90m or 1.5h${slurmLimits?.max_time != null ? `, max ${formatDurationHours(slurmLimits.max_time)}` : ''}`}
+              </View>
+              {/* Wall time gets the full row to itself: sharing a half-width
+                  column with RAM clipped the unit buttons off the right edge of a
+                  375pt phone, which is the width this card is most used at. */}
+              <View style={styles.slurmRow}>
+                <WallTimeField
+                  label={`Wall time${slurmLimits?.max_time != null ? ` — max ${formatDurationHours(slurmLimits.max_time)}` : ''}`}
                   value={slurmDraft.max_time}
-                  onChange={(v) => setSlurmDraft({ ...slurmDraft, max_time: v })}
+                  unit={slurmDraft.max_time_unit}
+                  onChange={(v, u) =>
+                    setSlurmDraft({ ...slurmDraft, max_time: v, max_time_unit: u })
+                  }
                 />
               </View>
             </View>
@@ -958,13 +978,14 @@ export const ChatScreen: React.FC = () => {
                           })
                         }
                       />
-                      <SlurmField
-                        label="Wall time — e.g. 90m or 1.5h"
+                      <WallTimeField
+                        label="Wall time"
                         value={rerunDraft.slurm.max_time}
-                        onChange={(v) =>
+                        unit={rerunDraft.slurm.max_time_unit}
+                        onChange={(v, u) =>
                           setRerunDraft({
                             ...rerunDraft,
-                            slurm: { ...rerunDraft.slurm!, max_time: v },
+                            slurm: { ...rerunDraft.slurm!, max_time: v, max_time_unit: u },
                           })
                         }
                       />
@@ -1030,6 +1051,61 @@ const SlurmField: React.FC<{
   </View>
 );
 
+/**
+ * Wall time: a number, plus a control that says what the number counts.
+ *
+ * The unit used to be typed into the value ("90m", "1.5h"), which is unreachable
+ * on a phone -- a numeric field brings up a keypad with no letters, so the only
+ * thing enterable there was a bare number, silently meaning HOURS. Asking for
+ * "10 minutes" came out as 10 hours, or as 0.1666 if you did the division
+ * yourself. Two controls, so neither the keyboard nor the reader has to guess.
+ */
+const WallTimeField: React.FC<{
+  label: string;
+  value: string;
+  unit: DurationUnit;
+  onChange: (value: string, unit: DurationUnit) => void;
+}> = ({ label, value, unit, onChange }) => (
+  <View style={styles.slurmField}>
+    <Text style={styles.slurmFieldLabel}>{label}</Text>
+    <View style={styles.wallTimeRow}>
+      <TextInput
+        style={[styles.slurmFieldInput, styles.wallTimeInput]}
+        value={value}
+        onChangeText={(v) => onChange(v, unit)}
+        keyboardType="decimal-pad"
+        accessibilityLabel={`${label}, amount`}
+      />
+      {/* radio, not button: a one-of-two choice, and the role is what carries the
+          state to a screen reader. Written with the ARIA props rather than
+          accessibilityState because that is what react-native-web 0.21 forwards
+          (checked verified in the DOM) -- accessibilityState={{selected}} on a
+          button emitted NOTHING, leaving the red fill as the only cue for which
+          unit was active. RN 0.85 maps aria-checked to native state, so this is
+          the portable spelling, not a web-only patch. */}
+      <View style={styles.unitToggle} role="radiogroup">
+        {(['m', 'h'] as DurationUnit[]).map((option) => {
+          const active = unit === option;
+          return (
+            <TouchableOpacity
+              key={option}
+              style={[styles.unitOption, active && styles.unitOptionActive]}
+              onPress={() => onChange(value, option)}
+              role="radio"
+              aria-checked={active}
+              aria-label={option === 'm' ? 'minutes' : 'hours'}
+            >
+              <Text style={[styles.unitOptionText, active && styles.unitOptionTextActive]}>
+                {option === 'm' ? 'min' : 'hours'}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    </View>
+  </View>
+);
+
 const StateStepper: React.FC<{ current: string; status?: string }> = ({ current, status }) => {
   const currentIndex = PIPELINE_STATES.indexOf(current);
   return (
@@ -1059,6 +1135,41 @@ const StateStepper: React.FC<{ current: string; status?: string }> = ({ current,
   );
 };
 
+/**
+ * The user's approval decision, in words.
+ *
+ * The stored content is the wire format the runner reads -- either a bare
+ * "approve"/"reject" or `{"decision": …, "slurm_request": …}` with max_time in
+ * HOURS, because that is the unit an sbatch takes. Rendering it verbatim showed
+ * the researcher their own decision as raw JSON with `"max_time":
+ * 0.16666666666666666` in it, which is the ten minutes they asked for wearing a
+ * disguise. Units the plan needs are not units a person reads: convert here.
+ */
+function describeApproval(content: string): string {
+  const decided = (word: string) => (word === 'reject' ? 'Rejected this plan.' : 'Approved this plan.');
+  let parsed: { decision?: string; slurm_request?: Record<string, unknown> } | null = null;
+  try {
+    const candidate = JSON.parse(content);
+    parsed = typeof candidate === 'object' && candidate ? candidate : null;
+  } catch {
+    parsed = null;
+  }
+  if (!parsed) return decided(String(content).trim().toLowerCase());
+  const slurm = parsed.slurm_request;
+  const head = decided(String(parsed.decision ?? '').trim().toLowerCase());
+  if (!slurm) return head;
+  const hours = typeof slurm.max_time === 'number' ? slurm.max_time : null;
+  const parts = [
+    slurm.cpu_count != null ? `${slurm.cpu_count} CPU` : null,
+    // Only worth a mention when there are any -- every run asks for 0.
+    slurm.gpu_count ? `${slurm.gpu_count} GPU` : null,
+    slurm.ram != null ? `${slurm.ram} GB RAM` : null,
+    hours != null && formatDurationHours(hours)
+      ? `${formatDurationHours(hours)} wall time` : null,
+  ].filter(Boolean);
+  return parts.length ? `${head} Resources: ${parts.join(', ')}.` : head;
+}
+
 const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   const isUser = message.role === 'user';
   if (message.kind === 'terminate') {
@@ -1066,6 +1177,15 @@ const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
   }
   if (message.kind === 'approval_request') {
     return <PlanCard content={message.content} />;
+  }
+  if (message.kind === 'approval_response') {
+    return (
+      <View style={[styles.bubble, styles.userBubble]}>
+        <Text style={[styles.bubbleText, styles.userBubbleText]}>
+          {describeApproval(message.content)}
+        </Text>
+      </View>
+    );
   }
   return (
     <View style={[styles.bubble, isUser ? styles.userBubble : styles.assistantBubble]}>
@@ -1140,7 +1260,9 @@ const PlanCard: React.FC<{ content: string }> = ({ content }) => {
           label="Slurm ask"
           value={`${slurm.cpu_count ?? '—'} CPU, ${slurm.gpu_count ?? 0} GPU, ${
             slurm.ram ?? '—'
-          } GB RAM, ${slurm.max_time ?? '—'} h`}
+          } GB RAM, ${
+            (slurm.max_time != null && formatDurationHours(slurm.max_time)) || '—'
+          } wall`}
         />
       ) : null}
       {plan.goal_id ? <PlanRow label="Goal" value={plan.goal_id} /> : null}
@@ -1221,8 +1343,6 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   targetBadgeSlurm: { color: C.washuGreen },
-  // Tabular figures so a ticking counter doesn't shuffle its own width each second.
-  elapsedBadge: { color: C.textSecondary, fontVariant: ['tabular-nums'] },
   stepper: { maxHeight: 62, backgroundColor: C.backgroundElement, flexGrow: 0 },
   stepperContent: { alignItems: 'center', paddingHorizontal: Spacing.three, gap: Spacing.three },
   step: { alignItems: 'center', gap: 4, paddingVertical: Spacing.two },
@@ -1270,6 +1390,13 @@ const styles = StyleSheet.create({
   planNote: { fontSize: 12, color: C.textSecondary, lineHeight: 17 },
   working: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, padding: Spacing.two },
   workingText: { color: C.textSecondary, fontSize: 13 },
+  // Tabular figures so a ticking counter doesn't shuffle its own width each
+  // second and nudge the spinner beside it.
+  workingElapsed: {
+    color: C.textSecondary,
+    fontSize: 13,
+    fontVariant: ['tabular-nums'],
+  },
   error: { color: C.washuRed, paddingHorizontal: Spacing.three, paddingVertical: Spacing.one },
   composer: {
     borderTopWidth: 1,
@@ -1374,6 +1501,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: C.text,
   },
+  // Wall time: the number and the unit control share one line, the number taking
+  // the slack so the two unit buttons keep a constant, tappable width.
+  wallTimeRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
+  wallTimeInput: { flex: 1 },
+  unitToggle: {
+    flexDirection: 'row',
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: C.washuWhite,
+  },
+  unitOption: { paddingHorizontal: Spacing.two, paddingVertical: Spacing.one },
+  unitOptionActive: { backgroundColor: C.washuRed },
+  unitOptionText: { fontSize: 12, color: C.textSecondary, fontWeight: '600' },
+  unitOptionTextActive: { color: C.washuWhite },
   approvalButtons: { flexDirection: 'row', gap: Spacing.two },
   approveBtn: {
     flex: 1,

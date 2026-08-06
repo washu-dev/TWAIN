@@ -14,6 +14,7 @@ import { apiClient, ArtifactMeta, Report } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
 import { useConversationStream } from '@/hooks/useConversationStream';
 import { canCopy, copyText } from '@/utils/clipboard';
+import { formatDurationHours, formatElapsed } from '@/utils/duration';
 import { Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
@@ -288,7 +289,14 @@ const BudgetCard: React.FC<{ report: Report }> = ({ report }) => {
   const remaining = Math.max(max - used, 0);
   const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
   const overBudget = max > 0 && used >= max;
-  const mins = (secs?: number) => (secs != null ? `${(Number(secs) / 60).toFixed(1)} min` : '—');
+  // Formatted the same way the chat screen's live clock is, so the same run does
+  // not read as "8.2 min" here and "8m 12s" there. The elapsed side keeps
+  // seconds (it is a stopwatch); the limit is shown the way it was ASKED for --
+  // "10m", "4h" -- rather than as the hours the plan stores or the "240.0 min"
+  // this used to print for a four-hour cap.
+  const elapsed = (secs?: number) => (secs != null ? formatElapsed(Number(secs)) : '—');
+  const limit = (secs?: number) =>
+    secs != null ? formatDurationHours(Number(secs) / 3600) || '—' : '—';
 
   return (
     <View style={styles.card}>
@@ -303,7 +311,7 @@ const BudgetCard: React.FC<{ report: Report }> = ({ report }) => {
       <Row label="Iterations" value={`${run.iterations ?? 0} / ${run.max_iterations ?? 0}`} />
       <Row
         label="Elapsed"
-        value={`${mins(run.elapsed_seconds)} / ${mins(run.wall_time_limit_seconds)}`}
+        value={`${elapsed(run.elapsed_seconds)} / ${limit(run.wall_time_limit_seconds)}`}
       />
       {overBudget && (
         <Text style={styles.note}>This run reached its cost budget and was stopped.</Text>

@@ -71,3 +71,36 @@ export function formatDurationHours(hours: number): string {
   if (hours < 1) return `${Math.round(hours * 60)}m`;
   return Number.isInteger(hours) ? `${hours}h` : `${hours}h`;
 }
+
+/** The unit a wall-time entry is expressed in. */
+export type DurationUnit = 'm' | 'h';
+
+/**
+ * Hours split into the number and unit an editor should show.
+ *
+ * The plan stores hours, and a 10-minute cap stored as 0.16666666666666666 is
+ * not a number anyone can read, edit, or retype -- which is exactly what the
+ * approval card was asking for. Split it instead: 0.1666 -> ("10", "m").
+ *
+ * Splits on the same boundary as :func:`formatDurationHours` so the editor and
+ * every label agree; a plan shown as "1.5h" opens as 1.5 with hours selected,
+ * never as 90 minutes in one place and 1.5 hours in another.
+ */
+export function splitDurationHours(hours: number): { amount: string; unit: DurationUnit } {
+  if (!Number.isFinite(hours) || hours <= 0) return { amount: '', unit: 'm' };
+  if (hours < 1) return { amount: String(Math.round(hours * 60)), unit: 'm' };
+  // Trailing zeros stripped: 2.50 reads as "2.5", 3.00 as "3". parseFloat of a
+  // fixed string is the shortest way to do that without a formatting library.
+  return { amount: String(parseFloat(hours.toFixed(4))), unit: 'h' };
+}
+
+/**
+ * A number plus a chosen unit, in hours -- ``null`` when the number is unusable.
+ *
+ * The unit comes from a control, not from typing, so it is always one of two
+ * known values; the amount still goes through :func:`parseDurationHours` so
+ * there is one parser and one set of rules for what a valid entry is.
+ */
+export function durationToHours(amount: string, unit: DurationUnit): number | null {
+  return parseDurationHours(`${String(amount).trim()}${unit}`);
+}
