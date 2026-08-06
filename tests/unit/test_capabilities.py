@@ -11,6 +11,9 @@ list assert capability the cluster did not have:
 
 Run from the repo root with:  pixi run pytest tests/unit/test_capabilities.py
 """
+import json
+import os
+import subprocess
 import sys
 
 import pytest
@@ -156,6 +159,51 @@ class TestItNeverAssertsWhatItCannotSee:
                                            "installed": True}])
         assert cap.publish(Db()) == 1
         assert written["rows"][0]["name"] == "X"
+
+
+class TestItWorksOutsidePytest:
+    """The bug this class exists for lived entirely in pytest-vs-runner difference.
+
+    ``tests/conftest.py`` pre-registers the ``execution_adapter`` and ``code_gen``
+    aliases, so every other test here resolved them fine -- while the runner, which
+    publishes from ``main()`` before any job imports ``_bootstrap``, could not
+    import ``ClusterProfile`` at all and published all 27 entries as "no
+    provisioned envs were visible to the runner" with eight provisioned envs on
+    disk. Only a bare interpreter reproduces that, so these tests spend a
+    subprocess to get one.
+    """
+
+    def _bare(self, expression, **extra_env):
+        """Evaluate an expression in a fresh interpreter rooted at the repo.
+
+        The cluster env vars are stripped, not just left unset: inheriting a
+        TWAIN_ENVS_ROOT from the developer's shell would short-circuit the very
+        code path under test.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("TWAIN_ENVS_ROOT", "TWAIN_SLURM_CLUSTER")}
+        env.update(extra_env)
+        done = subprocess.run(
+            [sys.executable, "-c", f"import runner.capabilities as c; print({expression})"],
+            cwd=str(cap.REPO_ROOT), env=env,
+            capture_output=True, text=True, timeout=180, check=False,
+        )
+        assert done.returncode == 0, done.stderr
+        return done.stdout.strip()
+
+    def test_the_envs_root_resolves_without_the_pytest_bootstrap(self):
+        profile = json.loads(
+            (cap.REPO_ROOT / "configs" / "clusters" / "compute2.json").read_text())
+        assert self._bare("c._envs_root()") == profile["envs_root"]
+
+    def test_the_import_names_resolve_without_the_pytest_bootstrap(self):
+        """The inferencer is reached through the ``code_gen`` alias too, and its
+        fallback returns a plausible-looking wrong name rather than nothing."""
+        assert self._bare("c._import_name_for('scikit-learn')") == "sklearn"
+
+    def test_an_explicit_envs_root_still_wins(self, tmp_path):
+        """Deployments that set the env var must not need a resolvable profile."""
+        assert self._bare("c._envs_root()", TWAIN_ENVS_ROOT=str(tmp_path)) == str(tmp_path)
 
 
 @pytest.mark.parametrize("name,expected", [

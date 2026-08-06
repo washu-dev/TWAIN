@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,31 @@ _PROBE = (
 )
 
 
+def _ensure_module_paths() -> None:
+    """Register the ``modules/NN_*`` package aliases this module imports through.
+
+    ``code_gen`` and ``execution_adapter`` are aliases for directories whose real
+    names are not importable (``06_code_configuration_builder``,
+    ``08_execution_adapter``); ``_bootstrap`` registers them. Doing that here,
+    rather than assuming someone already has, is the whole point: publishing runs
+    from ``main()`` BEFORE the first job builds an orchestrator, so on the cluster
+    ``_bootstrap`` had not been imported yet, ``ClusterProfile`` was unreachable,
+    and the runner published all 27 entries as "no provisioned envs were visible"
+    while eight fully provisioned envs sat on disk. Under pytest the aliases are
+    already in place (``tests/conftest.py``), which is exactly why no unit test
+    saw it -- see ``test_the_runners_own_import_path_resolves_the_envs_root``.
+
+    Idempotent: the sys.path guard and the import cache make repeat calls free.
+    """
+    orchestrator_dir = str(REPO_ROOT / "modules" / "07_runtime_orchestrator")
+    if orchestrator_dir not in sys.path:
+        sys.path.insert(0, orchestrator_dir)
+    try:
+        import _bootstrap  # noqa: F401 - registers the aliases as an import side effect
+    except ImportError as exc:  # pragma: no cover - a broken checkout, not a config
+        logger.warning("[capabilities] module path bootstrap failed: %s", exc)
+
+
 def _load(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -60,9 +86,15 @@ def _import_name_for(display_name: str) -> str | None:
     inferencer already owns that mapping for codegen, so reuse it rather than
     keeping a second table that can disagree with the first.
     """
+    _ensure_module_paths()
     try:
         from code_gen import dependency_inferencer as depinf
-    except ImportError:  # pragma: no cover - only when module paths aren't set up
+    except ImportError as exc:  # pragma: no cover - only when module paths aren't set up
+        # Logged, not silent: the fallback returns a plausible-looking name for
+        # every entry ("Open Babel" -> "open babel"), so a bootstrap failure used
+        # to surface only as a list where nothing was installed.
+        logger.warning("[capabilities] dependency inferencer unavailable (%s); "
+                       "guessing the import name for %r", exc, display_name)
         return display_name.strip().lower() or None
     try:
         deps = depinf.import_names(display_name)
@@ -111,10 +143,12 @@ def _envs_root() -> Path | None:
     root = os.environ.get("TWAIN_ENVS_ROOT")
     if root:
         return Path(root)
+    _ensure_module_paths()
     try:
         from execution_adapter.cluster_profile import ClusterProfile
         profile = ClusterProfile.load(os.environ.get("TWAIN_SLURM_CLUSTER", "compute2"))
-    except Exception:  # noqa: BLE001 - no profile is a normal local case
+    except Exception as exc:  # noqa: BLE001 - no profile is a normal local case
+        logger.info("[capabilities] no cluster envs root (%s)", exc)
         return None
     return Path(profile.envs_root) if getattr(profile, "envs_root", None) else None
 
