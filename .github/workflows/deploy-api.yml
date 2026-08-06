@@ -40,11 +40,27 @@ jobs:
         working-directory: api
         run: |
           pip install -r requirements.txt
-          pip install ruff pip-audit pytest-cov
+          pip install pip-audit pytest-cov
 
-      - name: Lint & security — ruff
-        working-directory: api
-        run: ruff check . --output-format=github
+      # See ci-runner.yml: lint through pixi so both workflows gate on the ruff
+      # pixi.lock pins, rather than whatever `pip install ruff` resolves today.
+      # The `lint` environment is ruff alone (18 packages, ~3s), and the task lints
+      # runner/ AND api/ in one pass -- ruff resolves config per file, so each tree
+      # still gets its own ruff.toml. Run from the repo root, not api/, because the
+      # task's paths are repo-relative; extra args pass through to ruff, so the
+      # inline GitHub annotations are preserved.
+      - name: Set up pixi (lint environment only)
+        uses: prefix-dev/setup-pixi@v0.10.1
+        with:
+          environments: lint
+          cache: true
+          # Install strictly from pixi.lock, and fail if the manifest and
+          # lock disagree -- otherwise CI could resolve its own ruff and the
+          # drift this change removes would come straight back.
+          locked: true
+
+      - name: Lint — ruff (pixi run lint)
+        run: pixi run -e lint lint --output-format=github
 
       - name: Vulnerability scan — pip-audit
         working-directory: api
