@@ -54,7 +54,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Set, Union
 
 # The heavy calculator stack (GPAW/DFTB+/MatGL/...) lives in this pixi environment
 # (Python 3.11), separate from the default env. A generated calculator bundle must
@@ -106,6 +106,53 @@ PLACEHOLDER_KEYS = [
 # (a template bug). JSON object braces never match: ``{`` is always followed by
 # ``"`` or ``}`` in our emitted JSON, not an uppercase letter.
 _LEFTOVER_PLACEHOLDER = re.compile(r"\{[A-Z][A-Z0-9_]{2,}\}")
+
+
+def interpolated_placeholder_tokens(source: str) -> Set[str]:
+    """``{TOKEN}`` spellings in ``source`` that are real code, not unfilled text.
+
+    An f-string field and an unfilled placeholder are spelled identically, and one
+    of them is ordinary Python: the doctor reported
+    ``unfilled template placeholder {EV_TO_KJ_MOL}`` against
+    ``f"(factor {EV_TO_KJ_MOL})"``, where the name was defined twelve lines above
+    (run 1cd39ffd). It landed on the line of a real bug for entirely the wrong
+    reason, which is worse than silence -- it spends a repair round and teaches
+    the reader to ignore the diagnostic.
+
+    Used ONLY on LLM-authored scripts. The rendered-template path deliberately
+    keeps the raw regex: our own templates write ``f"{TOOL_NAME} runner
+    ({MODEL_NAME})"``, so there an f-string field IS a placeholder, and an
+    unsubstituted one compiles cleanly (it is a valid name reference) -- excluding
+    it would drop the only check that catches it.
+
+    Nothing is lost by excluding these here: a field naming something the script
+    never defines is caught by ``_undefined_names`` as an error in its own right.
+
+    >>> sorted(interpolated_placeholder_tokens('K = 1\\nx = f"f {K_FACTOR}"'))
+    ['{K_FACTOR}']
+    >>> sorted(interpolated_placeholder_tokens('x = "{TOOL_NAME}"'))
+    []
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()  # unparseable: fall back to the plain regex, no exclusions
+    tokens: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            for part in node.values:
+                if not isinstance(part, ast.FormattedValue):
+                    continue
+                for inner in ast.walk(part.value):
+                    if isinstance(inner, ast.Name):
+                        tokens.add("{" + inner.id + "}")
+                    elif isinstance(inner, ast.Attribute):
+                        tokens.add("{" + inner.attr + "}")
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "format"):
+            # "...{KEY}...".format(KEY=...) is a filled placeholder, not a left one.
+            tokens.update("{" + kw.arg + "}" for kw in node.keywords if kw.arg)
+    return tokens
 
 _CODE_FENCE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.S)
 
