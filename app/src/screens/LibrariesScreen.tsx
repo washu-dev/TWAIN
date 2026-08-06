@@ -1,11 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
   ScrollView,
   TouchableOpacity,
+  TextInput,
   StyleSheet,
   ActivityIndicator,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -28,6 +30,44 @@ const SECTIONS: { kind: LibraryInfo['kind']; title: string; blurb: string }[] = 
   },
 ];
 
+/**
+ * Everything about a row worth matching a query against.
+ *
+ * Deliberately more than the name: `detail` carries the environment that provides
+ * a package ("importable as 'rdkit' in the default env"), so searching "gpaw"
+ * finds what the gpaw env supplies, and searching "not found" finds what needs
+ * provisioning. Searching only names would make the field decoration.
+ *
+ * `installed` is NOT folded in as a word -- "not installed" contains "installed",
+ * so the obvious query would match every row and quietly mean nothing.
+ */
+function haystack(row: LibraryInfo): string {
+  return [row.name, row.import_name, row.version, row.description, row.detail, row.env]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+/**
+ * A short label for a URL: the part a reader recognises.
+ *
+ * The host alone, except on a code forge, where the host IS the same for every
+ * project and says nothing -- two entries both reading "github.com" identify
+ * neither, so those keep owner/repo. Deep documentation paths are still dropped:
+ * "docs.ase-lib.org" is the useful half of
+ * "docs.ase-lib.org/ase/calculators/emt.html".
+ */
+const FORGES = ['github.com', 'gitlab.com', 'bitbucket.org', 'codeberg.org'];
+
+function linkLabel(url: string): string {
+  const match = url.match(/^https?:\/\/([^/]+)(\/[^?#]*)?/i);
+  if (!match) return url;
+  const host = match[1].replace(/^www\./, '');
+  if (!FORGES.includes(host)) return host;
+  const segments = (match[2] ?? '').split('/').filter(Boolean).slice(0, 2);
+  return segments.length ? `${host}/${segments.join('/')}` : host;
+}
+
 function freshness(iso?: string | null): string {
   if (!iso) return 'not yet probed';
   const then = new Date(iso).getTime();
@@ -45,6 +85,7 @@ export const LibrariesScreen: React.FC = () => {
   const [data, setData] = useState<LibraryAvailability | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState('');
 
   useEffect(() => {
     // Same auth gate as the other screens: fetching before a token exists 401s.
@@ -66,6 +107,18 @@ export const LibrariesScreen: React.FC = () => {
   }, [authLoading, isAuthenticated]);
 
   const rows = data?.libraries ?? [];
+  const trimmed = query.trim().toLowerCase();
+  // Every whitespace-separated term must match, so "gpaw not" narrows rather than
+  // widening the way a single-substring match would.
+  const terms = trimmed ? trimmed.split(/\s+/) : [];
+  const matches = useMemo(
+    () => (terms.length === 0 ? rows : rows.filter((row) => {
+      const text = haystack(row);
+      return terms.every((term) => text.includes(term));
+    })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, trimmed],
+  );
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
@@ -80,6 +133,37 @@ export const LibrariesScreen: React.FC = () => {
         <View style={{ width: 48 }} />
       </View>
 
+      {/* Outside the ScrollView on purpose: a filter you have to scroll back up to
+          reach stops being used. Only shown once there is something to filter. */}
+      {!loading && !error && rows.length > 0 && (
+        <View style={styles.searchRow}>
+          <Text style={styles.searchIcon} aria-hidden>
+            ⌕
+          </Text>
+          <TextInput
+            style={styles.searchInput}
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Search name, description or environment"
+            placeholderTextColor={C.textPlaceholder}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+            accessibilityLabel="Search libraries and engines"
+          />
+          {query.length > 0 && (
+            <TouchableOpacity
+              onPress={() => setQuery('')}
+              accessibilityRole="button"
+              accessibilityLabel="Clear search"
+              style={styles.clearButton}
+            >
+              <Text style={styles.clearIcon}>×</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
       {loading && <ActivityIndicator style={{ marginTop: Spacing.five }} color={C.washuRed} />}
       {error && <Text style={styles.error}>{error}</Text>}
 
@@ -88,7 +172,13 @@ export const LibrariesScreen: React.FC = () => {
           <Text style={styles.summary}>
             {rows.length === 0
               ? 'The runner has not published a capability list yet. It probes the cluster on start-up, so this fills in once a runner has restarted.'
-              : `${data?.installed ?? 0} of ${data?.total ?? rows.length} installed on this cluster · ${freshness(data?.checked_at)}`}
+              : terms.length > 0
+                ? `${matches.length} of ${rows.length} match “${query.trim()}”${
+                    matches.length > 0
+                      ? ` · ${matches.filter((m) => m.installed).length} installed`
+                      : ''
+                  }`
+                : `${data?.installed ?? 0} of ${data?.total ?? rows.length} installed on this cluster · ${freshness(data?.checked_at)}`}
           </Text>
           {/* Said plainly, because "not installed" is not the same as "unsupported":
               TWAIN knows how to plan with everything listed here, and anything
@@ -100,8 +190,15 @@ export const LibrariesScreen: React.FC = () => {
             </Text>
           )}
 
+          {terms.length > 0 && matches.length === 0 && (
+            <Text style={styles.note}>
+              Nothing matches that. Searching covers names, descriptions, import
+              names and the environment a package comes from — try a shorter term.
+            </Text>
+          )}
+
           {SECTIONS.map((section) => {
-            const items = rows.filter((row) => row.kind === section.kind);
+            const items = matches.filter((row) => row.kind === section.kind);
             if (items.length === 0) return null;
             return (
               <View key={section.kind} style={styles.section}>
@@ -133,6 +230,21 @@ export const LibrariesScreen: React.FC = () => {
                       </Text>
                     )}
                     {!!item.detail && <Text style={styles.rowDetail}>{item.detail}</Text>}
+                    {!!item.homepage && (
+                      <TouchableOpacity
+                        onPress={() => Linking.openURL(item.homepage as string)}
+                        accessibilityRole="link"
+                        accessibilityLabel={`Open the ${item.name} website, ${linkLabel(
+                          item.homepage,
+                        )}`}
+                        style={styles.linkRow}
+                      >
+                        <Text style={styles.link}>{linkLabel(item.homepage)}</Text>
+                        <Text style={styles.linkArrow} aria-hidden>
+                          ↗
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 ))}
               </View>
@@ -178,4 +290,33 @@ const styles = StyleSheet.create({
   rowMeta: { color: C.textSecondary, fontSize: 12 },
   rowDesc: { color: C.text, fontSize: 13, lineHeight: 18 },
   rowDetail: { color: C.textSecondary, fontSize: 12, fontStyle: 'italic' },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginHorizontal: Spacing.three,
+    marginTop: Spacing.three,
+    paddingHorizontal: Spacing.two,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: 8,
+    backgroundColor: C.background,
+  },
+  searchIcon: { fontSize: 16, color: C.textSecondary },
+  searchInput: {
+    flex: 1,
+    paddingVertical: Spacing.two,
+    fontSize: 15,
+    color: C.text,
+    // Suppresses the browser's own focus ring, which sat outside our border.
+    // outlineWidth rather than outlineStyle: RN 0.85 types the latter as
+    // solid/dotted/dashed only, so 'none' does not typecheck.
+    outlineWidth: 0,
+  },
+  clearButton: { paddingHorizontal: Spacing.one, paddingVertical: Spacing.half },
+  clearIcon: { fontSize: 20, color: C.textSecondary, lineHeight: 22 },
+  // Its own row so the tap target is the link, not the whole card.
+  linkRow: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingTop: 2 },
+  link: { color: C.info, fontSize: 12, fontWeight: '600' },
+  linkArrow: { color: C.info, fontSize: 11 },
 });

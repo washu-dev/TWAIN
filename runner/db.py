@@ -340,8 +340,8 @@ class RunnerDB:
                 """
                 INSERT INTO library_availability
                     (kind, name, import_name, version, description,
-                     installed, env, detail, checked_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                     installed, env, detail, homepage, checked_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                 ON CONFLICT (kind, name) DO UPDATE SET
                     import_name = EXCLUDED.import_name,
                     version     = EXCLUDED.version,
@@ -349,11 +349,13 @@ class RunnerDB:
                     installed   = EXCLUDED.installed,
                     env         = EXCLUDED.env,
                     detail      = EXCLUDED.detail,
+                    homepage    = EXCLUDED.homepage,
                     checked_at  = now();
                 """,
                 (row.get("kind"), row.get("name"), row.get("import_name"),
                  row.get("version"), row.get("description"),
-                 bool(row.get("installed")), row.get("env"), row.get("detail")),
+                 bool(row.get("installed")), row.get("env"), row.get("detail"),
+                 row.get("homepage")),
             )
         # Drop anything no longer in a registry, so a removed library stops being
         # advertised as capability. Placeholders are generated from the row COUNT

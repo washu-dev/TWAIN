@@ -62,6 +62,12 @@ class RegistryEntry:
     trust_tier: int
     author: Optional[str] = None
     repo_url: Optional[str] = None
+    # The project's own site, shown as a link on the app's library list. Declared
+    # here because RegistryEntry(**entry) passes every key straight in, so an
+    # undeclared field is a TypeError rather than an ignored extra -- unlike
+    # CalculatorEntry, which filters to its known fields. Adding `homepage` to the
+    # registry without this line broke 93 tests through RegistryLoader.
+    homepage: Optional[str] = None
     paper_doi: Optional[str] = None
     uncertainty_method: Optional[str] = None
     stars: Optional[int] = None

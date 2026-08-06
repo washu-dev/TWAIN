@@ -70,6 +70,9 @@ export interface LibraryInfo {
   env?: string | null;
   /** How it was found, or why it wasn't — shown so "no" is never unexplained. */
   detail?: string | null;
+  /** The project's own site, from the registry. Null renders no link rather than
+      a dead one. */
+  homepage?: string | null;
   checked_at?: string | null;
 }
 

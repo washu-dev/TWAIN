@@ -103,6 +103,20 @@ def _import_name_for(display_name: str) -> str | None:
     return deps[0].import_name if deps else None
 
 
+def _homepage(item: dict) -> str | None:
+    """Where to read about this entry: its declared homepage, else its repository.
+
+    Published from here rather than read by the API at request time because the API
+    image is built from ``./api`` alone, so ``configs/`` is not in it. The runner
+    already reads both registries to build this table, so the URL rides along.
+    """
+    for key in ("homepage", "repo_url"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip().startswith(("http://", "https://")):
+            return value.strip()
+    return None
+
+
 def registry_entries() -> list[dict]:
     """Every library and calculator TWAIN knows about, with its import name."""
     entries: list[dict] = []
@@ -116,6 +130,7 @@ def registry_entries() -> list[dict]:
             "import_name": _import_name_for(name),
             "version": item.get("version"),
             "description": item.get("description"),
+            "homepage": _homepage(item),
         })
     for item in _load(CALCULATOR_REGISTRY).get("calculators") or []:
         name = item.get("name")
@@ -125,6 +140,7 @@ def registry_entries() -> list[dict]:
             "kind": "calculator",
             "name": name,
             "import_name": item.get("import_name") or _import_name_for(name),
+            "homepage": _homepage(item),
             # The binary, for engines that are separate programs. This is the ONLY
             # honest test for them: ase.calculators.espresso imports anywhere ASE
             # is installed, so an import probe reported Quantum ESPRESSO, ABINIT,
