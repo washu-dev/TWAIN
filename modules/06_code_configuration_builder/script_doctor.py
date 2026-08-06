@@ -57,14 +57,14 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 try:  # pragma: no cover - import shim (package alias vs. bare name)
     from code_gen.codegen_engine import (
         SIM_ENV, extract_valid_source, has_runnable_entrypoint,
-        pixi_env_python, strip_code_fences, wants_thermo_cycle,
-        _LEFTOVER_PLACEHOLDER,
+        interpolated_placeholder_tokens, pixi_env_python, strip_code_fences,
+        wants_thermo_cycle, _LEFTOVER_PLACEHOLDER,
     )
 except ImportError:  # pragma: no cover
     from codegen_engine import (
         SIM_ENV, extract_valid_source, has_runnable_entrypoint,
-        pixi_env_python, strip_code_fences, wants_thermo_cycle,
-        _LEFTOVER_PLACEHOLDER,
+        interpolated_placeholder_tokens, pixi_env_python, strip_code_fences,
+        wants_thermo_cycle, _LEFTOVER_PLACEHOLDER,
     )
 
 # Sentinel so ``sim_python=None`` ("explicitly no interpreter, skip smoke") is
@@ -423,12 +423,31 @@ class ScriptDoctor:
                     f"engine the plan did not choose: the plan is what was "
                     f"approved, resourced and provisioned for.",
                     sites[0][1]))
+        for what, line in _preconverted_thermo_energy(source):
+            diags.append(Diagnostic(
+                "thermo-units", "error",
+                f"{what} before being handed to twain_thermo, which converts to "
+                f"kJ/mol itself -- so the reaction term is converted TWICE while "
+                f"the kJ/mol reference enthalpies are not. That is how a CO2 "
+                f"standard heat of formation came back as -27452 kJ/mol instead "
+                f"of -393.8 (run 1cd39ffd): wrong by a factor, not slightly off, "
+                f"so no accuracy check catches it. Pass the number the calculator "
+                f"returned and NAME its unit -- `species(sym, psi4.energy(...), "
+                f"unit='Hartree', correction=thermo.get_enthalpy(T), "
+                f"correction_unit='eV')` -- or, if you keep the conversion, "
+                f"declare it with `unit='kJ/mol'`. Converting toward eV "
+                f"(`e_hartree * Hartree`) is fine and is not what this is about.",
+                line))
         for name, line in _undefined_names(source):
             diags.append(Diagnostic(
                 "undefined-name", "error",
                 f"name '{name}' is used but never defined, imported, or assigned "
                 f"(likely a typo or a truncated script).", line))
-        for token in sorted(set(_LEFTOVER_PLACEHOLDER.findall(source))):
+        # Minus the f-string fields and .format() keys, which are spelled the same
+        # way and are ordinary Python -- see interpolated_placeholder_tokens.
+        leftover = (set(_LEFTOVER_PLACEHOLDER.findall(source))
+                    - interpolated_placeholder_tokens(source))
+        for token in sorted(leftover):
             diags.append(Diagnostic(
                 "placeholder", "warning",
                 f"unfilled template placeholder {token} left in the script."))
@@ -1326,6 +1345,265 @@ def _energy_evaluation_sites(source: str) -> List[tuple]:
                 out.append((f"calls `.{node.func.attr}()`",
                             getattr(node, "lineno", None)))
     return sorted(out, key=lambda pair: (pair[1] or 0))
+
+
+# --------------------------------------------------------------------------- #
+# energies converted out of eV before twain_thermo, which converts again
+
+# Factors that move a value AWAY from eV, keyed by the operation that does it.
+# Direction is the whole point: multiplying by 27.211 is the CORRECT Hartree -> eV
+# step (the run that got the right answer did exactly that), while multiplying by
+# 96.485 leaves eV for kJ/mol, which twain_thermo then does a second time.
+_AWAY_FROM_EV_MULTIPLIERS = {
+    96.48533212: "eV -> kJ/mol",
+    2625.4996394798254: "Hartree -> kJ/mol",
+    23.060547830619026: "eV -> kcal/mol",
+}
+_AWAY_FROM_EV_DIVISORS = {
+    27.211386245988: "eV -> Hartree",
+    13.605693122994: "eV -> Rydberg",
+}
+# ase.units spells the same conversion symbolically: a value in eV divided by
+# ``(kJ / mol)`` is that value in kJ/mol.
+_ASE_ENERGY_UNIT_NAMES = frozenset({"kJ", "kcal", "mol"})
+
+# Which arguments of each twain_thermo entry point are energies, and which
+# keyword declares their unit. formation_enthalpy's third argument is reference
+# DATA in kJ/mol by definition, so it is deliberately absent.
+_THERMO_ENERGY_ARGS = {
+    "species": (
+        ("energy", 1, "unit"),
+        ("correction", None, "correction_unit"),
+    ),
+    "atomization_enthalpy": (
+        ("molecule_energy", 1, "unit"),
+        ("atom_energies", 2, "unit"),
+        ("molecule_correction", None, "correction_unit"),
+        ("atom_corrections", None, "correction_unit"),
+    ),
+    "formation_enthalpy": (
+        ("atomization_enthalpy_ev", 1, "unit"),
+    ),
+}
+
+
+def _near(value, table, tolerance=1e-3):
+    """The label for a float that matches a known conversion factor, else None."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not value:
+        return None
+    for factor, label in table.items():
+        if abs(value - factor) <= tolerance * factor:
+            return label
+    return None
+
+
+def _walk_scope(node):
+    """Every node in ``node``'s own scope, not descending into nested scopes.
+
+    Scope matters here in a way it does not for ``_undefined_names``: that check
+    flattens scopes deliberately because flattening makes it *under*-report, and
+    a missed warning is cheap. This check reports an ERROR, so flattening would
+    make it over-report -- two functions each with their own ``energy`` would let
+    one taint the other.
+    """
+    nested = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        current = stack.pop()
+        yield current
+        if not isinstance(current, nested):
+            stack.extend(ast.iter_child_nodes(current))
+
+
+def _conversion_factor_names(tree) -> dict:
+    """``{name: label}`` for module constants holding an away-from-eV factor.
+
+    Detected by the VALUE, not the name: ``EV_TO_KJ_MOL``, ``KJ_PER_EV`` and
+    ``FACTOR`` are all the same problem, and a name-based list would miss the
+    third. ``EV_TO_KJ_PER_MOL`` imported from twain_thermo carries no literal, so
+    it is recognised by name as the one documented exception.
+    """
+    found = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            label = _near(node.value.value, _AWAY_FROM_EV_MULTIPLIERS)
+            if label:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        found[target.id] = label
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "EV_TO_KJ_PER_MOL":
+                    found[alias.asname or alias.name] = "eV -> kJ/mol"
+    return found
+
+
+def _converts_away_from_ev(node, factors: dict):
+    """The conversion label if this expression leaves eV, else None."""
+    if node is None:
+        return None
+    for inner in [node, *ast.walk(node)]:
+        if not isinstance(inner, ast.BinOp):
+            continue
+        if isinstance(inner.op, ast.Mult):
+            for side in (inner.left, inner.right):
+                label = (factors.get(side.id) if isinstance(side, ast.Name)
+                         else _near(getattr(side, "value", None),
+                                    _AWAY_FROM_EV_MULTIPLIERS))
+                if label:
+                    return label
+        elif isinstance(inner.op, ast.Div):
+            right = inner.right
+            label = _near(getattr(right, "value", None), _AWAY_FROM_EV_DIVISORS)
+            if label:
+                return label
+            # ``e / (kJ / mol)``: the ase.units idiom for eV -> kJ/mol.
+            if (isinstance(right, ast.BinOp) and isinstance(right.op, ast.Div)
+                    and _unit_name(right.left) in ("kJ", "kcal")
+                    and _unit_name(right.right) == "mol"):
+                return f"eV -> {_unit_name(right.left)}/mol (ase.units)"
+    return None
+
+
+def _unit_name(node):
+    """``kJ`` from ``kJ``, ``units.kJ`` or ``ase.units.kJ``; else None."""
+    if isinstance(node, ast.Name) and node.id in _ASE_ENERGY_UNIT_NAMES:
+        return node.id
+    if isinstance(node, ast.Attribute) and node.attr in _ASE_ENERGY_UNIT_NAMES:
+        return node.attr
+    return None
+
+
+def _declares_a_non_ev_unit(call, keyword: str, fallback: str) -> bool:
+    """Whether the call states a unit that is not eV for this argument.
+
+    Saying ``unit="kJ/mol"`` makes a pre-converted value CORRECT, so the check
+    must stay silent -- the defect is converting without saying so.
+    """
+    for name in (keyword, fallback):
+        if not name:
+            continue
+        for kw in call.keywords:
+            if kw.arg == name and isinstance(kw.value, ast.Constant):
+                text = str(kw.value.value).strip().lower()
+                squashed = "".join(ch for ch in text if ch.isalnum())
+                if squashed and squashed not in ("ev", "electronvolt",
+                                                 "electronvolts"):
+                    return True
+        # A stated unit at this level settles it; do not fall through to `unit=`
+        # when `correction_unit=` was given explicitly.
+        if any(kw.arg == name for kw in call.keywords):
+            return False
+    return False
+
+
+def _preconverted_thermo_energy(source: str) -> List[tuple]:
+    """``(what, line)`` for an energy converted out of eV and not declared.
+
+    The failure this exists for: twain_thermo works in eV and converts to kJ/mol
+    on the way out, so a script that converts first has the reaction term
+    multiplied by 96.485 twice. CO2's standard heat of formation came back as
+    -27452 kJ/mol instead of -393.8, and nothing in the pipeline noticed because
+    the number is not slightly wrong -- it is wrong by a factor (run 1cd39ffd).
+
+    Silent when the conversion is DECLARED (``unit="kJ/mol"``), which is now the
+    supported way to pass a pre-converted value, and when the conversion moves
+    TOWARD eV (``e_hartree * Hartree``), which is what a correct script does.
+
+    >>> src = ('K = 96.485332\\n'
+    ...        'def go(e, c):\\n'
+    ...        '    e_kj = e * K\\n'
+    ...        '    return species("CO2", e_kj, correction=c)\\n')
+    >>> [what for what, _ in _preconverted_thermo_energy(src)]
+    ['`species(energy=...)` is multiplied by a eV -> kJ/mol factor']
+    >>> declared = src.replace('correction=c)', 'correction=c, unit="kJ/mol")')
+    >>> _preconverted_thermo_energy(declared)
+    []
+    >>> toward = src.replace('e * K', 'e * 27.211386245988')
+    >>> _preconverted_thermo_energy(toward)
+    []
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    factors = _conversion_factor_names(tree)
+    if not factors and not any(
+            _near(getattr(n, "value", None), _AWAY_FROM_EV_MULTIPLIERS)
+            or _near(getattr(n, "value", None), _AWAY_FROM_EV_DIVISORS)
+            for n in ast.walk(tree) if isinstance(n, ast.Constant)):
+        return []  # nothing in the script converts anything: nothing to say
+
+    scopes = [tree]
+    scopes.extend(n for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    out: List[tuple] = []
+    module_tainted: dict = {}
+    for scope in scopes:
+        tainted = dict(module_tainted)
+        nodes = list(_walk_scope(scope))
+        # Three passes so a short chain (a = e * K; b = a; c = b) settles. Longer
+        # chains than that do not appear in generated scripts, and an extra pass
+        # cannot introduce a false positive -- only find one more real hop.
+        for _ in range(3):
+            for node in nodes:
+                if not isinstance(node, ast.Assign):
+                    continue
+                label = (_converts_away_from_ev(node.value, factors)
+                         or _tainted_label(node.value, tainted))
+                if label:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            tainted.setdefault(target.id, label)
+        if scope is tree:
+            module_tainted = dict(tainted)
+        for node in nodes:
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (func.id if isinstance(func, ast.Name)
+                    else func.attr if isinstance(func, ast.Attribute) else None)
+            # Grouped per call, not per argument: one species() call with a
+            # converted energy AND a converted correction is one mistake, and
+            # emitting it twice just crowds the repair prompt.
+            hits: dict = {}
+            for arg_name, position, unit_kw in _THERMO_ENERGY_ARGS.get(name, ()):
+                value = _argument(node, arg_name, position)
+                if value is None:
+                    continue
+                label = (_converts_away_from_ev(value, factors)
+                         or _tainted_label(value, tainted))
+                if not label:
+                    continue
+                fallback = "unit" if unit_kw != "unit" else None
+                if _declares_a_non_ev_unit(node, unit_kw, fallback):
+                    continue
+                hits.setdefault(label, []).append(arg_name)
+            for label, args in hits.items():
+                shown = ", ".join(f"{a}=..." for a in args)
+                out.append((f"`{name}({shown})` is multiplied by a {label} "
+                            f"factor", getattr(node, "lineno", None)))
+    return sorted(set(out), key=lambda pair: (pair[1] or 0, pair[0]))
+
+
+def _tainted_label(node, tainted: dict):
+    """The conversion label if this expression reads an already-converted name."""
+    if node is None:
+        return None
+    for inner in [node, *ast.walk(node)]:
+        if isinstance(inner, ast.Name) and inner.id in tainted:
+            return tainted[inner.id]
+    return None
+
+
+def _argument(call, name: str, position):
+    """A call's argument by keyword, or by position when passed positionally."""
+    for kw in call.keywords:
+        if kw.arg == name:
+            return kw.value
+    if position is not None and len(call.args) > position:
+        return call.args[position]
+    return None
 
 
 # --------------------------------------------------------------------------- #

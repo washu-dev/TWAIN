@@ -1715,3 +1715,197 @@ class TestACalculationNeedsAPlannedCalculator:
         diags = ScriptDoctor(brief=self.LIBRARY_ONLY).static_diagnostics("def f(:\n")
         assert [d for d in diags if d.source == "compile"]
         assert not [d for d in diags if d.source == "calculator-not-planned"]
+
+
+class TestEnergyConvertedOutOfEvBeforeTwainThermo:
+    """The units defect from run 1cd39ffd, gated on DIRECTION.
+
+    twain_thermo works in eV and converts to kJ/mol on the way out, so a script
+    that converts first has the reaction term multiplied by 96.485 twice while the
+    kJ/mol reference enthalpies are untouched: CO2's standard heat of formation
+    came back as -27452 kJ/mol instead of -393.8. Wrong by a factor, so neither
+    the smoke run nor any accuracy check noticed.
+
+    Direction is what makes this gateable rather than a blanket ban on arithmetic.
+    Multiplying by 27.211 is the CORRECT Hartree -> eV step -- the run that got
+    -397.26 did exactly that -- so only conversions that LEAVE eV are the defect,
+    and declaring the conversion with unit='kJ/mol' makes it correct again.
+    """
+
+    CONVERTED = (
+        "EV_TO_KJ_MOL = 96.485332\n"
+        "from twain_thermo import species, formation_enthalpy_via_reaction\n"
+        "def run(e_co2, e_co, e_o2, c_co2, c_co, c_o2):\n"
+        "    e_co2_kj = e_co2 * EV_TO_KJ_MOL\n"
+        "    c_co2_kj = c_co2 * EV_TO_KJ_MOL\n"
+        "    products = [species(['C', 'O', 'O'], e_co2_kj, "
+        "correction=c_co2_kj, coefficient=1.0)]\n"
+        "    return products\n"
+        "if __name__ == '__main__':\n    run(1, 2, 3, 4, 5, 6)\n"
+    )
+
+    def _hits(self, script):
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        return [d for d in diags if d.source == "thermo-units"]
+
+    def test_an_undeclared_conversion_is_an_error(self):
+        hits = self._hits(self.CONVERTED)
+        assert hits and hits[0].severity == "error"
+        assert "converted TWICE" in hits[0].message
+        assert "unit='Hartree'" in hits[0].message      # tells it what to do
+
+    def test_declaring_the_unit_makes_it_correct(self):
+        """Passing kJ/mol is supported now -- as long as the call says so."""
+        declared = self.CONVERTED.replace("coefficient=1.0)",
+                                          "coefficient=1.0, unit='kJ/mol')")
+        assert self._hits(declared) == []
+
+    def test_declaring_ev_while_converting_is_still_an_error(self):
+        """A contradiction, not a declaration."""
+        lying = self.CONVERTED.replace("coefficient=1.0)",
+                                       "coefficient=1.0, unit='eV')")
+        assert self._hits(lying)
+
+    def test_converting_toward_ev_is_not_flagged(self):
+        """`e_hartree * Hartree` is what the run that got -397.26 did."""
+        toward = self.CONVERTED.replace("96.485332", "27.211386245988")
+        assert self._hits(toward) == []
+
+    def test_dividing_out_of_ev_is_flagged_too(self):
+        """`e / 27.211` leaves eV for Hartree -- same defect, other direction."""
+        divided = self.CONVERTED.replace("e_co2 * EV_TO_KJ_MOL",
+                                         "e_co2 / 27.211386245988")
+        assert self._hits(divided)
+
+    def test_the_ase_units_idiom_is_recognised(self):
+        """`e / (kJ / mol)` is how ase.units spells eV -> kJ/mol."""
+        ase_style = self.CONVERTED.replace("e_co2 * EV_TO_KJ_MOL",
+                                           "e_co2 / (kJ / mol)")
+        assert self._hits(ase_style)
+
+    def test_the_factor_is_found_by_value_not_by_name(self):
+        """A name-based list would miss the third spelling of the same constant."""
+        for name in ("EV_TO_KJ_MOL", "KJ_PER_EV", "FACTOR"):
+            script = self.CONVERTED.replace("EV_TO_KJ_MOL", name)
+            assert self._hits(script), name
+
+    def test_a_pipeline_of_assignments_still_reaches_the_call(self):
+        chained = (
+            "K = 96.485332\n"
+            "def run(e):\n"
+            "    a = e * K\n"
+            "    b = a\n"
+            "    c = b\n"
+            "    return species(['C'], c, correction=0.0)\n"
+            "if __name__ == '__main__':\n    run(1)\n"
+        )
+        assert self._hits(chained)
+
+    def test_a_same_named_value_in_another_function_does_not_taint(self):
+        """Scope-sensitive on purpose: this reports an error, so over-reporting
+        would break correct scripts. _undefined_names flattens scopes because
+        flattening makes THAT check under-report, which is the safe direction."""
+        two_scopes = (
+            "K = 96.485332\n"
+            "def convert(e):\n"
+            "    energy = e * K\n"
+            "    return energy\n"
+            "def build(e):\n"
+            "    energy = e\n"
+            "    return species(['C'], energy, correction=0.0)\n"
+            "if __name__ == '__main__':\n    build(1)\n"
+        )
+        assert self._hits(two_scopes) == []
+
+    def test_reference_enthalpies_in_kj_are_not_the_defect(self):
+        """formation_enthalpy's atom table is kJ/mol BY DEFINITION -- it is
+        published reference data, not calculator output."""
+        refs = (
+            "K = 96.485332\n"
+            "def run(d_atomization):\n"
+            "    return formation_enthalpy('CO2', d_atomization,\n"
+            "                              {'C': 716.68, 'O': 249.18})\n"
+            "if __name__ == '__main__':\n    run(16.6)\n"
+        )
+        assert self._hits(refs) == []
+
+    def test_a_script_with_no_conversions_at_all_is_silent(self):
+        plain = ("def run(e):\n    return species(['C'], e, correction=0.0)\n"
+                 "if __name__ == '__main__':\n    run(1)\n")
+        assert self._hits(plain) == []
+
+    def test_the_real_failing_script_shape_is_caught_once_per_call(self):
+        """Grouped per call: energy AND correction converted is one mistake."""
+        hits = self._hits(self.CONVERTED)
+        assert len(hits) == 1
+        assert "energy=..., correction=..." in hits[0].message
+
+    def test_a_syntax_error_does_not_crash_the_gate(self):
+        assert sd._preconverted_thermo_energy("def (:\n") == []
+
+
+class TestAnFStringFieldIsNotAnUnfilledPlaceholder:
+    """The false positive from run 1cd39ffd.
+
+    The doctor reported `unfilled template placeholder {EV_TO_KJ_MOL}` against
+    `f"(factor {EV_TO_KJ_MOL})"`, where the name was defined twelve lines above.
+    It landed on the line of a real bug for the wrong reason, which is worse than
+    silence: it spends a repair round and teaches the reader to ignore the
+    diagnostic.
+    """
+
+    def _placeholders(self, script):
+        diags = ScriptDoctor(brief=_brief()).static_diagnostics(script)
+        return [d for d in diags if d.source == "placeholder"]
+
+    F_STRING = ("EV_TO_KJ_MOL = 96.485332\n"
+                "def run():\n"
+                "    note = f'converted eV->kJ/mol (factor {EV_TO_KJ_MOL})'\n"
+                "    return note\n"
+                "if __name__ == '__main__':\n    run()\n")
+
+    def test_an_f_string_field_is_not_reported(self):
+        assert self._placeholders(self.F_STRING) == []
+
+    def test_a_genuine_leftover_is_still_reported(self):
+        leftover = ("def run():\n"
+                    "    path = 'results go in {OUTPUT_FILE} here'\n"
+                    "    return path\n"
+                    "if __name__ == '__main__':\n    run()\n")
+        hits = self._placeholders(leftover)
+        assert hits and "{OUTPUT_FILE}" in hits[0].message
+
+    def test_a_supplied_format_key_is_not_reported(self):
+        filled = ("def run():\n"
+                  "    return '{OUT_DIR}/x'.format(OUT_DIR='/tmp')\n"
+                  "if __name__ == '__main__':\n    run()\n")
+        assert self._placeholders(filled) == []
+
+    def test_an_attribute_field_is_recognised(self):
+        script = ("import cfg\n"
+                  "def run():\n"
+                  "    return f'{cfg.MODEL_NAME}'\n"
+                  "if __name__ == '__main__':\n    run()\n")
+        assert self._placeholders(script) == []
+
+    def test_an_unparseable_script_falls_back_to_the_plain_regex(self):
+        """No AST means no exclusions -- better a noisy warning than a missed one,
+        and the syntax error itself is the headline finding anyway."""
+        assert eng.interpolated_placeholder_tokens("def (:\n") == set()
+
+    def test_the_template_path_stays_strict(self):
+        """Our own templates write f"{TOOL_NAME} runner ({MODEL_NAME})", so there
+        an f-string field IS a placeholder -- and an unsubstituted one compiles
+        cleanly, so excluding it would drop the only check that catches it."""
+        rendered = 'x = f"{TOOL_NAME} runner"\n'
+        with pytest.raises(ValueError, match="unsubstituted placeholder"):
+            CodegenEngine._validate_rendered(rendered)
+
+    def test_an_undefined_f_string_field_is_still_caught_elsewhere(self):
+        """Nothing is lost by the exclusion: a field naming something the script
+        never defines is an undefined-name error in its own right."""
+        script = ("def run():\n"
+                  "    return f'{NEVER_DEFINED}'\n"
+                  "if __name__ == '__main__':\n    run()\n")
+        assert self._placeholders(script) == []
+        assert ("NEVER_DEFINED", 2) in _undefined_names(script)
