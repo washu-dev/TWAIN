@@ -63,6 +63,14 @@ export function parsePlanSummary(content: string): PlanSummary | null {
   }
 }
 
+/** The resource figures a researcher approved, when they changed TWAIN's. */
+export type ApprovedResources = {
+  cpu_count?: number;
+  gpu_count?: number;
+  ram?: number;
+  max_time?: number;
+};
+
 /**
  * Renders the approval-gate plan: the plain-language summary first, then the
  * concrete method / system / cost / resources.
@@ -71,8 +79,27 @@ export function parsePlanSummary(content: string): PlanSummary | null {
  * unparseable one verbatim instead of showing nothing -- and so the tutorial can
  * explain the card by passing a realistic plan and displaying the genuine
  * component. There is one definition, so the walkthrough cannot fall behind it.
+ *
+ * ``approved`` is what the researcher actually submitted, when they edited the
+ * suggestion. The card is rendered from the approval_request message, which is an
+ * immutable record of what was PROPOSED -- so a run approved with 10 minutes went
+ * on displaying TWAIN's suggested "4h wall" forever, and reading the transcript
+ * afterwards told you the run had used 4 hours. It had not: the job got
+ * --time=00:10:00 (run 913c1ee9). Showing the approved figure, and marking it as
+ * yours, is the difference between a record and a misleading one.
  */
-export const PlanCard: React.FC<{ content: string }> = ({ content }) => {
+/** An acceptance criterion as the researcher submitted it. */
+export type ApprovedMetric = {
+  metric_name?: string;
+  target_value?: number | null;
+  tolerance?: number | null;
+};
+
+export const PlanCard: React.FC<{
+  content: string;
+  approved?: ApprovedResources | null;
+  approvedMetrics?: ApprovedMetric[] | null;
+}> = ({ content, approved, approvedMetrics }) => {
   const plan = parsePlanSummary(content);
   if (!plan) {
     return (
@@ -108,9 +135,24 @@ export const PlanCard: React.FC<{ content: string }> = ({ content }) => {
     .filter(Boolean)
     .join(' + ');
 
-  const metrics = plan.acceptance_metrics ?? [];
+  // The approved bar wins over the proposed one, for the same reason the approved
+  // resources do: this card is the record of a run, and the run used yours.
+  const proposedMetrics = plan.acceptance_metrics ?? [];
+  const metrics = approvedMetrics?.length ? approvedMetrics : proposedMetrics;
+  const metricsAmended = !!approvedMetrics?.length
+    && JSON.stringify(approvedMetrics.map(describeMetric))
+       !== JSON.stringify(proposedMetrics.map(describeMetric));
   const notes = plan.safety_notes ?? [];
-  const slurm = plan.slurm_request;
+  const proposed = plan.slurm_request;
+  // Field by field: a researcher who changed only the wall time should not see
+  // the CPU count relabelled as theirs.
+  const slurm = proposed || approved ? { ...proposed, ...(approved ?? {}) } : undefined;
+  const changed = (key: keyof ApprovedResources) =>
+    approved?.[key] != null && proposed?.[key] != null && approved[key] !== proposed[key];
+  const amended = slurm
+    ? (['cpu_count', 'gpu_count', 'ram', 'max_time'] as (keyof ApprovedResources)[])
+        .filter(changed)
+    : [];
 
   return (
     <View style={styles.planCard}>
@@ -132,7 +174,7 @@ export const PlanCard: React.FC<{ content: string }> = ({ content }) => {
       {costText ? <PlanRow label="Estimated cost" value={costText} /> : null}
       {slurm ? (
         <PlanRow
-          label="Slurm ask"
+          label={amended.length ? 'Slurm ask (yours)' : 'Slurm ask'}
           value={`${slurm.cpu_count ?? '—'} CPU, ${slurm.gpu_count ?? 0} GPU, ${
             slurm.ram ?? '—'
           } GB RAM, ${
@@ -140,14 +182,26 @@ export const PlanCard: React.FC<{ content: string }> = ({ content }) => {
           } wall`}
         />
       ) : null}
+      {amended.length > 0 ? (
+        <Text style={styles.amendedNote}>
+          {`You changed ${amended.map(FIELD_LABELS).join(', ')} before approving. `
+            + `TWAIN suggested ${
+              (proposed?.max_time != null && formatDurationHours(proposed.max_time)) || '—'
+            } wall, ${proposed?.cpu_count ?? '—'} CPU, ${proposed?.ram ?? '—'} GB RAM.`}
+        </Text>
+      ) : null}
       {plan.goal_id ? <PlanRow label="Goal" value={plan.goal_id} /> : null}
       {metrics.length > 0 ? (
         <PlanRow
-          label="Accept if"
-          value={metrics
-            .map((m) => `${m.metric_name} ≈ ${m.target_value} ± ${m.tolerance}`)
-            .join('; ')}
+          label={metricsAmended ? 'Accept if (yours)' : 'Accept if'}
+          value={metrics.map(describeMetric).join('; ')}
         />
+      ) : null}
+      {metricsAmended ? (
+        <Text style={styles.amendedNote}>
+          {`You set this bar before approving. TWAIN proposed `
+            + `${proposedMetrics.map(describeMetric).join('; ') || 'none'}.`}
+        </Text>
       ) : null}
       {notes.length > 0 ? (
         <View style={styles.planNotes}>
@@ -162,6 +216,28 @@ export const PlanCard: React.FC<{ content: string }> = ({ content }) => {
     </View>
   );
 };
+
+/**
+ * One acceptance criterion in words.
+ *
+ * A null target is common and meaningful -- TWAIN writes it when it has no
+ * defensible expected value -- but it rendered as the literal string
+ * "bandgap ≈ null ± null", which reads as a bug rather than as "nothing to check
+ * this against". Say the latter, since it is what actually happens at VALIDATE.
+ */
+function describeMetric(m: {
+  metric_name?: string;
+  target_value?: number | null;
+  tolerance?: number | null;
+}): string {
+  const name = m.metric_name ?? 'metric';
+  if (m.target_value == null) return `${name} — no target set`;
+  if (m.tolerance == null) return `${name} ≈ ${m.target_value}`;
+  return `${name} ≈ ${m.target_value} ± ${m.tolerance}`;
+}
+
+const FIELD_LABELS = (key: keyof ApprovedResources): string =>
+  ({ cpu_count: 'CPUs', gpu_count: 'GPUs', ram: 'RAM', max_time: 'wall time' })[key];
 
 const PlanRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <View style={styles.planRow}>
@@ -199,4 +275,10 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   planNote: { fontSize: 12, color: C.textSecondary, lineHeight: 17 },
+  amendedNote: {
+    fontSize: 12,
+    color: C.washuRed,
+    lineHeight: 17,
+    marginTop: Spacing.one,
+  },
 });

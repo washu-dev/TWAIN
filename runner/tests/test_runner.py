@@ -254,6 +254,7 @@ class FakeEngine:
         self._slurm_cluster = slurm_cluster
         self.built_with = None       # records build_orchestrator kwargs for assertions
         self.applied_overrides = []  # slurm overrides applied on approve
+        self.applied_metrics = []    # acceptance criteria applied on approve
         self.rewound_to = None       # records the rewind target for rerun assertions
         self.approved = False        # set when approve_plan() is called
         self.replanned_with = []     # rejection feedback passed to replan_with_feedback
@@ -283,6 +284,9 @@ class FakeEngine:
 
     def apply_slurm_overrides(self, orch, overrides):
         self.applied_overrides.append(overrides)
+
+    def apply_acceptance_overrides(self, orch, metrics):
+        self.applied_metrics.append(metrics)
 
     def rewind(self, orch, target_state):
         # A real rewind resets the run to `target_state`; the fake just records it
@@ -731,7 +735,50 @@ class TestProcessJob:
         engine = FakeEngine(compute_target="slurm")
         runner.process_job(self._job(), db, engine)
         assert engine.applied_overrides == [overrides]
-        assert any("updated Slurm settings" in m["content"] for m in db.messages)
+        assert any("your edited resource request" in m["content"] for m in db.messages)
+
+    def test_acceptance_criteria_applied_on_approve(self):
+        # The bar the result is judged against is editable on the approval card,
+        # because TWAIN often has no defensible target and writes null -- which
+        # left a silver band gap with nothing to check it against (run 913c1ee9).
+        metrics = [{"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}]
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        db.add_user(
+            json.dumps({"decision": "approve", "acceptance_metrics": metrics}),
+            kind="approval_response",
+        )
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(self._job(), db, engine)
+        assert engine.applied_metrics == [metrics]
+        assert engine.applied_overrides == []      # resources untouched
+        assert any("your edited acceptance criteria" in m["content"] for m in db.messages)
+
+    def test_both_kinds_of_edit_travel_together(self):
+        overrides = {"cpu_count": 24, "max_time": 0.16666666666666666}
+        metrics = [{"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}]
+        db = FakeDB()
+        db.add_assistant_message(SESSION, "{}", kind="approval_request", state="PLAN")
+        db.add_user(
+            json.dumps({"decision": "approve", "slurm_request": overrides,
+                        "acceptance_metrics": metrics}),
+            kind="approval_response",
+        )
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(self._job(), db, engine)
+        assert engine.applied_overrides == [overrides]
+        assert engine.applied_metrics == [metrics]
+        assert any("resource request and acceptance criteria" in m["content"]
+                   for m in db.messages)
+
+    def test_a_bare_approval_applies_nothing(self):
+        db = FakeDB()
+        db.preload_approval("approve")
+        engine = FakeEngine(compute_target="slurm")
+        runner.process_job(self._job(), db, engine)
+        assert engine.applied_overrides == []
+        assert engine.applied_metrics == []
+        assert any("Plan approved. Building" in m["content"] for m in db.messages)
 
     # ── Terminate ─────────────────────────────────────────────────────────────
     def test_terminate_during_run_settles_cancelled_not_error(self):

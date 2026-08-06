@@ -235,6 +235,12 @@ class SendApproval(BaseModel):
     decision: Literal["approve", "reject"]
     # Optional plan-unit overrides (ram GB, max_time hours) from the approval card.
     slurm_request: dict | None = None
+    # The bar the result is judged against at VALIDATE: a list of
+    # {metric_name, target_value, tolerance}. Editable because TWAIN often has no
+    # defensible target and writes null, which leaves the answer with nothing to be
+    # checked against; only the researcher knows what "close enough" is. Null
+    # target/tolerance are preserved, so clearing a bar is expressible too.
+    acceptance_metrics: list[dict] | None = None
 
 
 class RerunConversation(BaseModel):
@@ -255,6 +261,9 @@ class RerunConversation(BaseModel):
     # would overwrite the patch -- accepting it there would look like it worked and
     # silently do nothing, the same trap `request` avoids for later stages.
     slurm_request: dict | None = None
+    # Replacement acceptance criteria, same shape and same after-PLAN restriction as
+    # slurm_request: the plan they patch has to survive the rewind.
+    acceptance_metrics: list[dict] | None = None
 
 
 def _require_own_conversation(conversation_id: str, user: dict) -> dict:
@@ -314,7 +323,8 @@ async def post_approval(conversation_id: str, body: SendApproval, user: CurrentU
     _require_own_conversation(conversation_id, user)
     return {
         "data": convo.add_approval_response(
-            conversation_id, body.decision, slurm_request=body.slurm_request
+            conversation_id, body.decision, slurm_request=body.slurm_request,
+            acceptance_metrics=body.acceptance_metrics,
         )
     }
 
@@ -364,12 +374,14 @@ async def rerun_conversation(conversation_id: str, body: RerunConversation, user
     # survives the rewind and can therefore be patched.
     after_plan = convo.RERUNNABLE_STATES[convo.RERUNNABLE_STATES.index("PLAN") + 1:]
     slurm_request = body.slurm_request or None
-    if slurm_request and state not in after_plan:
+    acceptance_metrics = body.acceptance_metrics or None
+    if (slurm_request or acceptance_metrics) and state not in after_plan:
         raise HTTPException(
             status_code=422,
-            detail="Edited resources only apply when re-running from a stage after "
-                   f"PLAN ({', '.join(after_plan)}); re-running PLAN itself "
-                   "synthesizes a new plan, which would discard them.",
+            detail="Edited resources and acceptance criteria only apply when "
+                   f"re-running from a stage after PLAN ({', '.join(after_plan)}); "
+                   "re-running PLAN itself synthesizes a new plan, which would "
+                   "discard them.",
         )
     try:
         conversation = convo.rerun_conversation(
@@ -377,6 +389,7 @@ async def rerun_conversation(conversation_id: str, body: RerunConversation, user
             feedback=(body.feedback or "").strip() or None,
             request=request,
             slurm_request=slurm_request,
+            acceptance_metrics=acceptance_metrics,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -138,3 +138,100 @@ class TestArtifactRetirement:
         names = [a["name"] for a in db.artifacts]
         assert "normalized_result" not in names
         assert "intent_spec" in names       # only retractable outputs are retired
+
+
+class TestAcceptanceOverrides:
+    """The bar the result is judged against, edited on the approval card.
+
+    TWAIN frequently has no defensible target and writes ``target_value: null``,
+    which leaves VALIDATE with nothing to check the answer against -- a silver band
+    gap ran that way and was graded on a literature baseline alone (run 913c1ee9).
+    Only the researcher knows what "close enough" is for their purpose.
+    """
+
+    def _orch(self, tmp_path, plan):
+        import json
+        import types
+        path = tmp_path / "execution_plan.json"
+        path.write_text(json.dumps(plan), encoding="utf-8")
+        sm = types.SimpleNamespace(
+            context=types.SimpleNamespace(artifacts={"execution_plan": str(path)}))
+        return types.SimpleNamespace(sm=sm), path
+
+    def _plan(self, tmp_path, metrics):
+        return self._orch(tmp_path, {"acceptance_metrics": metrics,
+                                     "slurm_request": {"cpu_count": 8}})
+
+    def _read(self, path):
+        import json
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _engine(self):
+        from runner.engine import _RealEngine
+        # The applier touches only the plan file, so no orchestrator is built.
+        return _RealEngine.__new__(_RealEngine)
+
+    def test_a_null_target_becomes_the_researchers_number(self, tmp_path):
+        orch, path = self._plan(tmp_path, [
+            {"metric_name": "bandgap", "target_value": None, "tolerance": None}])
+        self._engine().apply_acceptance_overrides(orch, [
+            {"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}])
+        assert self._read(path)["acceptance_metrics"] == [
+            {"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}]
+
+    def test_clearing_a_bar_is_expressible(self):
+        """None is a legal target, so an emptied field must round-trip as "no bar"
+        rather than collapsing to 0.0 -- which is a bar, and a very strict one."""
+        from runner.engine import _as_number
+        assert _as_number(None) is None
+        assert _as_number("") is None
+        assert _as_number("   ") is None
+        assert _as_number("abc") is None
+        assert _as_number(True) is None          # bool is not a measurement
+        assert _as_number(float("nan")) is None
+        assert _as_number(float("inf")) is None
+        assert _as_number("0") == 0.0            # zero IS a target
+        assert _as_number(-393.5) == -393.5
+
+    def test_an_untouched_metric_is_left_alone(self, tmp_path):
+        """A partial edit matches by name, so editing one bar does not blank another."""
+        orch, path = self._plan(tmp_path, [
+            {"metric_name": "bandgap", "target_value": 1.1, "tolerance": 0.2},
+            {"metric_name": "lattice_constant", "target_value": 4.09, "tolerance": 0.05}])
+        self._engine().apply_acceptance_overrides(orch, [
+            {"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}])
+        metrics = {m["metric_name"]: m for m in self._read(path)["acceptance_metrics"]}
+        assert metrics["bandgap"]["target_value"] == 0.0
+        assert metrics["lattice_constant"]["target_value"] == 4.09
+
+    def test_a_new_metric_is_appended(self, tmp_path):
+        """Asking for a bar TWAIN never proposed is a legitimate request."""
+        orch, path = self._plan(tmp_path, [
+            {"metric_name": "bandgap", "target_value": None, "tolerance": None}])
+        self._engine().apply_acceptance_overrides(orch, [
+            {"metric_name": "lattice_constant", "target_value": 4.09, "tolerance": 0.05}])
+        names = [m["metric_name"] for m in self._read(path)["acceptance_metrics"]]
+        assert names == ["bandgap", "lattice_constant"]
+
+    def test_the_rest_of_the_plan_is_untouched(self, tmp_path):
+        orch, path = self._plan(tmp_path, [
+            {"metric_name": "bandgap", "target_value": None, "tolerance": None}])
+        self._engine().apply_acceptance_overrides(orch, [
+            {"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}])
+        assert self._read(path)["slurm_request"] == {"cpu_count": 8}
+
+    def test_junk_is_ignored_rather_than_written(self, tmp_path):
+        orch, path = self._plan(tmp_path, [
+            {"metric_name": "bandgap", "target_value": 1.1, "tolerance": 0.2}])
+        engine = self._engine()
+        for payload in (None, [], "nope", [{}], [{"target_value": 1}], [None]):
+            engine.apply_acceptance_overrides(orch, payload)
+        assert self._read(path)["acceptance_metrics"] == [
+            {"metric_name": "bandgap", "target_value": 1.1, "tolerance": 0.2}]
+
+    def test_a_missing_plan_file_is_not_a_crash(self, tmp_path):
+        import types
+        sm = types.SimpleNamespace(context=types.SimpleNamespace(artifacts={}))
+        self._engine().apply_acceptance_overrides(
+            types.SimpleNamespace(sm=sm),
+            [{"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}])

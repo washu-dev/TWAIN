@@ -20,6 +20,8 @@ from jsonschema import Draft202012Validator
 from cross_validation.baseline_validator import (
     BaselineDB,
     BaselineRecord,
+    CrossValidationResult,
+    PairComparison,
     Prediction,
     compare,
     predictions_from_normalized,
@@ -189,3 +191,69 @@ def test_predictions_from_normalized_result():
     # the logS prediction can be graded against the shipped baseline
     result, verdict, _ = cross_validate([p for p in preds if p.property == "logS"])
     assert verdict.status == ACCEPTED
+
+
+class TestAZeroReferenceIsNotAMarginalResult:
+    """Silver's band gap, from run 913c1ee9.
+
+    Ag is a metal: fcc silver has bands crossing the Fermi level, so it has no
+    gap. GPAW computed 0.0 and Materials Project mp-124 gives 0.0 -- an exact
+    match, and the best outcome available. It was reported as "needs_review:
+    agreement is marginal (within 30% but not 15%)", because relative error is
+    undefined when the reference is 0, and the fallback both downgraded the
+    verdict and asserted a percentage band it had never computed.
+    """
+
+    def _result(self, predicted, literature, absolute_error, relative_error):
+        return CrossValidationResult(
+            comparisons=[PairComparison(
+                molecule="Silver", property="bandgap", predicted=predicted,
+                literature=literature, absolute_error=absolute_error,
+                relative_error=relative_error,
+                literature_source="Materials Project mp-124 (Ag) [MP entry]")],
+            mean_relative_error=relative_error)
+
+    def test_matching_a_zero_reference_exactly_is_accepted(self):
+        verdict = judge(self._result(0.0, 0.0, 0.0, None))
+        assert verdict.status == ACCEPTED
+
+    def test_the_rationale_says_what_actually_happened(self):
+        verdict = judge(self._result(0.0, 0.0, 0.0, None))
+        assert "matched a reference of 0 exactly" in verdict.rationale
+        # It must not claim a relative-error band it could not compute.
+        assert "within 15%" not in verdict.rationale
+        assert "marginal" not in verdict.rationale
+
+    def test_a_nonzero_value_against_a_zero_reference_still_needs_review(self):
+        """No scale exists, so there is no way to call 0.3 eV close or far."""
+        verdict = judge(self._result(0.3, 0.0, 0.3, None))
+        assert verdict.status == NEEDS_REVIEW
+        assert "could not be quantified" in verdict.rationale
+        assert "absolute error 0.3" in verdict.rationale
+        assert "marginal" not in verdict.rationale
+
+    def test_an_ordinary_marginal_result_still_says_marginal(self):
+        """The honest wording for the zero case must not cost the normal case its
+        explanation."""
+        verdict = judge(self._result(1.4, 1.17, 0.23, 0.197))
+        assert verdict.status == NEEDS_REVIEW
+        assert "marginal (within 30% but not 15%)" in verdict.rationale
+
+    def test_a_mixed_batch_does_not_overclaim(self):
+        """One exact zero match plus one ordinary pass: the sentence has to cover
+        both without asserting a percentage about the zero one."""
+        result = CrossValidationResult(comparisons=[
+            PairComparison(molecule="Silver", property="bandgap", predicted=0.0,
+                           literature=0.0, absolute_error=0.0, relative_error=None),
+            PairComparison(molecule="Silicon", property="bandgap", predicted=1.15,
+                           literature=1.17, absolute_error=0.02, relative_error=0.017),
+        ], mean_relative_error=0.017)
+        verdict = judge(result)
+        assert verdict.status == ACCEPTED
+        assert "Silver/bandgap matched a reference of 0 exactly" in verdict.rationale
+        assert "within 15% relative error" in verdict.rationale
+
+    def test_a_rejected_batch_still_names_its_offenders(self):
+        verdict = judge(self._result(3.0, 1.17, 1.83, 1.56))
+        assert verdict.status == REJECTED
+        assert "rel err 156.0%" in verdict.rationale

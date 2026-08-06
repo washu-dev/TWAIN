@@ -283,7 +283,7 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
         db.set_conversation_status(session_id, "awaiting_input")
         return "released"
 
-    decision, slurm_overrides = consume_approval(db, session_id)
+    decision, approval_overrides = consume_approval(db, session_id)
     if decision is None:
         # No decision yet: show the plan (idempotently) with any budget warning,
         # mark awaiting, release.
@@ -302,10 +302,11 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
         post_reject_feedback_question(db, session_id, notifier=notifier)
         return "released"
     engine.approve_plan(orch)
-    if slurm_overrides:
-        engine.apply_slurm_overrides(orch, slurm_overrides)
+    edited = _apply_approval_overrides(engine, orch, approval_overrides)
+    if edited:
         db.add_assistant_message(
-            session_id, "Plan approved with updated Slurm settings. Building and executing…",
+            session_id,
+            f"Plan approved with your edited {' and '.join(edited)}. Building and executing…",
             kind="chat", state="BUILD",
         )
     else:
@@ -375,12 +376,14 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         # it patches the plan artifact on disk; only meaningful for targets after
         # PLAN, which the API enforces -- re-running PLAN would synthesize a fresh
         # plan straight over the patch.
-        overrides = params.get("slurm_request") or None
-        if overrides:
-            engine.apply_slurm_overrides(orch, overrides)
+        edited = _apply_approval_overrides(engine, orch, {
+            k: params.get(k) for k in ("slurm_request", "acceptance_metrics")
+            if params.get(k)
+        })
+        if edited:
             db.add_assistant_message(
                 session_id,
-                "Applied your edited resource request to the existing plan.",
+                f"Applied your edited {' and '.join(edited)} to the existing plan.",
                 kind="chat", state=target,
             )
         feedback = (params.get("feedback") or "").strip()
@@ -562,6 +565,25 @@ def run_loop(
             heartbeat.stop()
         if once:
             return
+
+
+def _apply_approval_overrides(engine, orch, overrides) -> list:
+    """Apply the researcher's approval-card edits; return what changed, for the log.
+
+    One place, so the approval gate and a re-run patch the plan identically -- they
+    had drifted to two call sites doing slightly different things, and adding
+    acceptance metrics would have made that three.
+    """
+    changed = []
+    if not isinstance(overrides, dict):
+        return changed
+    if overrides.get("slurm_request"):
+        engine.apply_slurm_overrides(orch, overrides["slurm_request"])
+        changed.append("resource request")
+    if overrides.get("acceptance_metrics"):
+        engine.apply_acceptance_overrides(orch, overrides["acceptance_metrics"])
+        changed.append("acceptance criteria")
+    return changed
 
 
 def main() -> None:

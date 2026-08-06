@@ -367,10 +367,18 @@ class APIClient {
       ram?: number;
       max_time?: number;
     },
+    /** The bar the result is judged against. Null target/tolerance means "no bar",
+        which is a meaningful choice and is preserved as null rather than 0. */
+    acceptanceMetrics?: {
+      metric_name: string;
+      target_value: number | null;
+      tolerance: number | null;
+    }[],
   ): Promise<Message> {
     const response = await this.client.post(`/api/conversations/${id}/approval`, {
       decision,
       ...(slurmRequest ? { slurm_request: slurmRequest } : {}),
+      ...(acceptanceMetrics ? { acceptance_metrics: acceptanceMetrics } : {}),
     });
     return response.data.data;
   }

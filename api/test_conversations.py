@@ -104,7 +104,7 @@ class TestMessagesAndApproval:
     def test_post_approval(self, _mock_conv, mock_add):
         response = client.post("/api/conversations/conv-1/approval", json={"decision": "approve"})
         assert response.status_code == 200
-        mock_add.assert_called_once_with("conv-1", "approve", slurm_request=None)
+        mock_add.assert_called_once_with("conv-1", "approve", slurm_request=None, acceptance_metrics=None)
 
     @patch("conversations.add_approval_response", return_value={**MESSAGE, "kind": "approval_response"})
     @patch("conversations.get_conversation", return_value=CONVERSATION)
@@ -154,7 +154,7 @@ class TestRerun:
         assert response.json()["data"]["current_state"] == "CLARIFY"
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "CLARIFY", feedback=None, request=None,
-            slurm_request=None)
+            slurm_request=None, acceptance_metrics=None)
 
     @patch("conversations.rerun_conversation",
            return_value={**CONVERSATION, "current_state": "PLAN"})
@@ -164,7 +164,7 @@ class TestRerun:
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "PLAN", feedback=None, request=None,
-            slurm_request=None)
+            slurm_request=None, acceptance_metrics=None)
 
     @patch("conversations.rerun_conversation",
            return_value={**CONVERSATION, "status": "running", "current_state": "DISCOVER"})
@@ -179,7 +179,7 @@ class TestRerun:
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "DISCOVER", feedback="use xtb instead of DFT",
-            request=None, slurm_request=None)
+            request=None, slurm_request=None, acceptance_metrics=None)
 
     @patch("conversations.get_conversation", return_value=CONVERSATION)
     def test_rerun_rejects_unknown_state(self, _conv):
@@ -291,7 +291,7 @@ class TestRerunFromIntakeWithAnEditedRequest:
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "INTAKE", feedback=None,
-            request="compute the bandgap of germanium", slurm_request=None)
+            request="compute the bandgap of germanium", slurm_request=None, acceptance_metrics=None)
 
     @patch("conversations.rerun_conversation")
     @patch("conversations.get_conversation", return_value={**CONVERSATION, "status": "completed"})
@@ -317,7 +317,7 @@ class TestRerunFromIntakeWithAnEditedRequest:
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "INTAKE", feedback=None, request=None,
-            slurm_request=None)
+            slurm_request=None, acceptance_metrics=None)
 
 
 class TestRerunWithEditedResources:
@@ -340,7 +340,7 @@ class TestRerunWithEditedResources:
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "EXECUTE", feedback=None, request=None,
-            slurm_request={"cpu_count": 24, "max_time": 4.0})
+            slurm_request={"cpu_count": 24, "max_time": 4.0}, acceptance_metrics=None)
 
     @pytest.mark.parametrize("state", ["INTAKE", "DISCOVER", "PLAN"])
     @patch("conversations.rerun_conversation")
@@ -368,7 +368,7 @@ class TestRerunWithEditedResources:
         assert response.status_code == 200
         mock_rerun.assert_called_once_with(
             "conv-1", "user-1", "EXECUTE", feedback="give it more memory",
-            request=None, slurm_request={"ram": 64})
+            request=None, slurm_request={"ram": 64}, acceptance_metrics=None)
 
 
 class TestRerunStatusGate:

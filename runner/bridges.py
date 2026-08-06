@@ -252,10 +252,11 @@ def consume_approval(db: RunnerDB, session_id: str) -> tuple[str | None, dict | 
     one posted and still awaiting the response, or the only response was already
     consumed by an earlier drive of the run (so a re-run gets a fresh gate
     rather than replaying the old decision). Otherwise the reply is *consumed*
-    (marked in the DB, one-shot) and returned as ``(decision, slurm_overrides)``
-    where decision is ``'approve'``/``'reject'`` and overrides is the plan-unit
-    ``slurm_request`` dict the user edited on the approval card (ram in GB,
-    max_time in hours), or None.
+    (marked in the DB, one-shot) and returned as ``(decision, overrides)`` where
+    decision is ``'approve'``/``'reject'`` and overrides is what the researcher
+    edited on the approval card, or None. It may carry ``slurm_request`` (plan
+    units: ram in GB, max_time in hours) and ``acceptance_metrics`` (the bar the
+    result is judged against) -- both, either, or neither.
     """
     reply = _fresh_reply_row(
         db, session_id, question_kind="approval_request", reply_kind="approval_response"
@@ -275,10 +276,15 @@ def _parse_approval_reply(raw: str) -> tuple[str, dict | None]:
         return text.lower(), None
     if isinstance(body, dict) and "decision" in body:
         decision = str(body.get("decision", "")).strip().lower()
-        overrides = body.get("slurm_request")
-        if not isinstance(overrides, dict):
-            overrides = None
-        return decision, overrides
+        # Returned whole rather than as slurm_request alone: the card now also
+        # edits acceptance_metrics, and a second positional would have to be
+        # threaded through every caller of consume_approval.
+        overrides = {}
+        if isinstance(body.get("slurm_request"), dict):
+            overrides["slurm_request"] = body["slurm_request"]
+        if isinstance(body.get("acceptance_metrics"), list):
+            overrides["acceptance_metrics"] = body["acceptance_metrics"]
+        return decision, overrides or None
     return text.lower(), None
 
 

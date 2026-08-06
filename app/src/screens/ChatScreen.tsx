@@ -13,7 +13,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { apiClient, Conversation, Message, RunIssue } from '@/api/client';
 import { IssueModal } from '@/components/IssueModal';
-import { PlanCard, parsePlanSummary } from '@/components/PlanCard';
+import {
+  ApprovedMetric, ApprovedResources, PlanCard, parsePlanSummary,
+} from '@/components/PlanCard';
 import { ReportIssueModal } from '@/components/ReportIssueModal';
 import { PIPELINE_STATES, StateStepper } from '@/components/StateStepper';
 import { WallTimeField } from '@/components/WallTimeField';
@@ -83,6 +85,18 @@ const TERMINAL_STATUSES = ['completed', 'error', 'rejected', 'cancelled'];
 const POLL_MS = 1500;
 const MIN_RAM_GB = 4;
 
+/**
+ * One editable acceptance criterion.
+ *
+ * Kept as strings, like SlurmDraft: an empty field has to mean "no bar" rather
+ * than 0, and a half-typed "-" or "1e" must not be coerced mid-keystroke.
+ */
+type MetricDraft = {
+  metric_name: string;
+  target_value: string;
+  tolerance: string;
+};
+
 type SlurmDraft = {
   cpu_count: string;
   gpu_count: string;
@@ -109,6 +123,10 @@ export const ChatScreen: React.FC = () => {
   // The researcher's edits to the Slurm resource request, keyed to the approval
   // card they were made on so a fresh card reseeds from its own plan.
   const [slurmEdit, setSlurmEdit] = useState<{ key: string; draft: SlurmDraft } | null>(null);
+  // The researcher's edits to the acceptance criteria, keyed to the same card so a
+  // fresh plan reseeds from its own metrics.
+  const [metricEdit, setMetricEdit] =
+    useState<{ key: string; drafts: MetricDraft[] } | null>(null);
   const [budget, setBudget] = useState('');  // per-run cost cap (USD); blank => default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -219,6 +237,35 @@ export const ChatScreen: React.FC = () => {
     slurmEdit && slurmEdit.key === approvalContent ? slurmEdit.draft : seededSlurmDraft;
   const setSlurmDraft = (draft: SlurmDraft) =>
     setSlurmEdit({ key: approvalContent ?? '', draft });
+
+  // The acceptance bar, seeded from the plan. A null target seeds as an empty
+  // field rather than "0": TWAIN writing null means it had no defensible target,
+  // and showing 0 would present a bar it never proposed.
+  const seededMetricDrafts: MetricDraft[] = (approvalPlan?.acceptance_metrics ?? [])
+    .filter((m) => m?.metric_name)
+    .map((m) => ({
+      metric_name: String(m.metric_name),
+      target_value: m.target_value == null ? '' : String(m.target_value),
+      tolerance: m.tolerance == null ? '' : String(m.tolerance),
+    }));
+  const metricDrafts =
+    metricEdit && metricEdit.key === approvalContent ? metricEdit.drafts : seededMetricDrafts;
+  const setMetricDraft = (index: number, patch: Partial<MetricDraft>) =>
+    setMetricEdit({
+      key: approvalContent ?? '',
+      drafts: metricDrafts.map((d, i) => (i === index ? { ...d, ...patch } : d)),
+    });
+  // Sent only when something actually differs from the plan, so an untouched card
+  // records no override and the transcript does not claim an edit that never
+  // happened.
+  // Whether the PLAN proposed any bar at all. Drives the heading, because "these
+  // are TWAIN's figures, editable" and "TWAIN had none, supply one" are different
+  // messages and the reader cannot tell them apart from two empty boxes.
+  const planProposedATarget = seededMetricDrafts.some(
+    (d) => d.target_value !== '' || d.tolerance !== '');
+  const metricsEdited =
+    metricDrafts.length > 0
+    && JSON.stringify(metricDrafts) !== JSON.stringify(seededMetricDrafts);
 
   const refresh = useCallback(async (id: string) => {
     try {
@@ -363,7 +410,23 @@ export const ChatScreen: React.FC = () => {
           ),
         };
       }
-      await apiClient.sendApproval(conversation.id, decision, overrides);
+      // Numbers, or null for an empty field: null is "no bar", and coercing a
+      // blank to 0 would silently demand the answer be exactly zero.
+      const asNumber = (text: string) => {
+        const trimmed = text.trim();
+        if (!trimmed) return null;
+        const value = Number(trimmed);
+        return Number.isFinite(value) ? value : null;
+      };
+      const metrics =
+        decision === 'approve' && metricsEdited
+          ? metricDrafts.map((d) => ({
+              metric_name: d.metric_name,
+              target_value: asNumber(d.target_value),
+              tolerance: asNumber(d.tolerance),
+            }))
+          : undefined;
+      await apiClient.sendApproval(conversation.id, decision, overrides, metrics);
       await refresh(conversation.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to submit decision');
@@ -523,8 +586,14 @@ export const ChatScreen: React.FC = () => {
             solubility of aspirin at 25°C.” TWAIN will plan it, ask you to approve, then run it.
           </Text>
         )}
-        {messages.map((m) => (
-          <MessageBubble key={m.id} message={m} />
+        {messages.map((m, i) => (
+          <MessageBubble
+            key={m.id}
+            message={m}
+            // The resources actually approved live in the response that FOLLOWS
+            // this card, so they are looked up here rather than inside the card.
+            approved={m.kind === 'approval_request' ? approvedAfter(messages, i) : null}
+          />
         ))}
         {isActive && !awaitingApproval && (
           <View style={styles.working}>
@@ -651,6 +720,59 @@ export const ChatScreen: React.FC = () => {
                   }
                 />
               </View>
+            </View>
+          )}
+
+          {/* The acceptance bar. Separate from the resource block because it is a
+              different kind of decision: resources are about what the run costs,
+              this is about what counts as a right answer -- and it is the one
+              figure TWAIN often cannot supply, writing null and leaving the result
+              with nothing to be checked against. */}
+          {metricDrafts.length > 0 && (
+            <View style={styles.slurmEditor}>
+              <Text style={styles.slurmEditorTitle}>
+                {planProposedATarget
+                  ? 'Accept if — suggested by TWAIN, editable'
+                  : 'Accept if — TWAIN proposed no target'}
+              </Text>
+              <Text style={styles.slurmSuggestHint}>
+                {planProposedATarget
+                  ? 'The result is accepted when it lands within the tolerance of '
+                    + 'the target. These are TWAIN’s figures — change them, or clear '
+                    + 'both to judge against the literature alone.'
+                  : 'TWAIN had no defensible expected value for this property, so '
+                    + 'nothing will check the answer beyond the literature. If you '
+                    + 'know roughly what to expect, set it here.'}
+              </Text>
+              {metricDrafts.map((draft, index) => (
+                <View key={draft.metric_name} style={styles.metricRow}>
+                  <Text style={styles.metricName} numberOfLines={1}>
+                    {draft.metric_name}
+                  </Text>
+                  <View style={styles.slurmRow}>
+                    <SlurmField
+                      label={
+                        seededMetricDrafts[index]?.target_value
+                          ? 'Target value — suggested'
+                          : 'Target value'
+                      }
+                      value={draft.target_value}
+                      placeholder="none"
+                      onChange={(v) => setMetricDraft(index, { target_value: v })}
+                    />
+                    <SlurmField
+                      label={
+                        seededMetricDrafts[index]?.tolerance
+                          ? '± tolerance — suggested'
+                          : '± tolerance'
+                      }
+                      value={draft.tolerance}
+                      placeholder="none"
+                      onChange={(v) => setMetricDraft(index, { tolerance: v })}
+                    />
+                  </View>
+                </View>
+              ))}
             </View>
           )}
           <View style={styles.approvalButtons}>
@@ -983,7 +1105,11 @@ const SlurmField: React.FC<{
   label: string;
   value: string;
   onChange: (v: string) => void;
-}> = ({ label, value, onChange }) => (
+  /** Shown when the field is empty. An acceptance target is legitimately blank
+      when TWAIN had no defensible value, and a bare empty box reads as a field
+      that failed to load rather than as a deliberate "none". */
+  placeholder?: string;
+}> = ({ label, value, onChange, placeholder }) => (
   <View style={styles.slurmField}>
     <Text style={styles.slurmFieldLabel}>{label}</Text>
     <TextInput
@@ -991,6 +1117,8 @@ const SlurmField: React.FC<{
       value={value}
       onChangeText={onChange}
       keyboardType="decimal-pad"
+      placeholder={placeholder}
+      placeholderTextColor={C.textPlaceholder}
       accessibilityLabel={label}
     />
   </View>
@@ -1040,13 +1168,57 @@ function describeApproval(content: string): string {
   return parts.length ? `${head} Resources: ${parts.join(', ')}.` : head;
 }
 
-const MessageBubble: React.FC<{ message: Message }> = ({ message }) => {
+/**
+ * The resource overrides from the approval_response that answered this card.
+ *
+ * A run can hold several approval cards (a re-run replans), so this takes the
+ * FIRST response after the given index rather than the last in the conversation --
+ * otherwise a later re-run's numbers would be attributed to an earlier plan.
+ * Null when the card was never answered, or answered without edits.
+ */
+type Approved = {
+  slurm: ApprovedResources | null;
+  metrics: ApprovedMetric[] | null;
+};
+
+const NOTHING_APPROVED: Approved = { slurm: null, metrics: null };
+
+function approvedAfter(messages: Message[], index: number): Approved {
+  for (let i = index + 1; i < messages.length; i += 1) {
+    const m = messages[i];
+    if (m.kind === 'approval_request') return NOTHING_APPROVED;  // this card lapsed
+    if (m.kind !== 'approval_response') continue;
+    try {
+      const parsed = JSON.parse(m.content);
+      const slurm = parsed?.slurm_request;
+      const metrics = parsed?.acceptance_metrics;
+      return {
+        slurm: slurm && typeof slurm === 'object' ? (slurm as ApprovedResources) : null,
+        metrics: Array.isArray(metrics) ? (metrics as ApprovedMetric[]) : null,
+      };
+    } catch {
+      return NOTHING_APPROVED;   // a bare "approve"/"reject": nothing overridden
+    }
+  }
+  return NOTHING_APPROVED;
+}
+
+const MessageBubble: React.FC<{
+  message: Message;
+  approved?: Approved | null;
+}> = ({ message, approved }) => {
   const isUser = message.role === 'user';
   if (message.kind === 'terminate') {
     return <Text style={styles.terminateNote}>You asked to terminate this run.</Text>;
   }
   if (message.kind === 'approval_request') {
-    return <PlanCard content={message.content} />;
+    return (
+      <PlanCard
+        content={message.content}
+        approved={approved?.slurm}
+        approvedMetrics={approved?.metrics}
+      />
+    );
   }
   if (message.kind === 'approval_response') {
     return (
@@ -1237,6 +1409,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: C.text,
   },
+  metricRow: { gap: Spacing.one, marginTop: Spacing.one },
+  metricName: { fontSize: 13, fontWeight: '700', color: C.text },
   approvalButtons: { flexDirection: 'row', gap: Spacing.two },
   approveBtn: {
     flex: 1,

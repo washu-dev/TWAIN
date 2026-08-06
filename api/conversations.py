@@ -274,18 +274,22 @@ def add_approval_response(
     decision: str,
     *,
     slurm_request: dict | None = None,
+    acceptance_metrics: list | None = None,
 ) -> dict:
     """Record the user's plan-approval decision ('approve' | 'reject').
 
-    When the user edited Slurm settings on the approval card, ``slurm_request``
-    (plan units: ram GB, max_time hours) is embedded in the message content so
-    the runner can patch the execution plan before BUILD/EXECUTE.
+    Edits made on the approval card are embedded in the message content so the
+    runner can patch the execution plan before BUILD/EXECUTE: ``slurm_request``
+    (plan units: ram GB, max_time hours) and ``acceptance_metrics`` (the bar the
+    result is judged against). Either may be absent; a decision with neither is
+    stored as the bare word, which is what the runner's parser expects.
     """
-    content = (
-        json.dumps({"decision": decision, "slurm_request": slurm_request})
-        if slurm_request is not None
-        else decision
-    )
+    edits = {}
+    if slurm_request is not None:
+        edits["slurm_request"] = slurm_request
+    if acceptance_metrics is not None:
+        edits["acceptance_metrics"] = acceptance_metrics
+    content = json.dumps({"decision": decision, **edits}) if edits else decision
     conn = get_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -356,6 +360,7 @@ def rerun_conversation(
     conversation_id: str, user_id: str, target_state: str,
     feedback: str | None = None, request: str | None = None,
     slurm_request: dict | None = None,
+    acceptance_metrics: list | None = None,
 ) -> dict | None:
     """Re-run a conversation from an earlier pipeline stage.
 
@@ -436,6 +441,10 @@ def rerun_conversation(
         # targets at or before PLAN, where a fresh plan would discard it.
         if slurm_request:
             params["slurm_request"] = slurm_request
+        # Same reasoning, same restriction: the bar the result is judged against
+        # lives on the plan, so it only survives a rewind to a post-PLAN stage.
+        if acceptance_metrics:
+            params["acceptance_metrics"] = acceptance_metrics
 
         # Retire the questions of the pass being rewound past. Choosing to re-run
         # IS the answer to whatever was outstanding, and a question left looking
@@ -484,9 +493,12 @@ def rerun_conversation(
                       f"(re-planning from {target_state}).")
         elif request:
             marker = f"↩︎ Re-running from {target_state} with your edited request."
-        elif slurm_request:
-            marker = (f"↩︎ Re-running from {target_state} with your edited "
-                      f"resource request.")
+        elif slurm_request or acceptance_metrics:
+            edited = " and ".join(filter(None, [
+                "resource request" if slurm_request else None,
+                "acceptance criteria" if acceptance_metrics else None,
+            ]))
+            marker = f"↩︎ Re-running from {target_state} with your edited {edited}."
         else:
             marker = f"↩︎ Re-running from {target_state}."
         cursor.execute(
