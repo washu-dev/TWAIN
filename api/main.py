@@ -69,10 +69,30 @@ app.add_middleware(
 )
 
 
+def git_sha() -> str:
+    """The commit this image was built from, per api/Dockerfile's build arg.
+
+    "unknown" when the API runs from a checkout rather than a built image, which is
+    the honest answer for local dev and is distinguishable from a real SHA.
+
+    Read per call rather than captured at import so a test can set the variable
+    without reloading this module -- reloading it would build a second FastAPI app
+    while other test modules still hold a reference to the first.
+    """
+    return os.getenv("TWAIN_GIT_SHA", "unknown")
+
+
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "ok"}
+    """Health check, and which commit is serving it.
+
+    The SHA is here because "did the API deploy?" had no answer: this endpoint
+    returned a bare {"status": "ok"} from every version, ``FastAPI(version=...)``
+    is hardcoded, and CloudFront serves the SPA for /openapi.json -- so the only
+    way to tell one release from another was to authenticate and probe behaviour.
+    A deploy is now verifiable with one unauthenticated curl.
+    """
+    return {"status": "ok", "commit": git_sha(), "version": app.version}
 
 
 @app.get("/api/libraries")

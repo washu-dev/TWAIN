@@ -10,7 +10,11 @@ class TestHealthEndpoint:
     def test_health_check_returns_ok(self):
         response = client.get("/api/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        # Asserts the contract (status is "ok") rather than the whole body: the
+        # endpoint also reports the commit it was built from, so an exact-match
+        # assertion would break on every field added for observability.
+        # See api/test_main.py for what those fields are.
+        assert response.json()["status"] == "ok"
 
 
 class TestEndpointAccess:
