@@ -6,15 +6,32 @@
   box-sizing: border-box;
 }
 
+/*
+ * NOT CURRENTLY LOADED. Nothing imports this file, so none of it applies: every
+ * custom property below resolves to the empty string in the running app, which is
+ * verifiable in a console with
+ *   getComputedStyle(document.documentElement).getPropertyValue('--font-display')
+ *
+ * It went unnoticed because react-native-web gives every Text its own font stack
+ * and its own colours, so the app looks correct without this file ever loading.
+ * Two rules here would earn their keep if it were wired up -- the box-sizing
+ * reset and the :focus-visible outline -- and `Fonts` in constants/theme.ts is
+ * dead for the same reason (its web branch resolves --font-* from here). Wire it
+ * up or delete it; either is a deliberate change, so neither is done here.
+ *
+ * The colours ARE corrected: they used to declare a navy/gold/magenta palette
+ * that exists nowhere else in the app, so whoever eventually imported this file
+ * would have silently restyled every link and focus ring off-brand. They now
+ * match constants/theme.ts, which is the one palette.
+ */
 :root {
   --font-display: 'system-ui', -apple-system, 'Segoe UI', 'Roboto';
   --font-serif: 'ui-serif', 'Georgia', serif;
   --font-rounded: 'ui-rounded', 'system-ui';
   --font-mono: 'ui-monospace', 'Menlo', monospace;
 
-  --color-washu-primary: #00205B;
-  --color-washu-secondary: #E6A10A;
-  --color-washu-accent: #C6007E;
+  --color-washu-primary: #ba0c2f; /* washuRed — Pantone 200 */
+  --color-washu-secondary: #215732; /* washuGreen — Pantone 350 */
 
   color-scheme: light;
 }
@@ -42,13 +59,13 @@ h6 {
 
 /* Accessibility */
 a {
-  color: var(--color-washu-secondary);
+  color: var(--color-washu-primary);
   text-decoration: underline;
 }
 
 a:hover,
 a:focus {
-  color: var(--color-washu-primary);
+  color: var(--color-washu-secondary);
 }
 
 button {
@@ -59,6 +76,6 @@ button {
 }
 
 button:focus-visible {
-  outline: 2px solid var(--color-washu-secondary);
+  outline: 2px solid var(--color-washu-primary);
   outline-offset: 2px;
 }

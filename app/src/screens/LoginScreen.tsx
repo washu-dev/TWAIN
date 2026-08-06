@@ -8,8 +8,10 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { APP_STRINGS, MaxContentWidth, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
+
+const C = Colors.light;
 
 export const LoginScreen: React.FC = () => {
   const { signIn, isSigningIn, canSignIn, authConfigured, error } = useAuth();
@@ -40,7 +42,7 @@ export const LoginScreen: React.FC = () => {
               accessibilityLabel={APP_STRINGS.ssoButton}
             >
               {isSigningIn ? (
-                <ActivityIndicator color="#FFFFFF" />
+                <ActivityIndicator color={C.washuWhite} />
               ) : (
                 <Text style={styles.buttonText}>{APP_STRINGS.ssoButton}</Text>
               )}
@@ -65,7 +67,7 @@ export const LoginScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F5F5F5',
+    backgroundColor: C.washuLightGray,
     alignItems: 'center',
     justifyContent: 'center',
     padding: Spacing.four,
@@ -73,39 +75,39 @@ const styles = StyleSheet.create({
   card: {
     width: '100%',
     maxWidth: MaxContentWidth / 2,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     borderRadius: 8,
     borderTopWidth: 4,
-    borderTopColor: '#BA0C2F',
+    borderTopColor: C.washuRed,
     padding: Spacing.four,
     gap: Spacing.three,
   },
   backLink: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#5A5A5A',
+    color: C.textSecondary,
   },
   title: {
     fontSize: 28,
     fontWeight: 'bold',
-    color: '#BA0C2F',
+    color: C.washuRed,
   },
   subtitle: {
     fontSize: 14,
-    color: '#5A5A5A',
+    color: C.textSecondary,
     lineHeight: 20,
   },
   error: {
-    color: '#BA0C2F',
+    color: C.washuRed,
     fontSize: 14,
     lineHeight: 20,
   },
   hint: {
-    color: '#5A5A5A',
+    color: C.textSecondary,
     fontSize: 13,
   },
   button: {
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
     borderRadius: 4,
     paddingVertical: Spacing.three,
     alignItems: 'center',
@@ -114,13 +116,13 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   buttonText: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 16,
     fontWeight: '700',
   },
   footnote: {
     fontSize: 12,
-    color: '#999999',
+    color: C.textPlaceholder,
     lineHeight: 17,
   },
 });

@@ -9,9 +9,11 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Header, Footer, TileButton, MessageModal, IssueModal } from '@/components';
-import { APP_STRINGS, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
+
+const C = Colors.light;
 
 export const DashboardScreen: React.FC = () => {
   const router = useRouter();
@@ -57,41 +59,41 @@ export const DashboardScreen: React.FC = () => {
         <TileButton
           title={APP_STRINGS.startSimulation}
           description={APP_STRINGS.startSimulationDesc}
-          accentColor="#BA0C2F"
+          accentColor={C.washuRed}
           onPress={() => router.push('/chat')}
         />
 
         <TileButton
           title={APP_STRINGS.browse}
           description={APP_STRINGS.browseDesc}
-          accentColor="#215732"
+          accentColor={C.washuGreen}
           onPress={() => router.push('/browse')}
         />
 
         <TileButton
           title={APP_STRINGS.libraries}
           description={APP_STRINGS.librariesDesc}
-          accentColor="#215732"
+          accentColor={C.washuGreen}
           onPress={() => router.push('/libraries')}
         />
 
         <TileButton
           title={APP_STRINGS.createIssue}
           description={APP_STRINGS.createIssueDesc}
-          accentColor="#BA0C2F"
+          accentColor={C.washuRed}
           onPress={() => setIssueModalVisible(true)}
         />
 
         <TileButton
           title={APP_STRINGS.settings}
           description={APP_STRINGS.settingsDesc}
-          accentColor="#215732"
+          accentColor={C.washuGreen}
           onPress={() => router.push('/settings')}
         />
 
         {loading && (
           <View style={styles.loading}>
-            <ActivityIndicator size="large" color="#BA0C2F" accessibilityLabel="Loading" />
+            <ActivityIndicator size="large" color={C.washuRed} accessibilityLabel="Loading" />
           </View>
         )}
       </ScrollView>
@@ -118,7 +120,7 @@ export const DashboardScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F5F5F5',
+    backgroundColor: C.washuLightGray,
   },
   scroll: {
     flex: 1,

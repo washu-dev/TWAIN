@@ -1,6 +1,8 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { Spacing } from '@/constants/theme';
+import { Colors, Spacing } from '@/constants/theme';
+
+const C = Colors.light;
 
 interface TileButtonProps {
   title: string;
@@ -13,7 +15,7 @@ export const TileButton: React.FC<TileButtonProps> = ({
   title,
   description,
   onPress,
-  accentColor = '#BA0C2F',
+  accentColor = C.washuRed,
 }) => {
   return (
     <TouchableOpacity
@@ -41,13 +43,13 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     marginBottom: Spacing.three,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: C.border,
     overflow: 'hidden',
-    shadowColor: '#000',
+    shadowColor: C.shadow,
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.08,
     shadowRadius: 4,
@@ -65,12 +67,12 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 17,
     fontWeight: '700',
-    color: '#1A1A1A',
+    color: C.textStrong,
     marginBottom: Spacing.one,
   },
   description: {
     fontSize: 13,
-    color: '#5A5A5A',
+    color: C.textSecondary,
     lineHeight: 18,
   },
   arrow: {

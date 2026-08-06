@@ -222,7 +222,7 @@ const IssueForm: React.FC<Omit<ReportIssueModalProps, 'visible'>> = ({
               accessibilityLabel="Submit issue"
             >
               {busy ? (
-                <ActivityIndicator color="#FFFFFF" />
+                <ActivityIndicator color={C.washuWhite} />
               ) : (
                 <Text style={styles.primaryText}>Submit issue</Text>
               )}
@@ -321,7 +321,7 @@ const styles = StyleSheet.create({
     maxWidth: 560,
     maxHeight: '90%',
     overflow: 'hidden',
-    shadowColor: '#000',
+    shadowColor: C.shadow,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 12,
@@ -332,7 +332,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
   },
-  headerTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', letterSpacing: 0.3 },
+  headerTitle: { color: C.washuWhite, fontSize: 16, fontWeight: '700', letterSpacing: 0.3 },
   bodyScroll: { flexGrow: 0 },
   body: { paddingHorizontal: Spacing.four, paddingVertical: Spacing.four, gap: Spacing.two },
   label: { fontSize: 13, fontWeight: '700', color: C.text, marginTop: Spacing.two },
@@ -340,7 +340,7 @@ const styles = StyleSheet.create({
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   chip: {
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: C.border,
     borderRadius: 16,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.one,
@@ -351,7 +351,7 @@ const styles = StyleSheet.create({
   chipTextSelected: { color: C.washuRed },
   input: {
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: C.border,
     borderRadius: 8,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
@@ -405,10 +405,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  primaryText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
+  primaryText: { color: C.washuWhite, fontSize: 14, fontWeight: '700' },
   secondaryBtn: {
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: C.border,
     borderRadius: 6,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,

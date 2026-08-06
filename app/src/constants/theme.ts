@@ -5,6 +5,21 @@
 
 import { Platform } from 'react-native';
 
+/**
+ * The palette. This is the ONLY place a colour may be written down.
+ *
+ * It grew three roles it did not name -- structural greys (borders, dividers), a
+ * text ramp above `textSecondary`, and semantic status colours -- so screens
+ * reached for literals instead: 141 of them, including 23 copies of the red that
+ * was already here and 13 copies of one border grey. Everything below is a value
+ * that was already shipping; naming it is what makes a restyle a change to this
+ * file rather than a sweep through fifteen.
+ *
+ * NOTE ON `dark`: nothing reaches it today. Every screen pins `Colors.light` at
+ * module scope and `useColorScheme()` returns 'light' unconditionally on web, so
+ * the dark column is a structural placeholder, not a designed or tested theme.
+ * Making dark mode real is its own piece of work.
+ */
 export const Colors = {
   light: {
     text: '#000000',
@@ -17,6 +32,34 @@ export const Colors = {
     washuWhite: '#FFFFFF',
     washuLightGray: '#F2F2F2',
     washuDarkGray: '#333333',
+
+    // Structure. `border` is the default 1px rule; `borderStrong` is for the few
+    // places that need more definition; `divider` separates sections inside a
+    // surface (modal footers, list rows).
+    border: '#DDDDDD',
+    borderStrong: '#CCCCCC',
+    divider: '#EEEEEE',
+
+    // Text ramp, darkest first. `textStrong` is heading black -- deliberately not
+    // `text` (#000000), which nothing uses for body copy.
+    textStrong: '#1A1A1A',
+    textPlaceholder: '#9A9A9A',
+
+    // Surfaces that are dark in BOTH themes (the site footer), and the text on
+    // them. Same values as the dark theme's, but a footer is not "dark mode" --
+    // giving it its own name stops the two ideas from being confused.
+    surfaceDark: '#1A1A1A',
+    textOnDark: '#FFFFFF',
+    textOnDarkMuted: '#AAAAAA',
+
+    // Status. Success and failure are the brand green and red (used directly);
+    // these are the two states the brand palette has no colour for, plus the
+    // tinted surface that pairs with `washuRed`.
+    warning: '#B8860B',
+    info: '#0B69C7',
+    errorSurface: '#FDF3F4',
+
+    shadow: '#000000',
   },
   dark: {
     text: '#ffffff',
@@ -29,6 +72,23 @@ export const Colors = {
     washuWhite: '#FFFFFF',
     washuLightGray: '#2A2A2A',
     washuDarkGray: '#CCCCCC',
+
+    border: '#3A3A3A',
+    borderStrong: '#4A4A4A',
+    divider: '#2A2A2A',
+
+    textStrong: '#FFFFFF',
+    textPlaceholder: '#777777',
+
+    surfaceDark: '#1A1A1A',
+    textOnDark: '#FFFFFF',
+    textOnDarkMuted: '#AAAAAA',
+
+    warning: '#E0A72E',
+    info: '#5AA9F0',
+    errorSurface: '#3A1F22',
+
+    shadow: '#000000',
   },
 } as const;
 

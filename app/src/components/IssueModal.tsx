@@ -10,8 +10,10 @@ import {
   Platform,
   Linking,
 } from 'react-native';
-import { Spacing } from '@/constants/theme';
+import { Colors, Spacing } from '@/constants/theme';
 import type { CreatedIssue } from '@/api/client';
+
+const C = Colors.light;
 
 interface IssueModalProps {
   visible: boolean;
@@ -118,7 +120,7 @@ export const IssueModal: React.FC<IssueModalProps> = ({
                 value={title}
                 onChangeText={setTitle}
                 placeholder="Short summary of the issue"
-                placeholderTextColor="#9A9A9A"
+                placeholderTextColor={C.textPlaceholder}
                 editable={!submitting}
                 maxLength={256}
                 accessibilityLabel="Issue title"
@@ -130,7 +132,7 @@ export const IssueModal: React.FC<IssueModalProps> = ({
                 value={body}
                 onChangeText={setBody}
                 placeholder="Steps to reproduce, expected vs. actual behavior, etc."
-                placeholderTextColor="#9A9A9A"
+                placeholderTextColor={C.textPlaceholder}
                 editable={!submitting}
                 multiline
                 numberOfLines={5}
@@ -179,7 +181,7 @@ export const IssueModal: React.FC<IssueModalProps> = ({
                   accessibilityLabel="Submit issue"
                 >
                   {submitting ? (
-                    <ActivityIndicator size="small" color="#FFFFFF" />
+                    <ActivityIndicator size="small" color={C.washuWhite} />
                   ) : (
                     <Text style={styles.primaryButtonText}>Submit</Text>
                   )}
@@ -202,24 +204,24 @@ const styles = StyleSheet.create({
     padding: Spacing.four,
   },
   dialog: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     borderRadius: 8,
     width: Platform.OS === 'web' ? 480 : '100%',
     maxWidth: 520,
     overflow: 'hidden',
-    shadowColor: '#000',
+    shadowColor: C.shadow,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 12,
     elevation: 8,
   },
   header: {
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
   },
   title: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 16,
     fontWeight: '700',
     letterSpacing: 0.3,
@@ -232,47 +234,47 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#333333',
+    color: C.washuDarkGray,
     marginTop: Spacing.two,
   },
   input: {
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: C.border,
     borderRadius: 6,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     fontSize: 15,
-    color: '#1A1A1A',
-    backgroundColor: '#FFFFFF',
+    color: C.textStrong,
+    backgroundColor: C.background,
   },
   textArea: {
     minHeight: 110,
   },
   note: {
     fontSize: 12,
-    color: '#5A5A5A',
+    color: C.textSecondary,
     marginTop: Spacing.two,
     lineHeight: 17,
   },
   successText: {
     fontSize: 15,
-    color: '#1A1A1A',
+    color: C.textStrong,
     lineHeight: 22,
   },
   link: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#BA0C2F',
+    color: C.washuRed,
     marginTop: Spacing.two,
   },
   errorText: {
     fontSize: 13,
-    color: '#BA0C2F',
+    color: C.washuRed,
     marginTop: Spacing.two,
   },
   footer: {
     borderTopWidth: 1,
-    borderTopColor: '#EEEEEE',
+    borderTopColor: C.divider,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
     flexDirection: 'row',
@@ -280,7 +282,7 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   primaryButton: {
-    backgroundColor: '#BA0C2F',
+    backgroundColor: C.washuRed,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
     borderRadius: 4,
@@ -289,7 +291,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   primaryButtonText: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 14,
     fontWeight: '700',
   },
@@ -298,13 +300,13 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.two,
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: '#CCCCCC',
+    borderColor: C.borderStrong,
     minWidth: 90,
     alignItems: 'center',
     justifyContent: 'center',
   },
   secondaryButtonText: {
-    color: '#333333',
+    color: C.washuDarkGray,
     fontSize: 14,
     fontWeight: '600',
   },

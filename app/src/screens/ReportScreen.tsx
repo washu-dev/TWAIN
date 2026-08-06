@@ -196,7 +196,7 @@ const ValidationCard: React.FC<{ report: Report }> = ({ report }) => {
   const stopped = rerun?.decision === 'stop';
 
   const statusColor =
-    status === 'accepted' ? C.washuGreen : status === 'rejected' ? C.washuRed : '#B56A00';
+    status === 'accepted' ? C.washuGreen : status === 'rejected' ? C.washuRed : C.warning;
 
   return (
     <View style={styles.card}>
@@ -581,14 +581,14 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.two,
     backgroundColor: C.washuRed,
   },
-  back: { color: '#FFFFFF', fontSize: 16, fontWeight: '600', width: 48 },
-  openChat: { color: '#FFFFFF', fontSize: 15, fontWeight: '600', width: 48, textAlign: 'right' },
-  title: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
+  back: { color: C.washuWhite, fontSize: 16, fontWeight: '600', width: 48 },
+  openChat: { color: C.washuWhite, fontSize: 15, fontWeight: '600', width: 48, textAlign: 'right' },
+  title: { color: C.washuWhite, fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
   scroll: { flex: 1 },
   content: { padding: Spacing.three, gap: Spacing.three },
   badges: { flexDirection: 'row', gap: Spacing.two, alignItems: 'center' },
   statusBadge: { borderRadius: 12, paddingHorizontal: Spacing.three, paddingVertical: 4 },
-  statusBadgeText: { color: '#FFFFFF', fontWeight: '700', fontSize: 12 },
+  statusBadgeText: { color: C.washuWhite, fontWeight: '700', fontSize: 12 },
   stateBadge: {
     borderRadius: 12,
     paddingHorizontal: Spacing.three,

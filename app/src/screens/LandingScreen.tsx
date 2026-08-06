@@ -10,13 +10,9 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Footer, WashUShield } from '@/components';
-import {
-  APP_STRINGS,
-  Colors,
-  LANDING_CONTENT,
-  MaxContentWidth,
-  Spacing,
-} from '@/constants/theme';
+import { APP_STRINGS, Colors, LANDING_CONTENT, MaxContentWidth, Spacing } from '@/constants/theme';
+
+const C = Colors.light;
 
 /**
  * Public home page shown to signed-out visitors (app/index.tsx). Describes what
@@ -136,7 +132,7 @@ const GREEN = Colors.light.washuGreen;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F5F5F5',
+    backgroundColor: C.washuLightGray,
   },
   scroll: {
     flex: 1,
@@ -163,7 +159,7 @@ const styles = StyleSheet.create({
   heroTitle: {
     fontSize: 52,
     fontWeight: 'bold',
-    color: '#FFFFFF',
+    color: C.washuWhite,
     letterSpacing: 1,
     textAlign: 'center',
   },
@@ -194,13 +190,13 @@ const styles = StyleSheet.create({
   exampleQuote: {
     fontSize: 18,
     fontStyle: 'italic',
-    color: '#FFFFFF',
+    color: C.washuWhite,
     textAlign: 'center',
     lineHeight: 26,
   },
   heroCta: {
     marginTop: Spacing.two,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     borderRadius: 6,
     paddingVertical: Spacing.three,
     paddingHorizontal: Spacing.five,
@@ -226,12 +222,12 @@ const styles = StyleSheet.create({
   sectionHeading: {
     fontSize: 24,
     fontWeight: '700',
-    color: '#1A1A1A',
+    color: C.textStrong,
   },
   paragraph: {
     fontSize: 16,
     lineHeight: 25,
-    color: '#3A3A3A',
+    color: C.washuDarkGray,
   },
 
   // Steps
@@ -252,7 +248,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   stepNumberText: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 15,
     fontWeight: '700',
   },
@@ -263,13 +259,13 @@ const styles = StyleSheet.create({
   stepTitle: {
     fontSize: 17,
     fontWeight: '700',
-    color: '#1A1A1A',
+    color: C.textStrong,
     marginBottom: Spacing.half,
   },
   stepBody: {
     fontSize: 15,
     lineHeight: 22,
-    color: '#5A5A5A',
+    color: C.textSecondary,
   },
 
   // Capability cards
@@ -282,13 +278,13 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     flexBasis: '47%',
     minWidth: 240,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#DDDDDD',
+    borderColor: C.border,
     padding: Spacing.three,
     gap: Spacing.two,
-    shadowColor: '#000',
+    shadowColor: C.shadow,
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.06,
     shadowRadius: 4,
@@ -303,24 +299,24 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#1A1A1A',
+    color: C.textStrong,
   },
   cardBody: {
     fontSize: 14,
     lineHeight: 21,
-    color: '#5A5A5A',
+    color: C.textSecondary,
   },
 
   // Sign-in callout
   signInCallout: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: C.background,
     borderRadius: 8,
     borderTopWidth: 4,
     borderTopColor: RED,
     padding: Spacing.four,
     alignItems: 'center',
     gap: Spacing.three,
-    shadowColor: '#000',
+    shadowColor: C.shadow,
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.08,
     shadowRadius: 4,
@@ -329,13 +325,13 @@ const styles = StyleSheet.create({
   signInHeading: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#1A1A1A',
+    color: C.textStrong,
     textAlign: 'center',
   },
   signInBody: {
     fontSize: 15,
     lineHeight: 22,
-    color: '#5A5A5A',
+    color: C.textSecondary,
     textAlign: 'center',
     maxWidth: 520,
   },
@@ -346,7 +342,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.five,
   },
   signInCtaText: {
-    color: '#FFFFFF',
+    color: C.washuWhite,
     fontSize: 16,
     fontWeight: '700',
   },
