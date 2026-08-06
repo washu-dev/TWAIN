@@ -174,6 +174,21 @@ CONDA_ONLY_PACKAGES = frozenset({
     "psi4", "xtb-python", "gpaw", "dftbplus", "qe", "abinit", "cp2k", "nwchem",
 })
 
+# Packages that ARE on PyPI but cannot realistically be installed at job start.
+# The cluster check treats "pip can serve it" as "the job's pip fallback can get
+# it", which holds for a pure-Python package and not for a machine-learned
+# potential: matgl and chgnet pull PyTorch, which is multiple GB of wheels
+# downloaded onto a compute node inside the run's own wall-clock budget, with no
+# provisioned env to fall back on (no scripts/ris/envs/*.yml declares either).
+#
+# The cost of getting this wrong is a plan that looks runnable and is not: a NaCl2
+# heat-of-formation run reached EXECUTE and died on "No module named matgl" after
+# trying MACE, CHGNet and M3GNet in turn (Slurm job 2633871). Provision an env for
+# one of these and it can come straight off this list -- the veto reads the specs.
+CLUSTER_UNRUNNABLE_PACKAGES = frozenset({
+    "matgl", "chgnet", "mace-torch", "torch", "dgl",
+})
+
 
 # Alternative spellings -> canonical registry key.
 _ALIASES: Dict[str, str] = {

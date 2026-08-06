@@ -30,6 +30,7 @@ from cross_validation.baseline_validator import (
     ChainedBaselines,
     Prediction,
 )
+from cross_validation import mp_reference
 from cross_validation.mp_reference import MaterialsProjectBaselines
 from self_correction.failure_classifier import RunEvidence
 from self_correction.reflection import reflect
@@ -53,7 +54,7 @@ from method_discovery import llm_discovery
 from method_discovery import library_requests as _libreq
 from PromptCompiler import PromptGenerator
 from code_gen.codegen_engine import (SIM_ENV, CodegenEngine, _first_metric_name,
-                                     canonical_tool_key,
+                                     canonical_tool_key, wants_thermo_cycle,
                                      mp_lookup_requested, pixi_env_python)
 from code_gen import dependency_inferencer as _depinf
 
@@ -162,6 +163,20 @@ def _pip_installable(dep) -> Optional[bool]:
     return _PYPI_VERDICTS[key]
 
 
+def _config_error(message: str, hint: str) -> Exception:
+    """A typed ``ConfigError`` when the orchestrator is importable, else a plain one.
+
+    Mirrors ``_execution_error``'s fallback: the state machine is exercised
+    standalone in unit tests, where ``error_handler`` is not on the path, and a
+    plan-time refusal must still carry its reason there.
+    """
+    try:
+        from error_handler import ConfigError
+        return ConfigError(message, hint=hint)
+    except Exception:  # noqa: BLE001 - standalone use: plain error with the text
+        return RuntimeError(f"{message} -- {hint}")
+
+
 def _cluster_cannot_run(library: str) -> bool:
     """Whether the Slurm cluster has no way to provide ``library``'s packages.
 
@@ -186,6 +201,12 @@ def _cluster_cannot_run(library: str) -> bool:
         if dep.package.lower() in provided:
             continue
         if dep.package.lower() in _depinf.CONDA_ONLY_PACKAGES:
+            return True
+        # On PyPI, yet not gettable inside a job's wall clock (a multi-GB torch
+        # download onto a compute node). Without this the veto reads
+        # "pip-installable" as "runnable" and plans a calculator the cluster has
+        # no way to provide -- see CLUSTER_UNRUNNABLE_PACKAGES.
+        if dep.package.lower() in _depinf.CLUSTER_UNRUNNABLE_PACKAGES:
             return True
         if _pip_installable(dep) is False:
             return True
@@ -1715,6 +1736,62 @@ class StateMachine:
             libraries, dropped_unrunnable = self._runnable_toolset(libraries, driver)
             if dropped_unrunnable and primary.entry.name in dropped_unrunnable:
                 primary = self._candidate_by_name(ranked, libraries[0]) or primary
+        else:
+            # A plan that promises a CALCULATED property but attaches no engine
+            # cannot produce it, and the gap does not stay quiet: codegen fills it
+            # by inventing a calculator, which then is not in requirements.txt and
+            # is absent at run time. A NaCl2 heat-of-formation planned as Pymatgen
+            # with calculator=null reached EXECUTE and died on "No module named
+            # matgl" after trying MACE, CHGNet and M3GNet (Slurm job 2633871).
+            #
+            # Refused here rather than repaired later: BUILD's static check can stop
+            # the script computing, but it cannot conjure the engine this plan
+            # needed, so the honest outcome is to say the plan is not runnable
+            # before anything is approved, built or queued. Which capabilities count
+            # is config, not code (configs/discovery_intent_map.json), so adding a
+            # calculator-free way to answer one is a data change.
+            #
+            # "No calculator" is only fatal when the toolset is DRIVERS. Some
+            # libraries are engines in their own right -- PySCF and Psi4 compute an
+            # electronic structure themselves and need nothing attached -- while ASE
+            # and Pymatgen are the things calculators plug INTO, which is exactly
+            # what the registry's driver_library field records. Capability tags
+            # cannot tell them apart: ASE also claims electronic_structure, and
+            # believing it would refuse a legitimate self-contained PySCF band gap.
+            needs_engine = sorted(
+                set(query.capability_tags)
+                & set(_intent_map().get("capabilities_requiring_a_calculator") or []))
+            # The tag vocabulary does not cover every calculated property: an
+            # objective naming a heat of formation, or a bulk modulus, matches no
+            # keyword and falls back to property_prediction, which is deliberately
+            # NOT engine-requiring (a descriptor or a lookup lives there). So also
+            # ask the detector codegen itself uses -- it fired for the NaCl2 run,
+            # which is why that bundle carried twain_thermo.py.
+            if wants_thermo_cycle(requested_property, _first_metric_name(
+                    {"acceptance_metrics": intent.get("acceptance_metrics") or []}),
+                    intent.get("objective")):
+                needs_engine = needs_engine or ["a multi-species energy cycle"]
+            # RETRIEVING a value needs no engine, and TWAIN can now do that (the
+            # Materials Project route). Refusing a lookup because the toolset has no
+            # calculator would be refusing the correct plan.
+            if mp_lookup_requested(intent.get("objective")):
+                needs_engine = []
+            drivers = {str(c.driver_library).strip().lower()
+                       for c in load_calculators() if c.driver_library}
+            self_contained = [lib for lib in libraries
+                              if str(lib).strip().lower() not in drivers]
+            if needs_engine and not self_contained:
+                raise _config_error(
+                    f"the plan needs a calculator it does not have: "
+                    f"'{requested_property or query.capability_tags[0]}' is answered by "
+                    f"an atomistic calculation ({', '.join(needs_engine)}), but "
+                    f"discovery attached no engine and the toolset is libraries only "
+                    f"({', '.join(libraries) or 'none'}).",
+                    hint=("No provisioned engine matched this request. Either name a "
+                          "calculator the cluster has (see 'What TWAIN Can Run' on the "
+                          "home screen), ask for a quantity the libraries can answer "
+                          "directly, or retrieve the value from a database instead of "
+                          "computing it."))
 
         execution_plan = PlanSynthesizer().synthesize(
             candidate=primary,
@@ -1894,6 +1971,32 @@ class StateMachine:
                 "but MP_API_KEY is not set in the runner's environment -- the "
                 "lookup will fail until it is added to the deployment's .env "
                 "(free key: https://materialsproject.org/api).")
+        # Does the requested compound exist? A heat of formation was planned for
+        # NaCl2 -- sodium is monovalent, so the compound does not exist and no
+        # calculation of it means anything (session 96926868). Materials Project is
+        # the authority TWAIN already talks to, and zero entries there is a strong
+        # hint: measured, NaCl2 returns nothing while CaPt2, FeAl and Ni3Al all
+        # return something.
+        #
+        # A NOTE, never a veto. MP is not exhaustive and holds hypothetical phases
+        # (NaCl3 has entries), so absence is evidence, not proof -- and the
+        # researcher may be studying something genuinely new. Crystals only: MP is
+        # not the right authority for a molecule. The obvious alternative, pymatgen
+        # oxidation-state guessing, is unusable -- it calls CaPt2, FeAl and Ni3Al
+        # implausible too, so it would have blocked the CaPt2 run that later
+        # validated against MP to 1.4%.
+        sysd = intent.get("system_descriptors")
+        formula = (CodegenEngine._material_brief(
+            {"target_system": sysd}, intent) or {}).get("formula")
+        if formula and _is_periodic(sysd):
+            if mp_reference.formula_is_known(formula) is False:
+                execution_plan.safety_notes.append(
+                    f"The Materials Project has no entry for {formula}. That is not "
+                    f"proof it cannot exist -- MP is not exhaustive, and a genuinely "
+                    f"new composition would look the same -- but it is worth checking "
+                    f"the formula before spending an allocation, because a "
+                    f"calculation on a composition that cannot form returns a number "
+                    f"with nothing behind it.")
         execution_plan.summary = self._compose_plan_summary(
             intent, requested_property, libraries, calc_entry, recommendation)
 

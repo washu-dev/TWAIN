@@ -366,3 +366,72 @@ class TestPeriodicCoreFloor:
     ])
     def test_is_periodic(self, descriptors, expected):
         assert SM._is_periodic(descriptors) is expected
+
+
+class TestAPlanMustHaveSomethingToComputeWith:
+    """A plan promising a CALCULATED property needs an engine to produce it.
+
+    A NaCl2 heat of formation was planned as Pymatgen with calculator=null; codegen
+    filled the gap by inventing MACE/CHGNet/M3GNet, none of which is provisioned or
+    in requirements.txt, and the run died in EXECUTE on "No module named matgl"
+    (Slurm job 2633871). BUILD's static check can stop the script computing, but it
+    cannot conjure the engine the plan needed -- so the refusal belongs here.
+    """
+
+    def _needs(self):
+        import json
+        from pathlib import Path
+        cfg = json.loads((Path(__file__).resolve().parents[2]
+                          / "configs" / "discovery_intent_map.json").read_text())
+        return cfg["capabilities_requiring_a_calculator"]
+
+    def test_the_config_declares_which_capabilities_need_one(self):
+        needs = self._needs()
+        assert "electronic_structure" in needs and "quantum_chemistry" in needs
+        # A descriptor, a fingerprint or a lookup answers this with libraries alone
+        # -- the entire point of a library-only plan.
+        assert "property_prediction" not in needs
+
+    def test_drivers_and_self_contained_engines_are_distinguished(self):
+        """The distinction the check turns on, straight from the registry.
+
+        Capability tags cannot make it: ASE also claims electronic_structure, so
+        believing them would refuse a legitimate self-contained PySCF band gap.
+        """
+        from method_discovery.calculator_registry import load_calculators
+        drivers = {str(c.driver_library).strip().lower()
+                   for c in load_calculators() if c.driver_library}
+        assert "ase" in drivers and "pymatgen" in drivers
+        assert "pyscf" not in drivers and "psi4" not in drivers
+
+
+class TestARequestedCompositionIsSanityChecked:
+    """NaCl2 cannot exist; a number computed for it means nothing."""
+
+    def test_mp_absence_is_distinct_from_not_knowing(self, monkeypatch):
+        from cross_validation import mp_reference as mp
+
+        class Rester:
+            def __init__(self, docs): self.docs = docs
+            def search(self, **kw): return self.docs
+            def __enter__(self): return self
+            def __exit__(self, *e): return False
+
+        assert mp.formula_is_known(
+            "NaCl2", api_key="k", client_factory=lambda _k: Rester([])) is False
+        assert mp.formula_is_known(
+            "CaPt2", api_key="k", client_factory=lambda _k: Rester([{"m": 1}])) is True
+        # No key, unusable input, or a failure -> None, never False.
+        monkeypatch.delenv("MP_API_KEY", raising=False)
+        assert mp.formula_is_known("NaCl2") is None
+        assert mp.formula_is_known("", api_key="k") is None
+
+        def boom(_k):
+            raise ConnectionError("offline")
+        assert mp.formula_is_known(
+            "NaCl2", api_key="k", client_factory=boom) is None
+
+    def test_it_never_raises(self):
+        from cross_validation import mp_reference as mp
+        for bad in (None, 42, "", "   "):
+            assert mp.formula_is_known(bad, api_key="k") is None
