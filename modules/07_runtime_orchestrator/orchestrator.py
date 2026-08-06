@@ -55,7 +55,8 @@ from budget_tracker import (
     OverBudget, OverMaxIterations, OverMaxWallTime,
 )
 from retry_policy import (
-    ResilientCaller, CircuitBreaker, AlreadyOpenError, classify_error, ErrorType,
+    ResilientCaller, CircuitBreaker, RetryPolicy, AlreadyOpenError,
+    classify_error, ErrorType,
 )
 
 
@@ -116,7 +117,14 @@ class Orchestrator:
         checkpoint_dir: Optional[str] = None,
         provenance: bool = True,
         step_timeouts: bool = True,
-        step_retries: int = 0,
+        # Attempts to ADD after a transient stage failure. The machinery for this
+        # was already here -- classification, exponential backoff with jitter, the
+        # circuit breaker -- and was wired to zero, so a single blip killed a run
+        # outright: a silicon band-gap run died at INTAKE on an HTTP 403 from the
+        # model API and the researcher's manual re-run, 22 seconds later, sailed
+        # through unchanged (bd0677f6). One retry absorbs that; a genuinely wrong
+        # credential still fails, one attempt later, with the same hint.
+        step_retries: int = 1,
         # Backstops against a state machine that will not stop looping -- NOT
         # the intended limit. The state machine's own rerun controller bounds
         # the correction loop gracefully (it delivers the flagged result for
@@ -411,7 +419,17 @@ class Orchestrator:
                     return
                 raise
 
-        self.resilient_caller.execute(_step)
+        # Per-stage retry budget, sharing the run's circuit breaker so repeated
+        # failures still trip it. EXECUTE gets NONE: its work is submitting a Slurm
+        # job, and a second attempt is a second job -- another allocation, another
+        # set of results, and a first job still running that nothing is waiting on.
+        # Every other stage re-derives from artifacts already on disk, so attempting
+        # it again is the same work, not extra work.
+        retries = 0 if state == State.EXECUTE else self.step_retries
+        policy = RetryPolicy(max_retries=retries,
+                             base_delay=self.resilient_caller.retry_policy.base_delay,
+                             jitter=self.resilient_caller.retry_policy.jitter)
+        self.resilient_caller.circuit_breaker.execute(lambda: policy.execute(_step))
         if suspended:
             raise suspended["exc"]
 

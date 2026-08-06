@@ -17,6 +17,7 @@ Run from the repo root with:  pixi run pytest tests/unit/test_orchestrator.py
 import json
 import sys
 import time
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -717,3 +718,92 @@ class TestTheErrorBlockNamesItsLog:
             assert field in block, field
         # The log belongs with the other "where to look" fields, above resumable.
         assert block.index("log     :") < block.index("resumable:")
+
+
+class TestATransientStageFailureIsRetried:
+    """A blip must not cost a whole run -- but a retry must never resubmit a job.
+
+    A silicon band-gap run died at INTAKE on an HTTP 403 from the model API; the
+    researcher's manual re-run 22 seconds later sailed through unchanged
+    (bd0677f6). The apparatus to absorb that was already present -- classify_error
+    already calls a requests HTTPError transient, with backoff and a circuit
+    breaker -- and step_retries was simply 0, so every stage got exactly one
+    attempt.
+    """
+
+    def _orch(self, tmp_path, **kw):
+        from orchestrator import Orchestrator
+        return Orchestrator(
+            session_id="retry-test", state_machine=StateMachine(
+                data_path=str(tmp_path / "sm.json")),
+            checkpoint_dir=str(tmp_path), provenance=False,
+            step_timeouts=False, **kw)
+
+    def test_the_default_now_allows_one_retry(self, tmp_path):
+        assert self._orch(tmp_path).step_retries == 1
+
+    def _attempts(self, orch, state, failures):
+        """Drive _advance with a step that fails `failures` times, then succeeds."""
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] <= failures:
+                import requests
+                response = requests.Response()
+                response.status_code = 403
+                raise requests.exceptions.HTTPError("403", response=response)
+
+        with patch.object(orch.sm, "run", side_effect=lambda *a, **k: flaky()):
+            try:
+                orch._advance(state)
+            except Exception:
+                pass
+        return calls["n"]
+
+    def test_a_transient_403_is_retried_at_intake(self, tmp_path):
+        """The reported failure: one 403 then success now completes the stage."""
+        orch = self._orch(tmp_path)
+        orch.resilient_caller.retry_policy.base_delay = 0.0
+        assert self._attempts(orch, State.INTAKE, failures=1) == 2
+
+    def test_execute_is_never_retried(self, tmp_path):
+        """A second attempt at EXECUTE is a SECOND Slurm job: another allocation,
+        another set of results, and a first job nothing is waiting on."""
+        orch = self._orch(tmp_path)
+        orch.resilient_caller.retry_policy.base_delay = 0.0
+        assert self._attempts(orch, State.EXECUTE, failures=1) == 1
+
+    def test_a_permanent_failure_is_not_retried(self, tmp_path):
+        """Retrying a bug wastes time and hides it."""
+        orch = self._orch(tmp_path)
+        orch.resilient_caller.retry_policy.base_delay = 0.0
+        calls = {"n": 0}
+
+        def broken():
+            calls["n"] += 1
+            raise ValueError("a real bug")
+
+        with patch.object(orch.sm, "run", side_effect=lambda *a, **k: broken()):
+            with pytest.raises(Exception):
+                orch._advance(State.INTAKE)
+        assert calls["n"] == 1
+
+    def test_the_budget_is_bounded(self, tmp_path):
+        """A persistent transient failure still fails, after 1 + step_retries."""
+        orch = self._orch(tmp_path)
+        orch.resilient_caller.retry_policy.base_delay = 0.0
+        assert self._attempts(orch, State.INTAKE, failures=99) == 2
+
+    def test_it_can_be_turned_off(self, tmp_path):
+        orch = self._orch(tmp_path, step_retries=0)
+        assert self._attempts(orch, State.INTAKE, failures=1) == 1
+
+    def test_the_circuit_breaker_is_still_shared(self, tmp_path):
+        """Per-stage budgets must not each get a fresh breaker -- repeated stage
+        failures across a run still have to trip it."""
+        orch = self._orch(tmp_path)
+        breaker = orch.resilient_caller.circuit_breaker
+        orch.resilient_caller.retry_policy.base_delay = 0.0
+        self._attempts(orch, State.INTAKE, failures=1)
+        assert orch.resilient_caller.circuit_breaker is breaker
