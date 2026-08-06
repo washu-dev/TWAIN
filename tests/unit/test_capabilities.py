@@ -214,3 +214,59 @@ class TestItWorksOutsidePytest:
 ])
 def test_env_key_normalisation(name, expected):
     assert cap._env_key(name) == expected
+
+
+class TestHomepageTravelsWithTheEntry:
+    """A link per library, sourced from the registry rather than the app.
+
+    The URL is static identity, not probed state, so by rights it belongs beside
+    the registry entry. It is published through this table anyway for a concrete
+    reason: the API image is built from ./api alone, so configs/ is not in it and
+    the API cannot read the registries at request time. The runner already reads
+    both, so it carries the URL along with the verdict.
+    """
+
+    def test_every_registry_entry_offers_a_link(self):
+        """A screen that lists 27 things with links on some of them looks broken."""
+        missing = [f"{e['kind']}:{e['name']}" for e in cap.registry_entries()
+                   if not e.get("homepage")]
+        assert missing == [], f"no homepage for {missing}"
+
+    def test_every_url_is_absolute_http(self):
+        """A relative or mailto: value would reach Linking.openURL and fail there."""
+        for entry in cap.registry_entries():
+            url = entry["homepage"]
+            assert url.startswith(("http://", "https://")), f"{entry['name']}: {url}"
+            assert " " not in url, f"{entry['name']}: {url}"
+
+    def test_a_declared_homepage_wins_over_the_repository(self):
+        """Both fields exist on the library registry; the project's own site is the
+        better destination for someone learning what a tool is."""
+        assert cap._homepage({"homepage": "https://pymatgen.org",
+                              "repo_url": "https://github.com/materialsproject/pymatgen"}) \
+            == "https://pymatgen.org"
+
+    def test_a_repository_is_used_when_that_is_all_there_is(self):
+        assert cap._homepage({"repo_url": "https://github.com/x/y"}) \
+            == "https://github.com/x/y"
+
+    def test_a_junk_url_is_dropped_rather_than_published(self):
+        """None renders no link. A malformed one renders a link that goes nowhere."""
+        for item in ({}, {"homepage": ""}, {"homepage": "   "}, {"homepage": None},
+                     {"homepage": "pymatgen.org"}, {"homepage": "javascript:alert(1)"},
+                     {"homepage": 42}, {"repo_url": "ftp://example.com"}):
+            assert cap._homepage(item) is None, item
+
+    def test_the_url_survives_availability_resolution(self, tmp_path):
+        """resolve_availability rebuilds each row, so the field has to be carried."""
+        entry = {"kind": "library", "name": "RDKit", "import_name": "json",
+                 "homepage": "https://www.rdkit.org"}
+        row = cap.resolve_availability([entry], _fake_envs(tmp_path, ["default"]))[0]
+        assert row["homepage"] == "https://www.rdkit.org"
+
+    def test_a_registry_without_urls_still_publishes(self):
+        """The column is nullable and the app renders no link -- a registry that has
+        not been given URLs must not break the list."""
+        rows = cap.resolve_availability(
+            [{"kind": "library", "name": "Mystery", "import_name": "json"}], {})
+        assert rows[0].get("homepage") is None

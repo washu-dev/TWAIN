@@ -151,7 +151,7 @@ def list_library_availability() -> list:
         cursor.execute(
             """
             SELECT kind, name, import_name, version, description,
-                   installed, env, detail, checked_at
+                   installed, env, detail, homepage, checked_at
             FROM library_availability
             ORDER BY installed DESC, kind, name;
             """
