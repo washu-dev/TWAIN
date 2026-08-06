@@ -47,6 +47,11 @@ export const SettingsScreen: React.FC = () => {
   const { signOut } = useAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // The API health check, rehomed from the dashboard header. Its result is one
+  // line, so it reports in place rather than in a modal -- a modal was the only
+  // reason the dashboard carried MessageModal at all.
+  const [apiStatus, setApiStatus] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [kinds, setKinds] = useState<Record<string, boolean>>(
@@ -88,6 +93,23 @@ export const SettingsScreen: React.FC = () => {
       setStatus('Saving failed. Check your connection and try again.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const checkApi = async () => {
+    setChecking(true);
+    setApiStatus(null);
+    try {
+      const { status } = await apiClient.health();
+      setApiStatus(`Reachable — status: ${status}`);
+    } catch (error) {
+      // Named subject first: the raw axios message is "Network Error", which on
+      // its own does not say WHAT could not be reached -- and this row exists to
+      // be read at the moment nothing works.
+      const detail = error instanceof Error ? error.message : String(error);
+      setApiStatus(`Could not reach the API — ${detail}`);
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -164,6 +186,30 @@ export const SettingsScreen: React.FC = () => {
           {status && <Text style={styles.status}>{status}</Text>}
         </View>
 
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Diagnostics</Text>
+          <Text style={styles.sectionDesc}>
+            If the app seems stuck or a screen will not load, check that it can
+            still reach the TWAIN backend.
+          </Text>
+          <View style={styles.row}>
+            <View style={styles.rowText}>
+              <Text style={styles.rowTitle}>{APP_STRINGS.apiCheck}</Text>
+              <Text style={styles.rowDesc}>{APP_STRINGS.apiCheckDesc}</Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.checkButton, checking && styles.saveButtonBusy]}
+              onPress={checkApi}
+              disabled={checking}
+              accessibilityRole="button"
+              accessibilityLabel={APP_STRINGS.apiCheck}
+            >
+              <Text style={styles.checkButtonText}>{checking ? 'Checking…' : 'Check'}</Text>
+            </TouchableOpacity>
+          </View>
+          {apiStatus && <Text style={styles.status}>{apiStatus}</Text>}
+        </View>
+
         {loading && (
           <View style={styles.loading}>
             <ActivityIndicator size="large" color={C.washuRed} accessibilityLabel="Loading" />
@@ -192,6 +238,18 @@ const styles = StyleSheet.create({
     maxWidth: 720,
     width: '100%',
     alignSelf: 'center',
+  },
+  checkButton: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: C.washuRed,
+  },
+  checkButtonText: {
+    color: C.washuRed,
+    fontSize: 14,
+    fontWeight: '600',
   },
   backButton: {
     alignSelf: 'flex-start',

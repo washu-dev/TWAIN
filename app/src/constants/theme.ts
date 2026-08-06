@@ -115,6 +115,23 @@ export const Fonts = Platform.select({
   },
 });
 
+/**
+ * What a tile's accent stripe MEANS, so the colour carries information instead of
+ * decorating. The homepage used to alternate red/green/green/red/green with no
+ * rule behind it, which made the page look designed but told a reader nothing.
+ *
+ *   spends -- starts a run, or posts something outside TWAIN. Consequences.
+ *   reads  -- read-only. Nothing happens to anything by opening it.
+ *
+ * There is deliberately no third colour: everything else is minor enough to be an
+ * IconTile, which carries no stripe at all. A token for a case nothing uses would
+ * be vocabulary pretending to be a rule.
+ */
+export const TileAccent = {
+  spends: Colors.light.washuRed,
+  reads: Colors.light.washuGreen,
+} as const;
+
 export const Spacing = {
   half: 2,
   one: 4,
@@ -176,12 +193,18 @@ export const APP_STRINGS = {
   ssoFootnote:
     'You will be redirected to the Washington University login to authenticate. TWAIN never sees your password.',
   testButton: 'Test',
-  startSimulation: 'Start Simulation',
-  browse: 'Browse',
-  libraries: 'What TWAIN Can Run',
-  createIssue: 'Create New Issue',
+  apiCheck: 'Check API connection',
+  apiCheckDesc: 'Confirms this app can reach the TWAIN backend',
+  startSimulation: 'Start a simulation',
+  browse: 'Browse runs',
+  // Short enough for a compact tile. The screen it opens is titled "Libraries &
+  // engines", which is what it actually lists (its two sections are Calculators
+  // and Libraries); this is the label, not the description.
+  libraries: 'Libraries',
+  librariesScreenTitle: 'Libraries & engines',
+  createIssue: 'Report an issue',
   settings: 'Settings',
-  startSimulationDesc: 'Instruct a custom simulation powered by AI',
+  startSimulationDesc: 'Describe what you want computed, in plain English',
   browseDesc: 'Review completed simulations or continue one in progress',
   librariesDesc: 'Engines and libraries available on this cluster, and what needs provisioning',
   createIssueDesc: 'Report a bug or request a feature on GitHub',

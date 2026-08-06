@@ -1,15 +1,9 @@
 import React, { useState } from 'react';
-import {
-  View,
-  ScrollView,
-  StyleSheet,
-  ActivityIndicator,
-  Platform,
-} from 'react-native';
+import { View, ScrollView, StyleSheet, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Header, Footer, TileButton, MessageModal, IssueModal } from '@/components';
-import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
+import { Header, Footer, TileButton, IconTile, IssueModal } from '@/components';
+import { APP_STRINGS, Colors, Spacing, TileAccent } from '@/constants/theme';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -18,94 +12,64 @@ const C = Colors.light;
 export const DashboardScreen: React.FC = () => {
   const router = useRouter();
   const { signOut, user } = useAuth();
-  const [loading, setLoading] = useState(false);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [modalTitle, setModalTitle] = useState('');
-  const [modalMessages, setModalMessages] = useState<string[]>([]);
   const [issueModalVisible, setIssueModalVisible] = useState(false);
-
-  const showModal = (title: string, messages: string[]) => {
-    setModalTitle(title);
-    setModalMessages(messages);
-    setModalVisible(true);
-  };
-
-  const handleTestPress = async () => {
-    setLoading(true);
-    try {
-      const { status } = await apiClient.health();
-      showModal('API status', [`status: ${status}`]);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      showModal('Error', [msg]);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   return (
     <SafeAreaView style={styles.container} edges={['left', 'right', 'bottom']}>
-      <Header
-        onTestPress={handleTestPress}
-        onLoginPress={signOut}
-        loginLabel={APP_STRINGS.signOutButton}
-      />
+      {/* No API-health button here any more: it is a developer check, and it sat
+          in the most valuable space on the screen, beside Sign out. It now lives
+          in Settings, where a researcher looks when something seems wrong. */}
+      <Header onLoginPress={signOut} loginLabel={APP_STRINGS.signOutButton} />
 
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={Platform.OS !== 'web'}
       >
+        {/* One thing this screen is for. TileAccent.spends: it starts a real
+            calculation on the cluster. */}
         <TileButton
+          variant="hero"
           title={APP_STRINGS.startSimulation}
           description={APP_STRINGS.startSimulationDesc}
-          accentColor={C.washuRed}
+          accentColor={TileAccent.spends}
           onPress={() => router.push('/chat')}
         />
 
         <TileButton
           title={APP_STRINGS.browse}
           description={APP_STRINGS.browseDesc}
-          accentColor={C.washuGreen}
+          accentColor={TileAccent.reads}
           onPress={() => router.push('/browse')}
         />
 
-        <TileButton
-          title={APP_STRINGS.libraries}
-          description={APP_STRINGS.librariesDesc}
-          accentColor={C.washuGreen}
-          onPress={() => router.push('/libraries')}
-        />
-
-        <TileButton
-          title={APP_STRINGS.createIssue}
-          description={APP_STRINGS.createIssueDesc}
-          accentColor={C.washuRed}
-          onPress={() => setIssueModalVisible(true)}
-        />
-
-        <TileButton
-          title={APP_STRINGS.settings}
-          description={APP_STRINGS.settingsDesc}
-          accentColor={C.washuGreen}
-          onPress={() => router.push('/settings')}
-        />
-
-        {loading && (
-          <View style={styles.loading}>
-            <ActivityIndicator size="large" color={C.washuRed} accessibilityLabel="Loading" />
-          </View>
-        )}
+        {/* The minor three, at the weight they deserve: reachable in one tap,
+            visibly not the point of the screen. Reporting an issue keeps a label
+            rather than a stripe here, but it is still the one that leaves TWAIN
+            (it posts publicly to GitHub), which the confirmation dialog states. */}
+        <View style={styles.minorRow}>
+          <IconTile
+            label={APP_STRINGS.libraries}
+            glyph="▦"
+            hint={APP_STRINGS.librariesDesc}
+            onPress={() => router.push('/libraries')}
+          />
+          <IconTile
+            label={APP_STRINGS.createIssue}
+            glyph="⚑︎"
+            hint={APP_STRINGS.createIssueDesc}
+            onPress={() => setIssueModalVisible(true)}
+          />
+          <IconTile
+            label={APP_STRINGS.settings}
+            glyph="⚙︎"
+            hint={APP_STRINGS.settingsDesc}
+            onPress={() => router.push('/settings')}
+          />
+        </View>
       </ScrollView>
 
       <Footer />
-
-      <MessageModal
-        visible={modalVisible}
-        title={modalTitle}
-        messages={modalMessages}
-        onClose={() => setModalVisible(false)}
-      />
 
       <IssueModal
         visible={issueModalVisible}
@@ -130,9 +94,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
+    // Matches SettingsScreen. Without it the tiles ran the full width of a
+    // desktop window, which turned the three minor ones into wide, squat bars.
+    maxWidth: 720,
+    width: '100%',
+    alignSelf: 'center',
   },
-  loading: {
-    alignItems: 'center',
-    paddingVertical: Spacing.four,
+  // Three across, which is the most that stays legible and tappable at 375pt.
+  minorRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
   },
 });

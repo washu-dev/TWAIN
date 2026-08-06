@@ -5,13 +5,11 @@ import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
 const C = Colors.light;
 
 interface HeaderProps {
-  onTestPress?: () => void;
   onLoginPress?: () => void;
   loginLabel?: string;
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  onTestPress,
   onLoginPress,
   loginLabel = APP_STRINGS.loginButton,
 }) => {
@@ -26,18 +24,10 @@ export const Header: React.FC<HeaderProps> = ({
           </View>
         </View>
 
-        {/* Buttons */}
+        {/* Just the one button. The API health check that used to sit here is a
+            developer tool; it is in Settings now, so this row holds only what a
+            researcher needs from every screen. */}
         <View style={styles.buttonContainer}>
-          <TouchableOpacity
-            style={styles.buttonOutline}
-            onPress={onTestPress}
-            accessible={true}
-            accessibilityLabel={APP_STRINGS.testButton}
-            accessibilityRole="button"
-          >
-            <Text style={styles.buttonOutlineText}>{APP_STRINGS.testButton}</Text>
-          </TouchableOpacity>
-
           <TouchableOpacity
             style={styles.buttonSolid}
             onPress={onLoginPress}
@@ -91,20 +81,6 @@ const styles = StyleSheet.create({
   buttonContainer: {
     flexDirection: 'row',
     gap: Spacing.two,
-  },
-  buttonOutline: {
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderRadius: 4,
-    borderWidth: 2,
-    borderColor: C.washuWhite,
-    minWidth: 80,
-    alignItems: 'center',
-  },
-  buttonOutlineText: {
-    color: C.washuWhite,
-    fontSize: 14,
-    fontWeight: '600',
   },
   buttonSolid: {
     paddingHorizontal: Spacing.three,
