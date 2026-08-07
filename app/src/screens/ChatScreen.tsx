@@ -16,6 +16,7 @@ import { IssueModal } from '@/components/IssueModal';
 import {
   ApprovedMetric, ApprovedResources, PlanCard, parsePlanSummary,
 } from '@/components/PlanCard';
+import { PrimaryButton } from '@/components/PrimaryButton';
 import { ReportIssueModal } from '@/components/ReportIssueModal';
 import { PIPELINE_STATES, StateStepper } from '@/components/StateStepper';
 import { WallTimeField } from '@/components/WallTimeField';
@@ -26,7 +27,7 @@ import {
 } from '@/utils/duration';
 import { LinearGradient } from 'expo-linear-gradient';
 import { PressableScale } from '@/components/Motion';
-import { Colors, Elevation, Gradients, Motion, Radius, Spacing } from '@/constants/theme';
+import { Colors, Gradients, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -110,6 +111,45 @@ type SlurmDraft = {
   max_time: string;
   max_time_unit: DurationUnit;
 };
+
+/**
+ * The plan's own resource ask, in the shape the editor holds it.
+ *
+ * One definition because there were two, character-identical, seeding the
+ * approval card and the re-run card -- and "two copies of the same seeding logic"
+ * is precisely the shape of drift that has to stay impossible here: every
+ * "did the researcher edit this?" test in this file works by comparing a draft
+ * against this seed, so a seed that differs between the two cards would silently
+ * report edits nobody made on one of them.
+ */
+const seedSlurmDraft = (req: {
+  cpu_count?: number | null;
+  gpu_count?: number | null;
+  ram?: number | null;
+  max_time?: number | null;
+}): SlurmDraft => ({
+  cpu_count: String(req.cpu_count ?? 8),
+  gpu_count: String(req.gpu_count ?? 0),
+  ram: String(Math.max(MIN_RAM_GB, req.ram ?? 16)),
+  // Seeded readably: a 10-minute cap opens as 10 with "min" selected, not as
+  // 0.1666 in an hours box.
+  ...wallTimeFields(req.max_time ?? 0.17),
+});
+
+/**
+ * Did the researcher retype anything?
+ *
+ * Field by field rather than JSON.stringify: the draft is rebuilt by spreading,
+ * and a stringify comparison silently depends on key ORDER surviving that. It
+ * does today. Making correctness rest on it is how a test that is supposed to
+ * mean "nobody touched this" starts quietly answering a different question.
+ */
+const sameSlurmDraft = (a: SlurmDraft, b: SlurmDraft): boolean =>
+  a.cpu_count === b.cpu_count
+  && a.gpu_count === b.gpu_count
+  && a.ram === b.ram
+  && a.max_time === b.max_time
+  && a.max_time_unit === b.max_time_unit;
 
 export const ChatScreen: React.FC = () => {
   const router = useRouter();
@@ -226,14 +266,7 @@ export const ChatScreen: React.FC = () => {
   // suggestion — ~1 CPU per atom of the system); the researcher's edits (if
   // made on this approval card) override them, clamped to the node ceilings.
   const seededSlurmDraft: SlurmDraft | null = approvalPlan?.slurm_request
-    ? {
-        cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
-        gpu_count: String(approvalPlan.slurm_request.gpu_count ?? 0),
-        ram: String(Math.max(MIN_RAM_GB, approvalPlan.slurm_request.ram ?? 16)),
-        // Seeded readably: a 10-minute cap opens as 10 with "min" selected, not
-        // as 0.1666 in an hours box.
-        ...wallTimeFields(approvalPlan.slurm_request.max_time ?? 0.17),
-      }
+    ? seedSlurmDraft(approvalPlan.slurm_request)
     : null;
   const slurmDraft =
     slurmEdit && slurmEdit.key === approvalContent ? slurmEdit.draft : seededSlurmDraft;
@@ -260,6 +293,18 @@ export const ChatScreen: React.FC = () => {
   // Sent only when something actually differs from the plan, so an untouched card
   // records no override and the transcript does not claim an edit that never
   // happened.
+  //
+  // Compared as DRAFTS -- the strings in the boxes -- against the strings the plan
+  // seeded them with. That is an exact test of "did the researcher type something
+  // different", and it is exact precisely because it never converts: comparing the
+  // submitted numbers against the plan's numbers instead reports the app's own
+  // normalisation as the researcher's edit. A 0.17h cap seeds the editor as "10"
+  // minutes and submits as 10/60 = 0.16666..., which is not 0.17, so every
+  // untouched approval of a plan whose wall time was not a whole number of minutes
+  // recorded an amendment nobody made, and the plan card then labelled the whole
+  // Slurm ask "(yours)". The same applies to the RAM floor and the ceiling clamps.
+  const slurmEdited =
+    !!slurmDraft && !!seededSlurmDraft && !sameSlurmDraft(slurmDraft, seededSlurmDraft);
   // Whether the PLAN proposed any bar at all. Drives the heading, because "these
   // are TWAIN's figures, editable" and "TWAIN had none, supply one" are different
   // messages and the reader cannot tell them apart from two empty boxes.
@@ -394,7 +439,7 @@ export const ChatScreen: React.FC = () => {
         // Clamp each field to the cluster's per-node ceiling (when known) so
         // an over-ask can't produce an unschedulable sbatch.
         const cap = (v: number, max?: number) => (max != null ? Math.min(v, max) : v);
-        overrides = {
+        const wanted = {
           cpu_count: cap(Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8), slurmLimits?.cpu_count),
           gpu_count: cap(Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0), slurmLimits?.gpu_count),
           ram: cap(Math.max(MIN_RAM_GB, parseInt(slurmDraft.ram, 10) || MIN_RAM_GB), slurmLimits?.ram),
@@ -411,6 +456,26 @@ export const ChatScreen: React.FC = () => {
             slurmLimits?.max_time,
           ),
         };
+        // Send the patch when the researcher retyped something, OR when the
+        // figures we would actually run with differ MEANINGFULLY from the plan's
+        // own -- which happens when a ceiling or the RAM floor bit, and which
+        // still has to reach the runner or the sbatch would be unschedulable.
+        //
+        // What it must NOT count is the editor's own arithmetic. Planning stores
+        // wall time as round(minutes / 60, 4), so a 10-minute cap is 0.1667 while
+        // the editor round-trips it to 10/60 = 0.16666..., and comparing those
+        // exactly reported an amendment on essentially every sub-hour plan. Half
+        // a minute is the line: below it, no researcher could have typed the
+        // difference. Same threshold PlanCard uses to decide whether to say
+        // "(yours)", so the record and the label can never disagree.
+        const plan = approvalPlan?.slurm_request;
+        const differsFromPlan = !!plan && (
+          wanted.cpu_count !== plan.cpu_count
+          || wanted.gpu_count !== (plan.gpu_count ?? 0)
+          || wanted.ram !== plan.ram
+          || Math.abs(wanted.max_time - (plan.max_time ?? 0)) > 1 / 120
+        );
+        if (slurmEdited || differsFromPlan) overrides = wanted;
       }
       // Numbers, or null for an empty field: null is "no bar", and coercing a
       // blank to 0 would silently demand the answer be exactly zero.
@@ -465,23 +530,27 @@ export const ChatScreen: React.FC = () => {
       request: stage.state === 'INTAKE' ? openingRequest : null,
       slurm:
         AFTER_PLAN_STAGES.includes(stage.state) && approvalPlan?.slurm_request
-          ? {
-              cpu_count: String(approvalPlan.slurm_request.cpu_count ?? 8),
-              gpu_count: String(approvalPlan.slurm_request.gpu_count ?? 0),
-              ram: String(Math.max(MIN_RAM_GB, approvalPlan.slurm_request.ram ?? 16)),
-              ...wallTimeFields(approvalPlan.slurm_request.max_time ?? 0.17),
-            }
+          ? seedSlurmDraft(approvalPlan.slurm_request)
           : null,
     });
 
   const submitRerunDraft = async () => {
     if (!rerunDraft) return;
     const { state, note, request, slurm } = rerunDraft;
+    // Same rule as the approval gate: patch the resources only if the researcher
+    // actually retyped one. Omitting them leaves the approved plan's own ask in
+    // place (the API treats a missing slurm_request as "no change"), where
+    // sending an untouched echo made the runner announce "Plan approved with your
+    // edited resource request" for a re-run that changed nothing but the stage.
+    const rerunSeed = approvalPlan?.slurm_request
+      ? seedSlurmDraft(approvalPlan.slurm_request)
+      : null;
+    const slurmRetyped = !!slurm && !!rerunSeed && !sameSlurmDraft(slurm, rerunSeed);
     await handleRerun(
       state,
       request?.trim() || undefined,
       note.trim() || undefined,
-      slurm
+      slurm && slurmRetyped
         ? {
             cpu_count: Math.max(1, parseInt(slurm.cpu_count, 10) || 8),
             gpu_count: Math.max(0, parseInt(slurm.gpu_count, 10) || 0),
@@ -790,21 +859,12 @@ export const ChatScreen: React.FC = () => {
             {/* The one irreversible action here -- it spends cluster time -- so it
                 is the only gradient-filled control on the screen, and the only one
                 that answers a press physically. */}
-            <PressableScale
-              style={[styles.approveBtnWrap, busy && styles.disabled]}
+            <PrimaryButton
+              label="Approve & submit to RIS"
               onPress={() => handleApproval('approve')}
-              accessibilityRole="button"
+              disabled={busy}
               accessibilityLabel="Approve and submit to RIS"
-            >
-              <LinearGradient
-                colors={Gradients.calm}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.approveBtn}
-              >
-                <Text style={styles.approveText}>Approve &amp; submit to RIS</Text>
-              </LinearGradient>
-            </PressableScale>
+            />
             <PressableScale
               style={[styles.rejectBtn, busy && styles.disabled]}
               onPress={() => handleApproval('reject')}
@@ -865,14 +925,11 @@ export const ChatScreen: React.FC = () => {
         <View style={styles.approvalBar}>
           <Text style={styles.approvalLabel}>Run the heavy calculation now?</Text>
           <View style={styles.approvalButtons}>
-            <TouchableOpacity
-              style={[styles.approveBtn, busy && styles.disabled]}
+            <PrimaryButton
+              label="Yes, run it"
               onPress={() => handleQuickReply('yes')}
               disabled={busy}
-              accessibilityRole="button"
-            >
-              <Text style={styles.approveText}>Yes, run it</Text>
-            </TouchableOpacity>
+            />
             <TouchableOpacity
               style={[styles.rejectBtn, busy && styles.disabled]}
               onPress={() => handleQuickReply('no')}
@@ -891,14 +948,11 @@ export const ChatScreen: React.FC = () => {
             reproduce. Re-running costs another full calculation.
           </Text>
           <View style={styles.approvalButtons}>
-            <TouchableOpacity
-              style={[styles.approveBtn, busy && styles.disabled]}
+            <PrimaryButton
+              label="Accept this result"
               onPress={() => handleQuickReply('accept')}
               disabled={busy}
-              accessibilityRole="button"
-            >
-              <Text style={styles.approveText}>Accept this result</Text>
-            </TouchableOpacity>
+            />
             <TouchableOpacity
               style={[styles.neutralBtn, busy && styles.disabled]}
               onPress={() => setRerunOpen(true)}
@@ -1082,20 +1136,13 @@ export const ChatScreen: React.FC = () => {
                   )}
                 </ScrollView>
                 <View style={styles.approvalButtons}>
-                  <TouchableOpacity
-                    style={[
-                      styles.approveBtn,
-                      (busy || (rerunDraft.request !== null && !rerunDraft.request.trim()))
-                        && styles.disabled,
-                    ]}
+                  <PrimaryButton
+                    label="Re-run with this"
                     onPress={submitRerunDraft}
                     disabled={
                       busy || (rerunDraft.request !== null && !rerunDraft.request.trim())
                     }
-                    accessibilityRole="button"
-                  >
-                    <Text style={styles.approveText}>Re-run with this</Text>
-                  </TouchableOpacity>
+                  />
                   <TouchableOpacity
                     style={[styles.neutralBtn, busy && styles.disabled]}
                     onPress={() => setRerunDraft(null)}
@@ -1435,20 +1482,9 @@ const styles = StyleSheet.create({
   metricRow: { gap: Spacing.one, marginTop: Spacing.one },
   metricName: { fontSize: 13, fontWeight: '700', color: C.text },
   approvalButtons: { flexDirection: 'row', gap: Spacing.two },
-  // Wrapper carries layout, rounding and shadow; the gradient inside carries the
-  // fill. They cannot be one view -- a gradient child needs the corners clipped on
-  // the parent or it renders square inside a rounded button.
-  approveBtnWrap: {
-    flex: 1,
-    borderRadius: Radius.control,
-    overflow: 'hidden',
-    boxShadow: Elevation.card,
-  },
-  approveBtn: {
-    paddingVertical: Spacing.three,
-    alignItems: 'center',
-  },
-  approveText: { color: C.washuWhite, fontWeight: '700', fontSize: 15 },
+  // The primary action's styles live in PrimaryButton, not here. They were here,
+  // as a bare `approveBtn`, and four call sites shared them until a restyle split
+  // the fill onto an inner gradient and only one call site followed.
   rejectBtn: {
     flex: 1,
     backgroundColor: C.washuWhite,

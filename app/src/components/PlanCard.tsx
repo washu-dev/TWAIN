@@ -147,8 +147,16 @@ export const PlanCard: React.FC<{
   // Field by field: a researcher who changed only the wall time should not see
   // the CPU count relabelled as theirs.
   const slurm = proposed || approved ? { ...proposed, ...(approved ?? {}) } : undefined;
-  const changed = (key: keyof ApprovedResources) =>
-    approved?.[key] != null && proposed?.[key] != null && approved[key] !== proposed[key];
+  const changed = (key: keyof ApprovedResources) => {
+    const mine = approved?.[key];
+    const theirs = proposed?.[key];
+    if (mine == null || theirs == null) return false;
+    const a = Number(mine);
+    const b = Number(theirs);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return mine !== theirs;
+    // Half a step, not exact inequality -- see EDIT_STEP.
+    return Math.abs(a - b) > (EDIT_STEP[key] ?? 1) / 2;
+  };
   const amended = slurm
     ? (['cpu_count', 'gpu_count', 'ram', 'max_time'] as (keyof ApprovedResources)[])
         .filter(changed)
@@ -238,6 +246,28 @@ function describeMetric(m: {
 
 const FIELD_LABELS = (key: keyof ApprovedResources): string =>
   ({ cpu_count: 'CPUs', gpu_count: 'GPUs', ram: 'RAM', max_time: 'wall time' })[key];
+
+/**
+ * The precision each field can actually be EDITED at, in the field's own unit.
+ *
+ * A difference smaller than half a step cannot be something a researcher
+ * expressed, because the editor gives them no way to express it -- so it is
+ * arithmetic drift, not an amendment. Wall time is entered as a whole number of
+ * minutes, so its step is one minute; the rest are whole counts.
+ *
+ * Comparing the raw numbers with `!==` instead reported the app's OWN conversion
+ * as the researcher's edit. A plan proposing a 0.17h cap seeds the editor as
+ * "10 min" and submits as 10/60 = 0.16666..., which is not 0.17 -- so an
+ * untouched approval relabelled the whole Slurm ask "(yours)" and claimed a
+ * change nobody made. The ceiling clamps and the RAM floor did the same.
+ *
+ * Half a step rather than a full one: rounding hours to whole minutes moves a
+ * value by at most half a minute, so half a step is exactly the line between
+ * "the editor rounded this" and "someone typed a different number".
+ */
+const EDIT_STEP: Partial<Record<keyof ApprovedResources, number>> = {
+  max_time: 1 / 60,
+};
 
 const PlanRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
   <View style={styles.planRow}>
