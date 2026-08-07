@@ -211,6 +211,11 @@ export const Motion = {
   // Delay between staggered siblings. Small: a list that cascades for a second
   // is a demo, not a product.
   stagger: 45,
+  // Behind a modal. Tinted with the brand ink rather than pure black: a neutral
+  // black wash over a warm canvas greys everything behind it, where a plum-tinted
+  // one dims the page while leaving it recognisably the same page. Four modals
+  // hardcoded their own rgba(0,0,0,…) at two different opacities before this.
+  scrimColor: 'rgba(26,6,12,0.52)',
 } as const;
 
 /** Radii. Larger than the old 6px, which is what dates an interface fastest. */

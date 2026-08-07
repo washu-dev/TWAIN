@@ -7,7 +7,7 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
-import { Colors, Elevation, Radius, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -73,7 +73,7 @@ export const MessageModal: React.FC<MessageModalProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: Motion.scrimColor,
     justifyContent: 'center',
     alignItems: 'center',
     padding: Spacing.four,

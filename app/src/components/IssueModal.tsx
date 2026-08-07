@@ -10,7 +10,7 @@ import {
   Platform,
   Linking,
 } from 'react-native';
-import { Colors, Elevation, Radius, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Motion, Radius, Spacing } from '@/constants/theme';
 import type { CreatedIssue } from '@/api/client';
 
 const C = Colors.light;
@@ -198,7 +198,7 @@ export const IssueModal: React.FC<IssueModalProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: Motion.scrimColor,
     justifyContent: 'center',
     alignItems: 'center',
     padding: Spacing.four,

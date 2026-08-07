@@ -16,7 +16,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { apiClient, Conversation, ConversationStatus } from '@/api/client';
 import { useNow } from '@/hooks/useNow';
 import { formatElapsed } from '@/utils/duration';
-import { Colors, Elevation, Gradients, Radius, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Gradients, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -497,7 +497,7 @@ const styles = StyleSheet.create({
   error: { color: C.washuRed, padding: Spacing.three },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: Motion.scrimColor,
     alignItems: 'center',
     justifyContent: 'center',
     padding: Spacing.four,

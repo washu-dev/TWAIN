@@ -26,7 +26,7 @@ import {
 } from '@/utils/duration';
 import { LinearGradient } from 'expo-linear-gradient';
 import { PressableScale } from '@/components/Motion';
-import { Colors, Elevation, Gradients, Radius, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Gradients, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -1515,7 +1515,7 @@ const styles = StyleSheet.create({
   reportText: { color: C.washuWhite, fontWeight: '700', fontSize: 15 },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: Motion.scrimColor,
     alignItems: 'center',
     justifyContent: 'center',
     padding: Spacing.four,

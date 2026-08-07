@@ -17,7 +17,7 @@ import {
   IssueContext,
   RunIssue,
 } from '@/api/client';
-import { Colors, Elevation, Radius, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -309,7 +309,7 @@ const SubmittedPanel: React.FC<{ issue: RunIssue }> = ({ issue }) => {
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: Motion.scrimColor,
     justifyContent: 'center',
     alignItems: 'center',
     padding: Spacing.four,
