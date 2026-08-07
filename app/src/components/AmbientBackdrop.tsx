@@ -12,12 +12,14 @@ import { Gradients } from '@/constants/theme';
  * white surfaces laid on top read as lit rather than as paper, which is most of
  * the difference between a form and a product.
  *
- * `pointerEvents="none"` because it spans the content: without it this would eat
- * every tap on the top third of the screen. Absolutely positioned and rendered
- * first, so it sits behind siblings without needing zIndex.
+ * `pointerEvents: 'none'` because it spans the content: without it this would eat
+ * every tap on the top third of the screen. In the STYLE, not as a prop -- the
+ * prop spelling is deprecated in RN 0.85 and logged a warning on every render of
+ * every screen that uses this. Absolutely positioned and rendered first, so it
+ * sits behind siblings without needing zIndex.
  */
 export const AmbientBackdrop: React.FC<{ height?: number }> = ({ height = 260 }) => (
-  <View style={[styles.container, { height }]} pointerEvents="none">
+  <View style={[styles.container, { height }]}>
     <LinearGradient
       colors={Gradients.ambient}
       locations={Gradients.ambientLocations}
@@ -32,5 +34,6 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
+    pointerEvents: 'none',
   },
 });

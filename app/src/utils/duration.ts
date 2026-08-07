@@ -65,11 +65,20 @@ export function parseDurationHours(text: string): number | null {
   return null;
 }
 
-/** Hours rendered the way they were most likely entered ("20m", "1.5h"). */
+/**
+ * Hours rendered the way they were most likely entered ("20m", "1.5h").
+ *
+ * The trailing-zero strip is shared with :func:`splitDurationHours`, at the same
+ * precision, so a plan labelled "1.6667h" opens as 1.6667 in the editor rather
+ * than as one number in the label and another in the box. This used to read
+ * `Number.isInteger(hours) ? \`${hours}h\` : \`${hours}h\`` -- a ternary whose two
+ * branches were identical, so the guard it looked like it was applying was never
+ * applied and a raw float went straight to the screen.
+ */
 export function formatDurationHours(hours: number): string {
   if (!Number.isFinite(hours) || hours <= 0) return '';
   if (hours < 1) return `${Math.round(hours * 60)}m`;
-  return Number.isInteger(hours) ? `${hours}h` : `${hours}h`;
+  return `${parseFloat(hours.toFixed(4))}h`;
 }
 
 /** The unit a wall-time entry is expressed in. */
