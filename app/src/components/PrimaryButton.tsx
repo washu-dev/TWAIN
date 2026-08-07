@@ -74,7 +74,14 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     boxShadow: Elevation.card,
   },
+  // `flex: 1` so the gradient fills the wrapper's HEIGHT, not just its own
+  // content's. The wrapper stretches to the tallest child of the button row, and
+  // the outlined sibling it sits next to is always exactly 2px taller (same
+  // padding and type, plus a 1px border top and bottom). Without this the
+  // gradient stops short, `overflow: 'hidden'` clips it on a flat line, and the
+  // button's bottom corners lose their rounding against a transparent strip.
   fill: {
+    flex: 1,
     paddingVertical: Spacing.three,
     alignItems: 'center',
     justifyContent: 'center',

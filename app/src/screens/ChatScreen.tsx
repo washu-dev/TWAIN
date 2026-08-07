@@ -87,6 +87,37 @@ const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_approval', 'canc
 const TERMINAL_STATUSES = ['completed', 'error', 'rejected', 'cancelled'];
 const POLL_MS = 1500;
 const MIN_RAM_GB = 4;
+/** Shortest wall time either editor will submit. Advertised on the field. */
+const MIN_WALL_HOURS = 10 / 60;
+
+type SlurmNumbers = { cpu_count: number; gpu_count: number; ram: number; max_time: number };
+type SlurmCeilings = Partial<SlurmNumbers> | null;
+
+/** "Wall time — 10m–168h", or just the floor when the ceiling is unknown. */
+const wallTimeLabel = (maxHours?: number): string =>
+  maxHours != null
+    ? `Wall time — ${formatDurationHours(MIN_WALL_HOURS)}–${formatDurationHours(maxHours)}`
+    : `Wall time — min ${formatDurationHours(MIN_WALL_HOURS)}`;
+
+/**
+ * Bound a resource ask by the ceilings of the machine that will run it.
+ *
+ * One function because there were two editors and only one of them clamped. The
+ * approval card capped every field and labelled each with its maximum; the
+ * re-run form sent whatever was typed. Nothing on the server bounds it either --
+ * `apply_slurm_overrides` applies floors only -- so 5000 entered on a re-run
+ * reached sbatch verbatim as `--cpus-per-task=5000`, and the job pends forever
+ * on a 64-core node with nothing in the UI explaining why.
+ */
+const clampSlurm = (want: SlurmNumbers, limits: SlurmCeilings): SlurmNumbers => {
+  const cap = (v: number, max?: number) => (max != null ? Math.min(v, max) : v);
+  return {
+    cpu_count: cap(want.cpu_count, limits?.cpu_count),
+    gpu_count: cap(want.gpu_count, limits?.gpu_count),
+    ram: cap(want.ram, limits?.ram),
+    max_time: cap(want.max_time, limits?.max_time),
+  };
+};
 
 /**
  * One editable acceptance criterion.
@@ -251,10 +282,41 @@ export const ChatScreen: React.FC = () => {
 
   const slurmLimits = approvalPlan?.slurm_limits ?? null;
   const slurmRationale = approvalPlan?.slurm_rationale ?? null;
+
+  /**
+   * The resource figures the run is actually bounded by.
+   *
+   * The plan card shows TWAIN's PROPOSAL. If the researcher edited it at the
+   * gate, the runner patched the plan and submitted the edited numbers -- so the
+   * proposal is no longer what is in force, and anything that reports or reuses
+   * "the run's resources" has to read the approved override instead.
+   *
+   * Reading the proposal instead was wrong in two places at once: the live clock
+   * counted a 30-minute run against a 4h cap it did not have (so a job Slurm was
+   * about to kill looked like it had hours of headroom), and the re-run editor
+   * opened on the proposal, so re-running silently handed back the numbers the
+   * researcher had already overridden.
+   */
+  const approvedSlurmInForce: ApprovedResources | null = (() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].kind !== 'approval_response') continue;
+      try {
+        const slurm = JSON.parse(messages[i].content)?.slurm_request;
+        if (slurm && typeof slurm === 'object') return slurm as ApprovedResources;
+      } catch {
+        // A bare "approve"/"reject" overrode nothing; keep looking further back.
+      }
+    }
+    return null;
+  })();
+  const slurmInForce = approvalPlan?.slurm_request
+    ? { ...approvalPlan.slurm_request, ...(approvedSlurmInForce ?? {}) }
+    : null;
+
   // "12m 04s / 4h" -- how long this run has been going, against the wall-time cap
   // it was approved with. started_at is the newest run.started, so a resumed run
   // times its current slice rather than reporting the age of the conversation.
-  const wallLimitHours = approvalPlan?.slurm_request?.max_time;
+  const wallLimitHours = slurmInForce?.max_time;
   const runElapsed =
     isActive && conversation?.started_at
       ? formatElapsed((now - new Date(conversation.started_at).getTime()) / 1000)
@@ -432,30 +494,27 @@ export const ChatScreen: React.FC = () => {
     setBusy(true);
     setError(null);
     try {
-      let overrides:
-        | { cpu_count: number; gpu_count: number; ram: number; max_time: number }
-        | undefined;
+      let overrides: SlurmNumbers | undefined;
       if (decision === 'approve' && slurmDraft) {
-        // Clamp each field to the cluster's per-node ceiling (when known) so
-        // an over-ask can't produce an unschedulable sbatch.
-        const cap = (v: number, max?: number) => (max != null ? Math.min(v, max) : v);
-        const wanted = {
-          cpu_count: cap(Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8), slurmLimits?.cpu_count),
-          gpu_count: cap(Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0), slurmLimits?.gpu_count),
-          ram: cap(Math.max(MIN_RAM_GB, parseInt(slurmDraft.ram, 10) || MIN_RAM_GB), slurmLimits?.ram),
-          // The number is typed, the unit is chosen -- so there is no guessing
-          // about what a bare "10" meant. An empty or unusable entry falls back
-          // to the plan's own suggestion rather than to zero.
-          max_time: cap(
-            Math.max(
-              10 / 60,
+        // Clamped to the cluster's per-node ceilings (when known) so an over-ask
+        // can't produce an unschedulable sbatch. Same clamp as the re-run form.
+        const wanted = clampSlurm(
+          {
+            cpu_count: Math.max(1, parseInt(slurmDraft.cpu_count, 10) || 8),
+            gpu_count: Math.max(0, parseInt(slurmDraft.gpu_count, 10) || 0),
+            ram: Math.max(MIN_RAM_GB, parseInt(slurmDraft.ram, 10) || MIN_RAM_GB),
+            // The number is typed, the unit is chosen -- so there is no guessing
+            // about what a bare "10" meant. An empty or unusable entry falls back
+            // to the plan's own suggestion rather than to zero.
+            max_time: Math.max(
+              MIN_WALL_HOURS,
               durationToHours(slurmDraft.max_time, slurmDraft.max_time_unit)
                 ?? approvalPlan?.slurm_request?.max_time
                 ?? 0.17,
             ),
-            slurmLimits?.max_time,
-          ),
-        };
+          },
+          slurmLimits,
+        );
         // Send the patch when the researcher retyped something, OR when the
         // figures we would actually run with differ MEANINGFULLY from the plan's
         // own -- which happens when a ceiling or the RAM floor bit, and which
@@ -529,8 +588,8 @@ export const ChatScreen: React.FC = () => {
       note: '',
       request: stage.state === 'INTAKE' ? openingRequest : null,
       slurm:
-        AFTER_PLAN_STAGES.includes(stage.state) && approvalPlan?.slurm_request
-          ? seedSlurmDraft(approvalPlan.slurm_request)
+        AFTER_PLAN_STAGES.includes(stage.state) && slurmInForce
+          ? seedSlurmDraft(slurmInForce)
           : null,
     });
 
@@ -538,30 +597,33 @@ export const ChatScreen: React.FC = () => {
     if (!rerunDraft) return;
     const { state, note, request, slurm } = rerunDraft;
     // Same rule as the approval gate: patch the resources only if the researcher
-    // actually retyped one. Omitting them leaves the approved plan's own ask in
-    // place (the API treats a missing slurm_request as "no change"), where
-    // sending an untouched echo made the runner announce "Plan approved with your
-    // edited resource request" for a re-run that changed nothing but the stage.
-    const rerunSeed = approvalPlan?.slurm_request
-      ? seedSlurmDraft(approvalPlan.slurm_request)
-      : null;
+    // actually retyped one, compared against the figures the form was seeded with
+    // -- which are the ones in force, not the plan's original proposal. Omitting
+    // them leaves the approved plan alone (the API treats a missing slurm_request
+    // as "no change"), where sending an untouched echo overwrote the researcher's
+    // approved numbers with TWAIN's and called the revert "your edited resource
+    // request" in the transcript.
+    const rerunSeed = slurmInForce ? seedSlurmDraft(slurmInForce) : null;
     const slurmRetyped = !!slurm && !!rerunSeed && !sameSlurmDraft(slurm, rerunSeed);
     await handleRerun(
       state,
       request?.trim() || undefined,
       note.trim() || undefined,
       slurm && slurmRetyped
-        ? {
-            cpu_count: Math.max(1, parseInt(slurm.cpu_count, 10) || 8),
-            gpu_count: Math.max(0, parseInt(slurm.gpu_count, 10) || 0),
-            ram: Math.max(MIN_RAM_GB, parseInt(slurm.ram, 10) || MIN_RAM_GB),
-            max_time: Math.max(
-              10 / 60,
-              durationToHours(slurm.max_time, slurm.max_time_unit)
-                ?? approvalPlan?.slurm_request?.max_time
-                ?? 0.17,
-            ),
-          }
+        ? clampSlurm(
+            {
+              cpu_count: Math.max(1, parseInt(slurm.cpu_count, 10) || 8),
+              gpu_count: Math.max(0, parseInt(slurm.gpu_count, 10) || 0),
+              ram: Math.max(MIN_RAM_GB, parseInt(slurm.ram, 10) || MIN_RAM_GB),
+              max_time: Math.max(
+                MIN_WALL_HOURS,
+                durationToHours(slurm.max_time, slurm.max_time_unit)
+                  ?? slurmInForce?.max_time
+                  ?? 0.17,
+              ),
+            },
+            slurmLimits,
+          )
         : undefined,
     );
   };
@@ -791,8 +853,13 @@ export const ChatScreen: React.FC = () => {
                   column with RAM clipped the unit buttons off the right edge of a
                   375pt phone, which is the width this card is most used at. */}
               <View style={styles.slurmRow}>
+                {/* The MINIMUM is advertised, as RAM's is. Both fields are
+                    floored on submit, and a floor the reader cannot see is worse
+                    than no floor: a 5-minute entry came back as "Slurm ask
+                    (yours) … 10m wall", attributing to the researcher a number
+                    they did not choose and were never told about. */}
                 <WallTimeField
-                  label={`Wall time${slurmLimits?.max_time != null ? ` — max ${formatDurationHours(slurmLimits.max_time)}` : ''}`}
+                  label={wallTimeLabel(slurmLimits?.max_time)}
                   value={slurmDraft.max_time}
                   unit={slurmDraft.max_time_unit}
                   onChange={(v, u) =>
@@ -1122,7 +1189,7 @@ export const ChatScreen: React.FC = () => {
                         }
                       />
                       <WallTimeField
-                        label="Wall time"
+                        label={wallTimeLabel(slurmLimits?.max_time)}
                         value={rerunDraft.slurm.max_time}
                         unit={rerunDraft.slurm.max_time_unit}
                         onChange={(v, u) =>

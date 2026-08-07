@@ -347,8 +347,14 @@ const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
   const color =
     status === 'completed' ? C.washuGreen : status === 'error' ? C.washuRed : C.textSecondary;
   return (
+    // White stated here, not in statusBadgeText: that style is shared with the
+    // validation verdict chip, which the visual pass converted to a TINTED
+    // background with matching dark text. Moving the colour out of the shared
+    // style fixed the chip and left this pill -- which still fills solid -- with
+    // default black on dark green, red or grey. Each call site now names the
+    // colour its own background needs.
     <View style={[styles.statusBadge, { backgroundColor: color }]}>
-      <Text style={styles.statusBadgeText}>{status}</Text>
+      <Text style={[styles.statusBadgeText, { color: C.washuWhite }]}>{status}</Text>
     </View>
   );
 };

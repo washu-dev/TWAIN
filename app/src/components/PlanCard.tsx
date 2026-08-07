@@ -139,9 +139,13 @@ export const PlanCard: React.FC<{
   // resources do: this card is the record of a run, and the run used yours.
   const proposedMetrics = plan.acceptance_metrics ?? [];
   const metrics = approvedMetrics?.length ? approvedMetrics : proposedMetrics;
+  // Compared field by field, not by describeMetric's SENTENCE. The sentence for
+  // a metric with no target is "<name> — no target set", which says nothing about
+  // the tolerance -- so a researcher who set a tolerance under a null target had
+  // their edit recorded and then not acknowledged anywhere on the card.
   const metricsAmended = !!approvedMetrics?.length
-    && JSON.stringify(approvedMetrics.map(describeMetric))
-       !== JSON.stringify(proposedMetrics.map(describeMetric));
+    && JSON.stringify(approvedMetrics.map(metricIdentity))
+       !== JSON.stringify(proposedMetrics.map(metricIdentity));
   const notes = plan.safety_notes ?? [];
   const proposed = plan.slurm_request;
   // Field by field: a researcher who changed only the wall time should not see
@@ -233,6 +237,15 @@ export const PlanCard: React.FC<{
  * "bandgap ≈ null ± null", which reads as a bug rather than as "nothing to check
  * this against". Say the latter, since it is what actually happens at VALIDATE.
  */
+/** Every field that makes a metric what it is, for comparison rather than display. */
+function metricIdentity(m: {
+  metric_name?: string;
+  target_value?: number | null;
+  tolerance?: number | null;
+}): string {
+  return `${m.metric_name ?? ''}|${m.target_value ?? ''}|${m.tolerance ?? ''}`;
+}
+
 function describeMetric(m: {
   metric_name?: string;
   target_value?: number | null;

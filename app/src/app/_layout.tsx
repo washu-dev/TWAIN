@@ -59,6 +59,12 @@ function RootNavigator() {
         <Stack.Screen name="libraries" options={{ title: 'What TWAIN can run' }} />
         <Stack.Screen name="report" options={{ title: 'Report' }} />
         <Stack.Screen name="settings" options={{ title: 'Settings' }} />
+        {/* Same reason as the deep link below: signing out is what REMOVES these
+            screens -- signOut only clears session state, it never navigates. Left
+            outside the guard, the tutorial stayed mounted after sign-out, still
+            offering a "Sign out" button that did nothing and a "Start a
+            simulation" button pointing at a route no longer in the navigator. */}
+        <Stack.Screen name="tutorial" options={{ title: 'How TWAIN works' }} />
         {/* The notification emails' deep link (/conversations/<id>). Expo Router
             registers every file route whether or not it is named here, so leaving
             it out did not make it public-by-omission -- it made it reachable
