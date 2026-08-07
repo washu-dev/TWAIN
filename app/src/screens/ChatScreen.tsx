@@ -19,7 +19,7 @@ import {
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { ReportIssueModal } from '@/components/ReportIssueModal';
 import { PIPELINE_STATES, StateStepper } from '@/components/StateStepper';
-import { WallTimeField } from '@/components/WallTimeField';
+import { MIN_WALL_HOURS, WallTimeField, wallTimeLabel } from '@/components/WallTimeField';
 import { useAuth } from '@/hooks/useAuth';
 import { useNow } from '@/hooks/useNow';
 import {
@@ -87,17 +87,8 @@ const ACTIVE_STATUSES = ['running', 'awaiting_input', 'awaiting_approval', 'canc
 const TERMINAL_STATUSES = ['completed', 'error', 'rejected', 'cancelled'];
 const POLL_MS = 1500;
 const MIN_RAM_GB = 4;
-/** Shortest wall time either editor will submit. Advertised on the field. */
-const MIN_WALL_HOURS = 10 / 60;
-
 type SlurmNumbers = { cpu_count: number; gpu_count: number; ram: number; max_time: number };
 type SlurmCeilings = Partial<SlurmNumbers> | null;
-
-/** "Wall time — 10m–168h", or just the floor when the ceiling is unknown. */
-const wallTimeLabel = (maxHours?: number): string =>
-  maxHours != null
-    ? `Wall time — ${formatDurationHours(MIN_WALL_HOURS)}–${formatDurationHours(maxHours)}`
-    : `Wall time — min ${formatDurationHours(MIN_WALL_HOURS)}`;
 
 /**
  * Bound a resource ask by the ceilings of the machine that will run it.

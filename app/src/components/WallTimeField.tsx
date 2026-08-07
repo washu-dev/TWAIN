@@ -1,9 +1,32 @@
 import React from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
 import { Colors, Radius, Spacing } from '@/constants/theme';
-import { DurationUnit } from '@/utils/duration';
+import { DurationUnit, formatDurationHours } from '@/utils/duration';
 
 const C = Colors.light;
+
+/**
+ * Shortest wall time this field will submit. Anything below it is raised.
+ *
+ * Lives with the field rather than with the screen that clamps, so the number
+ * enforced on submit and the number printed on the label cannot disagree.
+ */
+export const MIN_WALL_HOURS = 10 / 60;
+
+/**
+ * The field's label: "Wall time — 10m–168h", or just the floor when the ceiling
+ * is unknown.
+ *
+ * Generated rather than written out, because a hand-written one goes stale. The
+ * tutorial carried `label="Wall time — max 168h"` while the real field had begun
+ * showing its minimum too -- on a screen whose whole premise is that the example
+ * IS the control, not a picture of it, and which is the only place a researcher
+ * is told what the field means.
+ */
+export const wallTimeLabel = (maxHours?: number): string =>
+  maxHours != null
+    ? `Wall time — ${formatDurationHours(MIN_WALL_HOURS)}–${formatDurationHours(maxHours)}`
+    : `Wall time — min ${formatDurationHours(MIN_WALL_HOURS)}`;
 
 interface WallTimeFieldProps {
   label: string;

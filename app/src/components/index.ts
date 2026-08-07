@@ -7,7 +7,7 @@ export { PressableScale, Reveal } from './Motion';
 export { PrimaryButton } from './PrimaryButton';
 export { PlanCard, parsePlanSummary } from './PlanCard';
 export { PIPELINE_STATES, StateStepper } from './StateStepper';
-export { WallTimeField } from './WallTimeField';
+export { MIN_WALL_HOURS, WallTimeField, wallTimeLabel } from './WallTimeField';
 export { WashUShield } from './WashUShield';
 export { MessageModal } from './MessageModal';
 export { IssueModal } from './IssueModal';
