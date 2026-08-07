@@ -15,7 +15,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useConversationStream } from '@/hooks/useConversationStream';
 import { canCopy, copyText } from '@/utils/clipboard';
 import { formatDurationHours, formatElapsed } from '@/utils/duration';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -682,7 +682,7 @@ const styles = StyleSheet.create({
   copyBtn: {
     paddingVertical: Spacing.one,
     paddingHorizontal: Spacing.two,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     borderWidth: 1,
     borderColor: C.textSecondary,
     backgroundColor: C.washuWhite,

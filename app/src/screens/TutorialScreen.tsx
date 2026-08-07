@@ -11,7 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Footer, Header, PlanCard, StateStepper, WallTimeField } from '@/components';
-import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 import { DurationUnit } from '@/utils/duration';
 
@@ -402,7 +402,7 @@ export const TutorialScreen: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.washuLightGray },
+  container: { flex: 1, backgroundColor: C.canvas },
   scroll: { flex: 1 },
   content: {
     flexGrow: 1,
@@ -429,7 +429,7 @@ const styles = StyleSheet.create({
   },
   section: {
     backgroundColor: C.background,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     borderWidth: 1,
     borderColor: C.border,
     marginBottom: Spacing.two,
@@ -465,8 +465,8 @@ const styles = StyleSheet.create({
     marginTop: Spacing.two,
     gap: Spacing.two,
     padding: Spacing.two,
-    backgroundColor: C.washuLightGray,
-    borderRadius: 6,
+    backgroundColor: C.canvas,
+    borderRadius: Radius.card,
   },
   caption: { fontSize: 11, color: C.textSecondary, fontStyle: 'italic', lineHeight: 16 },
   demoBox: { gap: Spacing.two },
@@ -477,7 +477,7 @@ const styles = StyleSheet.create({
   cta: {
     marginTop: Spacing.three,
     backgroundColor: C.washuGreen,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingVertical: Spacing.three,
     alignItems: 'center',
   },

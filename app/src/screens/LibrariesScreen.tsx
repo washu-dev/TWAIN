@@ -13,7 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { apiClient, LibraryAvailability, LibraryInfo } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
-import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -279,7 +279,7 @@ const styles = StyleSheet.create({
   row: {
     borderLeftWidth: 3,
     backgroundColor: C.backgroundElement,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     padding: Spacing.two,
     marginBottom: Spacing.one,
     gap: 2,
@@ -299,7 +299,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.two,
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     backgroundColor: C.background,
   },
   searchIcon: { fontSize: 16, color: C.textSecondary },

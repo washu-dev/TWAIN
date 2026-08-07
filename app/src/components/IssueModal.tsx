@@ -10,7 +10,7 @@ import {
   Platform,
   Linking,
 } from 'react-native';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Radius, Spacing } from '@/constants/theme';
 import type { CreatedIssue } from '@/api/client';
 
 const C = Colors.light;
@@ -205,15 +205,11 @@ const styles = StyleSheet.create({
   },
   dialog: {
     backgroundColor: C.background,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     width: Platform.OS === 'web' ? 480 : '100%',
     maxWidth: 520,
     overflow: 'hidden',
-    shadowColor: C.shadow,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 12,
-    elevation: 8,
+    boxShadow: Elevation.card,
   },
   header: {
     backgroundColor: C.washuRed,
@@ -240,7 +236,7 @@ const styles = StyleSheet.create({
   input: {
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     fontSize: 15,

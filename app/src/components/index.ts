@@ -2,6 +2,8 @@ export { Header } from './Header';
 export { Footer } from './Footer';
 export { TileButton } from './TileButton';
 export { IconTile } from './IconTile';
+export { AmbientBackdrop } from './AmbientBackdrop';
+export { PressableScale, Reveal } from './Motion';
 export { PlanCard, parsePlanSummary } from './PlanCard';
 export { PIPELINE_STATES, StateStepper } from './StateStepper';
 export { WallTimeField } from './WallTimeField';

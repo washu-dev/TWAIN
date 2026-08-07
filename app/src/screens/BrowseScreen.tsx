@@ -14,7 +14,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { apiClient, Conversation, ConversationStatus } from '@/api/client';
 import { useNow } from '@/hooks/useNow';
 import { formatElapsed } from '@/utils/duration';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -475,7 +475,7 @@ const styles = StyleSheet.create({
   modalCancel: {
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     borderWidth: 1,
     borderColor: C.border,
   },
@@ -483,7 +483,7 @@ const styles = StyleSheet.create({
   modalDelete: {
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     backgroundColor: C.washuRed,
   },
   modalDeleteText: { fontSize: 15, fontWeight: '700', color: C.washuWhite },

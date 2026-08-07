@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Radius, Spacing } from '@/constants/theme';
 import { DurationUnit } from '@/utils/duration';
 
 const C = Colors.light;
@@ -78,7 +78,7 @@ const styles = StyleSheet.create({
   input: {
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     paddingHorizontal: Spacing.two,
     paddingVertical: Spacing.one,
     backgroundColor: C.washuWhite,
@@ -91,7 +91,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     overflow: 'hidden',
     backgroundColor: C.washuWhite,
   },

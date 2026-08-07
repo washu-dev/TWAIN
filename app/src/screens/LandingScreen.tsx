@@ -10,7 +10,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Footer, WashUShield } from '@/components';
-import { APP_STRINGS, Colors, LANDING_CONTENT, MaxContentWidth, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Elevation, LANDING_CONTENT, MaxContentWidth, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -132,7 +132,7 @@ const GREEN = Colors.light.washuGreen;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: C.washuLightGray,
+    backgroundColor: C.canvas,
   },
   scroll: {
     flex: 1,
@@ -197,7 +197,7 @@ const styles = StyleSheet.create({
   heroCta: {
     marginTop: Spacing.two,
     backgroundColor: C.background,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingVertical: Spacing.three,
     paddingHorizontal: Spacing.five,
   },
@@ -279,16 +279,12 @@ const styles = StyleSheet.create({
     flexBasis: '47%',
     minWidth: 240,
     backgroundColor: C.background,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     borderWidth: 1,
     borderColor: C.border,
     padding: Spacing.three,
     gap: Spacing.two,
-    shadowColor: C.shadow,
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
+    boxShadow: Elevation.card,
   },
   cardAccent: {
     width: 36,
@@ -310,17 +306,13 @@ const styles = StyleSheet.create({
   // Sign-in callout
   signInCallout: {
     backgroundColor: C.background,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     borderTopWidth: 4,
     borderTopColor: RED,
     padding: Spacing.four,
     alignItems: 'center',
     gap: Spacing.three,
-    shadowColor: C.shadow,
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    elevation: 2,
+    boxShadow: Elevation.card,
   },
   signInHeading: {
     fontSize: 20,
@@ -337,7 +329,7 @@ const styles = StyleSheet.create({
   },
   signInCta: {
     backgroundColor: RED,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingVertical: Spacing.three,
     paddingHorizontal: Spacing.five,
   },

@@ -1,6 +1,7 @@
 import React from 'react';
-import { Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { Colors, Spacing } from '@/constants/theme';
+import { Text, StyleSheet } from 'react-native';
+import { Colors, Elevation, Radius, Spacing } from '@/constants/theme';
+import { PressableScale } from './Motion';
 
 const C = Colors.light;
 
@@ -24,10 +25,9 @@ interface IconTileProps {
  * in one row: reachable, and visibly not the point of the screen.
  */
 export const IconTile: React.FC<IconTileProps> = ({ label, glyph, hint, onPress }) => (
-  <TouchableOpacity
+  <PressableScale
     style={styles.container}
     onPress={onPress}
-    activeOpacity={0.75}
     accessible
     accessibilityLabel={label}
     accessibilityHint={hint}
@@ -42,7 +42,7 @@ export const IconTile: React.FC<IconTileProps> = ({ label, glyph, hint, onPress 
     <Text style={styles.label} numberOfLines={2}>
       {label}
     </Text>
-  </TouchableOpacity>
+  </PressableScale>
 );
 
 const styles = StyleSheet.create({
@@ -54,9 +54,10 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.four,
     paddingHorizontal: Spacing.one,
     backgroundColor: C.background,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     borderWidth: 1,
-    borderColor: C.border,
+    borderColor: 'rgba(26,6,12,0.06)',
+    boxShadow: Elevation.card,
     // Comfortably past the 44pt touch minimum. "Minor" is about rank on the page,
     // not about being small enough to miss with a thumb.
     minHeight: 96,
