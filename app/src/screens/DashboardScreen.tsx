@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { View, ScrollView, StyleSheet, Platform } from 'react-native';
+import { ScrollView, StyleSheet, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Header, Footer, TileButton, IconTile, IssueModal } from '@/components';
+import {
+  AmbientBackdrop, Footer, Header, IconTile, IssueModal, Reveal, TileButton,
+} from '@/components';
 import { APP_STRINGS, Colors, Spacing, TileAccent } from '@/constants/theme';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
@@ -21,40 +23,51 @@ export const DashboardScreen: React.FC = () => {
           in Settings, where a researcher looks when something seems wrong. */}
       <Header onLoginPress={signOut} loginLabel={APP_STRINGS.signOutButton} />
 
+      {/* Behind the scroll, not inside it: the wash belongs to the screen, so it
+          must not slide away when the content moves. */}
+      <AmbientBackdrop />
+
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={Platform.OS !== 'web'}
       >
         {/* One thing this screen is for. TileAccent.spends: it starts a real
-            calculation on the cluster. */}
-        <TileButton
-          variant="hero"
-          title={APP_STRINGS.startSimulation}
-          description={APP_STRINGS.startSimulationDesc}
-          accentColor={TileAccent.spends}
-          onPress={() => router.push('/chat')}
-        />
+            calculation on the cluster. Reveal index 0 -- it arrives first, which
+            is also the reading order. */}
+        <Reveal index={0}>
+          <TileButton
+            variant="hero"
+            title={APP_STRINGS.startSimulation}
+            description={APP_STRINGS.startSimulationDesc}
+            accentColor={TileAccent.spends}
+            onPress={() => router.push('/chat')}
+          />
+        </Reveal>
 
-        <TileButton
-          title={APP_STRINGS.browse}
-          description={APP_STRINGS.browseDesc}
-          accentColor={TileAccent.reads}
-          onPress={() => router.push('/browse')}
-        />
+        <Reveal index={1}>
+          <TileButton
+            title={APP_STRINGS.browse}
+            description={APP_STRINGS.browseDesc}
+            accentColor={TileAccent.reads}
+            onPress={() => router.push('/browse')}
+          />
+        </Reveal>
 
-        <TileButton
-          title={APP_STRINGS.tutorial}
-          description={APP_STRINGS.tutorialDesc}
-          accentColor={TileAccent.reads}
-          onPress={() => router.push('/tutorial')}
-        />
+        <Reveal index={2}>
+          <TileButton
+            title={APP_STRINGS.tutorial}
+            description={APP_STRINGS.tutorialDesc}
+            accentColor={TileAccent.reads}
+            onPress={() => router.push('/tutorial')}
+          />
+        </Reveal>
 
         {/* The minor three, at the weight they deserve: reachable in one tap,
             visibly not the point of the screen. Reporting an issue keeps a label
             rather than a stripe here, but it is still the one that leaves TWAIN
             (it posts publicly to GitHub), which the confirmation dialog states. */}
-        <View style={styles.minorRow}>
+        <Reveal index={3} style={styles.minorRow}>
           <IconTile
             label={APP_STRINGS.libraries}
             glyph="▦"
@@ -73,7 +86,7 @@ export const DashboardScreen: React.FC = () => {
             hint={APP_STRINGS.settingsDesc}
             onPress={() => router.push('/settings')}
           />
-        </View>
+        </Reveal>
       </ScrollView>
 
       <Footer />
@@ -91,7 +104,7 @@ export const DashboardScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: C.washuLightGray,
+    backgroundColor: C.canvas,
   },
   scroll: {
     flex: 1,

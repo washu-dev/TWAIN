@@ -9,11 +9,13 @@ import {
   ActivityIndicator,
   Linking,
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { AmbientBackdrop, Reveal } from '@/components';
 import { useRouter } from 'expo-router';
 import { apiClient, LibraryAvailability, LibraryInfo } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
-import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Elevation, Gradients, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -122,7 +124,13 @@ export const LibrariesScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      <View style={styles.topBar}>
+      <LinearGradient
+        colors={Gradients.brandHeader}
+        locations={Gradients.brandHeaderLocations}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.topBar}
+      >
         <TouchableOpacity
           onPress={() => (router.canGoBack() ? router.back() : router.replace('/dashboard'))}
           accessibilityRole="button"
@@ -131,7 +139,9 @@ export const LibrariesScreen: React.FC = () => {
         </TouchableOpacity>
         <Text style={styles.title}>{APP_STRINGS.librariesScreenTitle}</Text>
         <View style={{ width: 48 }} />
-      </View>
+      </LinearGradient>
+
+      <AmbientBackdrop />
 
       {/* Outside the ScrollView on purpose: a filter you have to scroll back up to
           reach stops being used. Only shown once there is something to filter. */}
@@ -197,31 +207,46 @@ export const LibrariesScreen: React.FC = () => {
             </Text>
           )}
 
-          {SECTIONS.map((section) => {
+          {SECTIONS.map((section, index) => {
             const items = matches.filter((row) => row.kind === section.kind);
             if (items.length === 0) return null;
             return (
-              <View key={section.kind} style={styles.section}>
+              <Reveal key={section.kind} index={index} style={styles.section}>
                 <Text style={styles.sectionTitle}>{section.title}</Text>
                 <Text style={styles.sectionBlurb}>{section.blurb}</Text>
                 {items.map((item) => (
-                  <View
-                    key={`${item.kind}:${item.name}`}
-                    style={[
-                      styles.row,
-                      { borderLeftColor: item.installed ? C.washuGreen : C.textSecondary },
-                    ]}
-                  >
+                  <View key={`${item.kind}:${item.name}`} style={styles.row}>
+                    {/* Availability as an edge bar plus a chip -- the same pair
+                        Browse uses for status, because this list is scanned the
+                        same way: "what can I actually run right now?" */}
+                    <View
+                      style={[
+                        styles.rowAccent,
+                        { backgroundColor: item.installed ? C.washuGreen : C.borderStrong },
+                      ]}
+                    />
+                    <View style={styles.rowBody}>
                     <View style={styles.rowHead}>
                       <Text style={styles.rowName}>{item.name}</Text>
-                      <Text
+                      <View
                         style={[
                           styles.badge,
-                          { color: item.installed ? C.washuGreen : C.textSecondary },
+                          {
+                            backgroundColor: item.installed
+                              ? `${C.washuGreen}16`
+                              : 'rgba(26,6,12,0.05)',
+                          },
                         ]}
                       >
-                        {item.installed ? 'installed' : 'not installed'}
-                      </Text>
+                        <Text
+                          style={[
+                            styles.badgeText,
+                            { color: item.installed ? C.washuGreen : C.textSecondary },
+                          ]}
+                        >
+                          {item.installed ? 'installed' : 'not installed'}
+                        </Text>
+                      </View>
                     </View>
                     {!!item.version && <Text style={styles.rowMeta}>{`v${item.version}`}</Text>}
                     {!!item.description && (
@@ -245,9 +270,10 @@ export const LibrariesScreen: React.FC = () => {
                         </Text>
                       </TouchableOpacity>
                     )}
+                    </View>
                   </View>
                 ))}
-              </View>
+              </Reveal>
             );
           })}
         </ScrollView>
@@ -264,7 +290,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
-    backgroundColor: C.washuRed,
+    borderBottomWidth: 2,
+    borderBottomColor: 'rgba(33,87,50,0.9)',
   },
   back: { color: C.washuWhite, fontSize: 16, fontWeight: '600', width: 48 },
   title: { color: C.washuWhite, fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
@@ -277,16 +304,27 @@ const styles = StyleSheet.create({
   sectionTitle: { color: C.text, fontSize: 17, fontWeight: '700' },
   sectionBlurb: { color: C.textSecondary, fontSize: 13, marginBottom: Spacing.one },
   row: {
-    borderLeftWidth: 3,
-    backgroundColor: C.backgroundElement,
-    borderRadius: 6,
-    padding: Spacing.two,
-    marginBottom: Spacing.one,
-    gap: 2,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    backgroundColor: C.background,
+    borderRadius: Radius.card,
+    borderWidth: 1,
+    borderColor: 'rgba(26,6,12,0.06)',
+    overflow: 'hidden',
+    boxShadow: Elevation.card,
+    marginBottom: Spacing.two,
   },
-  rowHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  rowAccent: { width: 3 },
+  rowBody: { flex: 1, padding: Spacing.two, gap: 2 },
+  rowHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+  },
   rowName: { color: C.text, fontSize: 15, fontWeight: '600', flexShrink: 1 },
-  badge: { fontSize: 12, fontWeight: '700' },
+  badge: { paddingHorizontal: Spacing.two, paddingVertical: 2, borderRadius: Radius.pill },
+  badgeText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
   rowMeta: { color: C.textSecondary, fontSize: 12 },
   rowDesc: { color: C.text, fontSize: 13, lineHeight: 18 },
   rowDetail: { color: C.textSecondary, fontSize: 12, fontStyle: 'italic' },
@@ -299,7 +337,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.two,
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     backgroundColor: C.background,
   },
   searchIcon: { fontSize: 16, color: C.textSecondary },

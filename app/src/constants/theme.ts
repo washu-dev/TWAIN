@@ -31,6 +31,14 @@ export const Colors = {
     washuGreen: '#215732',     // Secondary — Pantone 350
     washuWhite: '#FFFFFF',
     washuLightGray: '#F2F2F2',
+
+    // The page canvas. Deliberately NOT washuLightGray (#F2F2F2): a flat cool
+    // grey behind white cards is what makes an interface read as a form, because
+    // the two surfaces have no relationship. This is a warm near-white a couple
+    // of degrees off the card white, so cards sit ON something rather than being
+    // holes cut in grey. Brand tokens keep their exact values -- this is a new
+    // name, not a redefinition of WashU's palette.
+    canvas: '#FAF8F8',
     washuDarkGray: '#333333',
 
     // Structure. `border` is the default 1px rule; `borderStrong` is for the few
@@ -127,6 +135,97 @@ export const Fonts = Platform.select({
  * IconTile, which carries no stripe at all. A token for a case nothing uses would
  * be vocabulary pretending to be a rule.
  */
+/**
+ * The visual language layered over the brand palette: gradients, depth, motion.
+ *
+ * Kept as tokens rather than inline values so "make it feel more premium" is a
+ * change in one file instead of forty call sites -- and so the restraint is
+ * enforceable. Three rules hold this together:
+ *
+ *   1. WashU red stays THE accent. Saturation comes from using it deliberately
+ *      against desaturated surfaces, not from adding new hues. A university
+ *      product that invents its own palette stops looking like the university's.
+ *   2. Gradients are for AMBIENCE, not decoration -- large, low-contrast washes
+ *      behind content. A gradient the eye can resolve into two colours reads as
+ *      a 2010s button; one it reads as "slightly warm here" reads as depth.
+ *   3. Shadows are layered and tinted with the brand ink, never neutral black at
+ *      high opacity. Two soft layers (a tight contact shadow plus a wide
+ *      diffuse one) is what separates "raised" from "outlined".
+ */
+export const Gradients = {
+  // The masthead. Deep crimson into near-black plum, so the white wordmark sits
+  // on the darkest corner and the light edge falls where content begins.
+  brandHeader: ['#8E0A24', '#BA0C2F', '#6E0A2A'] as const,
+  brandHeaderLocations: [0, 0.55, 1] as const,
+  // The primary action. Lifts on the diagonal so the arrow end is brightest.
+  action: ['#C8102E', '#A00C28'] as const,
+  // Read-only surfaces: the brand green, kept quiet.
+  calm: ['#27633A', '#1B4A2A'] as const,
+  // The page wash. Barely-there warm tint at the top of a scroll, fading out --
+  // this is the "ambiance", and it is deliberately almost invisible: at these
+  // opacities it reads as light in the room rather than as a coloured panel.
+  ambient: ['rgba(186,12,47,0.085)', 'rgba(186,12,47,0.030)', 'rgba(250,248,248,0)'] as const,
+  ambientLocations: [0, 0.5, 1] as const,
+  // Glass-ish overlay for a bar sitting over content. Not a real blur: web has
+  // no backdrop-filter through react-native-web, so this is an honest scrim.
+  scrim: ['rgba(255,255,255,0)', 'rgba(255,255,255,0.86)', 'rgba(255,255,255,0.98)'] as const,
+} as const;
+
+/**
+ * Layered elevation. `card` is the resting state, `raised` the hover/press
+ * response, `hero` the one element per screen that should feel closest.
+ *
+ * Shadows are tinted with the brand ink (a plum-black) rather than pure black:
+ * neutral black over a warm-white surface reads as grey dirt, a tinted shadow
+ * reads as depth. Values are RN 0.85 `boxShadow`, which react-native-web
+ * forwards to CSS -- so one declaration covers native and web.
+ */
+export const Elevation = {
+  card: '0px 1px 2px rgba(26,6,12,0.05), 0px 4px 12px rgba(26,6,12,0.045)',
+  raised: '0px 2px 4px rgba(26,6,12,0.07), 0px 10px 24px rgba(26,6,12,0.075)',
+  hero: '0px 2px 6px rgba(26,6,12,0.08), 0px 16px 40px rgba(26,6,12,0.10)',
+  // For something sitting ON the dark header.
+  onDark: '0px 8px 24px rgba(0,0,0,0.28)',
+} as const;
+
+/**
+ * Motion. One vocabulary, so nothing on screen moves at a speed nothing else
+ * does -- inconsistent easing is the single most common tell of an interface
+ * assembled from parts.
+ *
+ * Durations are short on purpose: "smooth" is not "slow". Anything over ~350ms
+ * on a tap feels like latency, and this app already makes people wait for real
+ * computation, so the interface must never add to that impression.
+ */
+export const Motion = {
+  instant: 90,     // press feedback
+  quick: 180,      // state change on a control
+  smooth: 280,     // element entrance, screen content
+  page: 320,       // screen transition
+  // Standard ease-out: fast start, settled end. Reanimated/CSS cubic-bezier.
+  easeOut: [0.22, 1, 0.36, 1] as const,
+  // Gentle spring for press release, expressed for Reanimated's withSpring.
+  spring: { damping: 18, stiffness: 220, mass: 0.6 } as const,
+  // How much a pressable shrinks. 0.97 is felt but not cartoonish.
+  pressScale: 0.97,
+  // Delay between staggered siblings. Small: a list that cascades for a second
+  // is a demo, not a product.
+  stagger: 45,
+  // Behind a modal. Tinted with the brand ink rather than pure black: a neutral
+  // black wash over a warm canvas greys everything behind it, where a plum-tinted
+  // one dims the page while leaving it recognisably the same page. Four modals
+  // hardcoded their own rgba(0,0,0,…) at two different opacities before this.
+  scrimColor: 'rgba(26,6,12,0.52)',
+} as const;
+
+/** Radii. Larger than the old 6px, which is what dates an interface fastest. */
+export const Radius = {
+  control: 10,
+  card: 14,
+  hero: 18,
+  pill: 999,
+} as const;
+
 export const TileAccent = {
   spends: Colors.light.washuRed,
   reads: Colors.light.washuGreen,

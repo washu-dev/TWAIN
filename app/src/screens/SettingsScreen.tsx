@@ -12,7 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Header, Footer } from '@/components';
-import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Radius, Spacing } from '@/constants/theme';
 import { apiClient, NOTIFY_KINDS, NotifyKind } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -225,7 +225,7 @@ export const SettingsScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: C.washuLightGray,
+    backgroundColor: C.canvas,
   },
   scroll: {
     flex: 1,
@@ -242,7 +242,7 @@ const styles = StyleSheet.create({
   checkButton: {
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     borderWidth: 1,
     borderColor: C.washuRed,
   },
@@ -268,7 +268,7 @@ const styles = StyleSheet.create({
   },
   card: {
     backgroundColor: C.background,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     padding: Spacing.four,
     borderWidth: 1,
     borderColor: C.border,
@@ -315,7 +315,7 @@ const styles = StyleSheet.create({
   saveButton: {
     marginTop: Spacing.three,
     backgroundColor: C.washuRed,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingVertical: Spacing.two,
     alignItems: 'center',
   },

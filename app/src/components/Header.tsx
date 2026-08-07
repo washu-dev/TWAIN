@@ -1,6 +1,8 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
+import { View, Text, StyleSheet } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { APP_STRINGS, Colors, Elevation, Gradients, Radius, Spacing } from '@/constants/theme';
+import { PressableScale } from './Motion';
 
 const C = Colors.light;
 
@@ -14,7 +16,16 @@ export const Header: React.FC<HeaderProps> = ({
   loginLabel = APP_STRINGS.loginButton,
 }) => {
   return (
-    <View style={styles.container}>
+    // Crimson into plum on the diagonal. The wordmark sits over the darkest
+    // corner and the light edge lands where content begins, so the masthead
+    // reads as one lit surface rather than a flat colour band.
+    <LinearGradient
+      colors={Gradients.brandHeader}
+      locations={Gradients.brandHeaderLocations}
+      start={{ x: 0, y: 0 }}
+      end={{ x: 1, y: 1 }}
+      style={styles.container}
+    >
       <View style={styles.content}>
         {/* Shield + Title */}
         <View style={styles.brand}>
@@ -28,28 +39,29 @@ export const Header: React.FC<HeaderProps> = ({
             developer tool; it is in Settings now, so this row holds only what a
             researcher needs from every screen. */}
         <View style={styles.buttonContainer}>
-          <TouchableOpacity
+          <PressableScale
             style={styles.buttonSolid}
             onPress={onLoginPress}
-            accessible={true}
+            accessible
             accessibilityLabel={loginLabel}
             accessibilityRole="button"
           >
             <Text style={styles.buttonSolidText}>{loginLabel}</Text>
-          </TouchableOpacity>
+          </PressableScale>
         </View>
       </View>
-    </View>
+    </LinearGradient>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: C.washuRed,
     paddingVertical: Spacing.three,
     paddingHorizontal: Spacing.four,
-    borderBottomWidth: 4,
-    borderBottomColor: C.washuGreen,
+    // A 2pt green hairline instead of the old 4pt slab: at this weight the
+    // secondary brand colour reads as a considered detail rather than a stripe.
+    borderBottomWidth: 2,
+    borderBottomColor: 'rgba(33,87,50,0.9)',
   },
   content: {
     flexDirection: 'row',
@@ -68,9 +80,11 @@ const styles = StyleSheet.create({
   },
   appTitle: {
     fontSize: 28,
-    fontWeight: 'bold',
+    fontWeight: '700',
     color: C.washuWhite,
-    letterSpacing: 0.5,
+    // Wider tracking on a short all-caps wordmark. This one change does more for
+    // "considered" than any amount of colour work.
+    letterSpacing: 1.6,
   },
   appSubtitle: {
     fontSize: 12,
@@ -85,10 +99,11 @@ const styles = StyleSheet.create({
   buttonSolid: {
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
-    borderRadius: 4,
+    borderRadius: Radius.control,
     backgroundColor: C.background,
     minWidth: 80,
     alignItems: 'center',
+    boxShadow: Elevation.onDark,
   },
   buttonSolidText: {
     color: C.washuRed,

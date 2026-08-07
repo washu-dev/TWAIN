@@ -10,8 +10,12 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { Footer, Header, PlanCard, StateStepper, WallTimeField } from '@/components';
-import { APP_STRINGS, Colors, Spacing } from '@/constants/theme';
+import { LinearGradient } from 'expo-linear-gradient';
+import {
+  AmbientBackdrop, Footer, Header, PlanCard, PressableScale, Reveal, StateStepper,
+  WallTimeField,
+} from '@/components';
+import { APP_STRINGS, Colors, Elevation, Gradients, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 import { DurationUnit } from '@/utils/duration';
 
@@ -326,6 +330,8 @@ export const TutorialScreen: React.FC = () => {
     <SafeAreaView style={styles.container} edges={['left', 'right', 'bottom']}>
       <Header onLoginPress={signOut} loginLabel={APP_STRINGS.signOutButton} />
 
+      <AmbientBackdrop />
+
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.content}
@@ -349,8 +355,8 @@ export const TutorialScreen: React.FC = () => {
         {TOPICS.map((topic, index) => {
           const isOpen = !!open[topic.id];
           return (
-            <View key={topic.id} style={styles.section}>
-              <TouchableOpacity
+            <Reveal key={topic.id} index={Math.min(index, 5)} style={styles.section}>
+              <PressableScale
                 style={styles.sectionHeader}
                 onPress={() => toggle(topic.id)}
                 accessibilityRole="button"
@@ -364,7 +370,7 @@ export const TutorialScreen: React.FC = () => {
                   <Text style={styles.sectionSummary}>{topic.summary}</Text>
                 </View>
                 <Text style={styles.chevron}>{isOpen ? '−' : '+'}</Text>
-              </TouchableOpacity>
+              </PressableScale>
 
               {isOpen && (
                 <View style={styles.sectionBody}>
@@ -383,17 +389,25 @@ export const TutorialScreen: React.FC = () => {
                   ) : null}
                 </View>
               )}
-            </View>
+            </Reveal>
           );
         })}
 
-        <TouchableOpacity
-          style={styles.cta}
+        <PressableScale
+          style={styles.ctaWrap}
           onPress={() => router.push('/chat')}
           accessibilityRole="button"
+          accessibilityLabel="Start a simulation"
         >
-          <Text style={styles.ctaText}>Start a simulation →</Text>
-        </TouchableOpacity>
+          <LinearGradient
+            colors={Gradients.calm}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.cta}
+          >
+            <Text style={styles.ctaText}>Start a simulation →</Text>
+          </LinearGradient>
+        </PressableScale>
       </ScrollView>
 
       <Footer />
@@ -402,7 +416,7 @@ export const TutorialScreen: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.washuLightGray },
+  container: { flex: 1, backgroundColor: C.canvas },
   scroll: { flex: 1 },
   content: {
     flexGrow: 1,
@@ -429,11 +443,12 @@ const styles = StyleSheet.create({
   },
   section: {
     backgroundColor: C.background,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     borderWidth: 1,
-    borderColor: C.border,
+    borderColor: 'rgba(26,6,12,0.06)',
     marginBottom: Spacing.two,
     overflow: 'hidden',
+    boxShadow: Elevation.card,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -465,8 +480,8 @@ const styles = StyleSheet.create({
     marginTop: Spacing.two,
     gap: Spacing.two,
     padding: Spacing.two,
-    backgroundColor: C.washuLightGray,
-    borderRadius: 6,
+    backgroundColor: C.canvas,
+    borderRadius: Radius.card,
   },
   caption: { fontSize: 11, color: C.textSecondary, fontStyle: 'italic', lineHeight: 16 },
   demoBox: { gap: Spacing.two },
@@ -474,10 +489,13 @@ const styles = StyleSheet.create({
   workingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, padding: Spacing.two },
   workingText: { color: C.textSecondary, fontSize: 13 },
   workingElapsed: { color: C.textSecondary, fontSize: 13, fontVariant: ['tabular-nums'] },
-  cta: {
+  ctaWrap: {
     marginTop: Spacing.three,
-    backgroundColor: C.washuGreen,
-    borderRadius: 6,
+    borderRadius: Radius.card,
+    overflow: 'hidden',
+    boxShadow: Elevation.card,
+  },
+  cta: {
     paddingVertical: Spacing.three,
     alignItems: 'center',
   },

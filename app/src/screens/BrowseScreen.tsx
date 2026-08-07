@@ -9,12 +9,14 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { AmbientBackdrop, PressableScale, Reveal } from '@/components';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { apiClient, Conversation, ConversationStatus } from '@/api/client';
 import { useNow } from '@/hooks/useNow';
 import { formatElapsed } from '@/utils/duration';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Gradients, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -210,7 +212,13 @@ export const BrowseScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      <View style={styles.topBar}>
+      <LinearGradient
+        colors={Gradients.brandHeader}
+        locations={Gradients.brandHeaderLocations}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.topBar}
+      >
         {/* Direct loads (URL / refresh) have no history; fall back to home. */}
         <TouchableOpacity
           onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
@@ -222,7 +230,7 @@ export const BrowseScreen: React.FC = () => {
         <TouchableOpacity onPress={load} accessibilityRole="button">
           <Text style={styles.refresh}>Refresh</Text>
         </TouchableOpacity>
-      </View>
+      </LinearGradient>
 
       {items.length > 0 && (
         <View style={styles.controls}>
@@ -255,6 +263,8 @@ export const BrowseScreen: React.FC = () => {
         </View>
       )}
 
+      <AmbientBackdrop />
+
       {loading && <ActivityIndicator style={{ marginTop: Spacing.five }} color={C.washuRed} />}
       {error && <Text style={styles.error}>{error}</Text>}
 
@@ -279,19 +289,23 @@ export const BrowseScreen: React.FC = () => {
                 <Text style={styles.sectionHeader}>
                   {section.title} · {rows.length}
                 </Text>
-                {rows.map((item) => (
-                  <RunRow
-                    key={item.id}
-                    item={item}
-                    now={now}
-                    onPress={() =>
-                      router.push({
-                        pathname: TERMINAL_STATUSES.includes(item.status) ? '/report' : '/chat',
-                        params: { id: item.id },
-                      })
-                    }
-                    onDelete={() => setPendingDelete(item)}
-                  />
+                {rows.map((item, i) => (
+                  // Capped stagger: a list of forty runs must not cascade for two
+                  // seconds. After the sixth row everything arrives together, so a
+                  // long list still feels immediate.
+                  <Reveal key={item.id} index={Math.min(i, 6)}>
+                    <RunRow
+                      item={item}
+                      now={now}
+                      onPress={() =>
+                        router.push({
+                          pathname: TERMINAL_STATUSES.includes(item.status) ? '/report' : '/chat',
+                          params: { id: item.id },
+                        })
+                      }
+                      onDelete={() => setPendingDelete(item)}
+                    />
+                  </Reveal>
                 ))}
               </View>
             );
@@ -354,8 +368,14 @@ const RunRow: React.FC<{
     ? formatElapsed((now - new Date(item.started_at as string).getTime()) / 1000)
     : null;
   return (
-    <View style={[styles.rowItem, { borderLeftColor: meta.color }]}>
-      <TouchableOpacity
+    <View style={styles.rowItem}>
+      {/* The status colour becomes an edge-lit bar rather than a flat 4pt border:
+          same information, and it matches the tiles on the dashboard. */}
+      <LinearGradient
+        colors={[meta.color, meta.color]}
+        style={styles.rowAccent}
+      />
+      <PressableScale
         style={styles.rowMain}
         onPress={onPress}
         accessibilityRole="button"
@@ -364,14 +384,21 @@ const RunRow: React.FC<{
         <Text style={styles.rowTitle} numberOfLines={1}>
           {item.title || 'Untitled run'}
         </Text>
-        <Text style={styles.rowMeta} numberOfLines={1}>
-          <Text style={{ color: meta.color, fontWeight: '600' }}>{meta.label}</Text>
-          {`  ·  ${elapsed ?? relativeTime(item.updated_at)}`}
-          {item.status === 'running'
-            ? `  ·  ${PHASE[item.current_state] ?? item.current_state}`
-            : ''}
-        </Text>
-      </TouchableOpacity>
+        <View style={styles.rowMetaRow}>
+          {/* A chip, not inline text: status is the thing being scanned down the
+              list, and a tinted pill is findable at a glance where coloured words
+              inside a sentence are not. */}
+          <View style={[styles.statusChip, { backgroundColor: `${meta.color}14` }]}>
+            <Text style={[styles.statusChipText, { color: meta.color }]}>{meta.label}</Text>
+          </View>
+          <Text style={styles.rowMeta} numberOfLines={1}>
+            {elapsed ?? relativeTime(item.updated_at)}
+            {item.status === 'running'
+              ? `  ·  ${PHASE[item.current_state] ?? item.current_state}`
+              : ''}
+          </Text>
+        </View>
+      </PressableScale>
       <TouchableOpacity
         style={styles.deleteBtn}
         onPress={onDelete}
@@ -393,6 +420,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
+    borderBottomWidth: 2,
+    borderBottomColor: 'rgba(33,87,50,0.9)',
     backgroundColor: C.washuRed,
   },
   back: { color: C.washuWhite, fontSize: 16, fontWeight: '600' },
@@ -439,15 +468,28 @@ const styles = StyleSheet.create({
   },
   rowItem: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
+    alignItems: 'stretch',
+    borderRadius: Radius.card,
+    backgroundColor: C.background,
+    borderWidth: 1,
+    borderColor: 'rgba(26,6,12,0.06)',
+    overflow: 'hidden',
+    boxShadow: Elevation.card,
+  },
+  rowAccent: { width: 4 },
+  rowMain: {
+    flex: 1,
+    gap: 5,
     paddingVertical: Spacing.three,
     paddingHorizontal: Spacing.three,
-    borderRadius: 10,
-    backgroundColor: C.backgroundElement,
-    borderLeftWidth: 4,
   },
-  rowMain: { flex: 1, gap: 3 },
+  rowMetaRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  statusChip: {
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 2,
+    borderRadius: Radius.pill,
+  },
+  statusChipText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
   rowTitle: { fontSize: 15, fontWeight: '600', color: C.text },
   rowMeta: { fontSize: 12, color: C.textSecondary },
   deleteBtn: { paddingHorizontal: Spacing.two, alignItems: 'center', justifyContent: 'center' },
@@ -455,7 +497,7 @@ const styles = StyleSheet.create({
   error: { color: C.washuRed, padding: Spacing.three },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: Motion.scrimColor,
     alignItems: 'center',
     justifyContent: 'center',
     padding: Spacing.four,
@@ -475,7 +517,7 @@ const styles = StyleSheet.create({
   modalCancel: {
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     borderWidth: 1,
     borderColor: C.border,
   },
@@ -483,7 +525,7 @@ const styles = StyleSheet.create({
   modalDelete: {
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     backgroundColor: C.washuRed,
   },
   modalDeleteText: { fontSize: 15, fontWeight: '700', color: C.washuWhite },

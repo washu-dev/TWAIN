@@ -17,7 +17,7 @@ import {
   IssueContext,
   RunIssue,
 } from '@/api/client';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -309,23 +309,19 @@ const SubmittedPanel: React.FC<{ issue: RunIssue }> = ({ issue }) => {
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: Motion.scrimColor,
     justifyContent: 'center',
     alignItems: 'center',
     padding: Spacing.four,
   },
   dialog: {
     backgroundColor: C.washuWhite,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     width: Platform.OS === 'web' ? 520 : '100%',
     maxWidth: 560,
     maxHeight: '90%',
     overflow: 'hidden',
-    shadowColor: C.shadow,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 12,
-    elevation: 8,
+    boxShadow: Elevation.card,
   },
   header: {
     backgroundColor: C.washuRed,
@@ -352,7 +348,7 @@ const styles = StyleSheet.create({
   input: {
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     fontSize: 15,
@@ -373,7 +369,7 @@ const styles = StyleSheet.create({
   attachmentBody: {
     maxHeight: 180,
     backgroundColor: C.backgroundElement,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     padding: Spacing.two,
   },
   mono: {
@@ -397,7 +393,7 @@ const styles = StyleSheet.create({
   },
   primaryBtn: {
     backgroundColor: C.washuRed,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
     minWidth: 120,
@@ -409,7 +405,7 @@ const styles = StyleSheet.create({
   secondaryBtn: {
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
     minHeight: 38,

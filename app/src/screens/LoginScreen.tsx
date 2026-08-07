@@ -8,7 +8,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { APP_STRINGS, Colors, MaxContentWidth, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, MaxContentWidth, Radius, Spacing } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 
 const C = Colors.light;
@@ -67,7 +67,7 @@ export const LoginScreen: React.FC = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: C.washuLightGray,
+    backgroundColor: C.canvas,
     alignItems: 'center',
     justifyContent: 'center',
     padding: Spacing.four,
@@ -76,7 +76,7 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: MaxContentWidth / 2,
     backgroundColor: C.background,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     borderTopWidth: 4,
     borderTopColor: C.washuRed,
     padding: Spacing.four,

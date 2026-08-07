@@ -24,7 +24,9 @@ import { useNow } from '@/hooks/useNow';
 import {
   DurationUnit, durationToHours, formatDurationHours, formatElapsed, splitDurationHours,
 } from '@/utils/duration';
-import { Colors, Spacing } from '@/constants/theme';
+import { LinearGradient } from 'expo-linear-gradient';
+import { PressableScale } from '@/components/Motion';
+import { Colors, Elevation, Gradients, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -529,7 +531,16 @@ export const ChatScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      <View style={styles.topBar}>
+      {/* Same crimson-to-plum ramp as the app masthead. This screen draws its own
+          top bar rather than using <Header>, so the gradient is repeated here --
+          both read Gradients.brandHeader, so the two cannot drift apart. */}
+      <LinearGradient
+        colors={Gradients.brandHeader}
+        locations={Gradients.brandHeaderLocations}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.topBar}
+      >
         {/* Direct loads (URL / refresh) have no history; fall back to home. */}
         <TouchableOpacity
           onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
@@ -566,7 +577,7 @@ export const ChatScreen: React.FC = () => {
         ) : (
           <View style={{ width: 48 }} />
         )}
-      </View>
+      </LinearGradient>
 
       {conversation && (
         <View style={styles.targetBadgeRow}>
@@ -776,20 +787,31 @@ export const ChatScreen: React.FC = () => {
             </View>
           )}
           <View style={styles.approvalButtons}>
-            <TouchableOpacity
-              style={[styles.approveBtn, busy && styles.disabled]}
+            {/* The one irreversible action here -- it spends cluster time -- so it
+                is the only gradient-filled control on the screen, and the only one
+                that answers a press physically. */}
+            <PressableScale
+              style={[styles.approveBtnWrap, busy && styles.disabled]}
               onPress={() => handleApproval('approve')}
               accessibilityRole="button"
+              accessibilityLabel="Approve and submit to RIS"
             >
-              <Text style={styles.approveText}>Approve & submit to RIS</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
+              <LinearGradient
+                colors={Gradients.calm}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.approveBtn}
+              >
+                <Text style={styles.approveText}>Approve &amp; submit to RIS</Text>
+              </LinearGradient>
+            </PressableScale>
+            <PressableScale
               style={[styles.rejectBtn, busy && styles.disabled]}
               onPress={() => handleApproval('reject')}
               accessibilityRole="button"
             >
               <Text style={styles.rejectText}>Reject</Text>
-            </TouchableOpacity>
+            </PressableScale>
           </View>
         </View>
       ) : isTerminal ? (
@@ -1247,7 +1269,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
-    backgroundColor: C.washuRed,
+    borderBottomWidth: 2,
+    borderBottomColor: 'rgba(33,87,50,0.9)',
   },
   back: { color: C.washuWhite, fontSize: 16, fontWeight: '600', width: 48 },
   title: { color: C.washuWhite, fontSize: 16, fontWeight: '700', flex: 1, textAlign: 'center' },
@@ -1261,7 +1284,7 @@ const styles = StyleSheet.create({
   terminateBtn: {
     borderWidth: 1,
     borderColor: C.washuWhite,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingHorizontal: Spacing.two,
     paddingVertical: 4,
   },
@@ -1321,7 +1344,7 @@ const styles = StyleSheet.create({
   budgetInput: {
     width: 80,
     height: 36,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     borderWidth: 1,
     borderColor: C.border,
     paddingHorizontal: Spacing.two,
@@ -1377,7 +1400,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     borderWidth: 1,
     borderColor: C.washuRed,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     paddingHorizontal: Spacing.two,
     paddingVertical: 6,
   },
@@ -1402,7 +1425,7 @@ const styles = StyleSheet.create({
   slurmFieldInput: {
     borderWidth: 1,
     borderColor: C.border,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     paddingHorizontal: Spacing.two,
     paddingVertical: Spacing.one,
     backgroundColor: C.washuWhite,
@@ -1412,10 +1435,16 @@ const styles = StyleSheet.create({
   metricRow: { gap: Spacing.one, marginTop: Spacing.one },
   metricName: { fontSize: 13, fontWeight: '700', color: C.text },
   approvalButtons: { flexDirection: 'row', gap: Spacing.two },
-  approveBtn: {
+  // Wrapper carries layout, rounding and shadow; the gradient inside carries the
+  // fill. They cannot be one view -- a gradient child needs the corners clipped on
+  // the parent or it renders square inside a rounded button.
+  approveBtnWrap: {
     flex: 1,
-    backgroundColor: C.washuGreen,
-    borderRadius: 10,
+    borderRadius: Radius.control,
+    overflow: 'hidden',
+    boxShadow: Elevation.card,
+  },
+  approveBtn: {
     paddingVertical: Spacing.three,
     alignItems: 'center',
   },
@@ -1486,7 +1515,7 @@ const styles = StyleSheet.create({
   reportText: { color: C.washuWhite, fontWeight: '700', fontSize: 15 },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: Motion.scrimColor,
     alignItems: 'center',
     justifyContent: 'center',
     padding: Spacing.four,
@@ -1521,7 +1550,7 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-end',
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     borderWidth: 1,
     borderColor: C.border,
   },

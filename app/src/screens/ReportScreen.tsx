@@ -8,14 +8,16 @@ import {
   ActivityIndicator,
   Platform,
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { AmbientBackdrop } from '@/components';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { apiClient, ArtifactMeta, Report } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
 import { useConversationStream } from '@/hooks/useConversationStream';
 import { canCopy, copyText } from '@/utils/clipboard';
 import { formatDurationHours, formatElapsed } from '@/utils/duration';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Gradients, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -94,7 +96,13 @@ export const ReportScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      <View style={styles.topBar}>
+      <LinearGradient
+        colors={Gradients.brandHeader}
+        locations={Gradients.brandHeaderLocations}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.topBar}
+      >
         {/* Direct loads (URL / refresh) have no history; fall back to home. */}
         <TouchableOpacity
           onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
@@ -115,7 +123,9 @@ export const ReportScreen: React.FC = () => {
         >
           <Text style={styles.openChat}>Chat ›</Text>
         </TouchableOpacity>
-      </View>
+      </LinearGradient>
+
+      <AmbientBackdrop />
 
       {loading && <ActivityIndicator style={{ marginTop: Spacing.five }} color={C.washuRed} />}
       {error && <Text style={styles.error}>{error}</Text>}
@@ -203,8 +213,14 @@ const ValidationCard: React.FC<{ report: Report }> = ({ report }) => {
     <View style={styles.card}>
       <View style={styles.validationHeader}>
         <Text style={styles.cardTitle}>Validation</Text>
-        <View style={[styles.statusBadge, { backgroundColor: statusColor }]}>
-          <Text style={styles.statusBadgeText}>{status.replace('_', ' ')}</Text>
+        {/* Tinted chip rather than a solid block, so it matches the status chips
+            in Browse -- the same verdict should not look like two things in two
+            places. White-on-solid also shouted the loudest element on a page whose
+            actual subject is the number above it. */}
+        <View style={[styles.statusBadge, { backgroundColor: `${statusColor}18` }]}>
+          <Text style={[styles.statusBadgeText, { color: statusColor }]}>
+            {status.replace('_', ' ')}
+          </Text>
         </View>
       </View>
       {metricText && <Row label="Interpreted result" value={metricText} />}
@@ -587,7 +603,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
-    backgroundColor: C.washuRed,
+    borderBottomWidth: 2,
+    borderBottomColor: 'rgba(33,87,50,0.9)',
   },
   back: { color: C.washuWhite, fontSize: 16, fontWeight: '600', width: 48 },
   openChat: { color: C.washuWhite, fontSize: 15, fontWeight: '600', width: 48, textAlign: 'right' },
@@ -595,8 +612,12 @@ const styles = StyleSheet.create({
   scroll: { flex: 1 },
   content: { padding: Spacing.three, gap: Spacing.three },
   badges: { flexDirection: 'row', gap: Spacing.two, alignItems: 'center' },
-  statusBadge: { borderRadius: 12, paddingHorizontal: Spacing.three, paddingVertical: 4 },
-  statusBadgeText: { color: C.washuWhite, fontWeight: '700', fontSize: 12 },
+  statusBadge: {
+    borderRadius: Radius.pill,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: 4,
+  },
+  statusBadgeText: { fontWeight: '700', fontSize: 12, letterSpacing: 0.2 },
   stateBadge: {
     borderRadius: 12,
     paddingHorizontal: Spacing.three,
@@ -605,9 +626,11 @@ const styles = StyleSheet.create({
   },
   stateBadgeText: { color: C.textSecondary, fontSize: 12, fontWeight: '600' },
   card: {
-    borderRadius: 12,
+    borderRadius: Radius.card,
     borderWidth: 1,
-    borderColor: C.backgroundElement,
+    borderColor: 'rgba(26,6,12,0.06)',
+    backgroundColor: C.background,
+    boxShadow: Elevation.card,
     padding: Spacing.three,
     gap: Spacing.one,
   },
@@ -657,14 +680,38 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   resultPath: { fontSize: 12, color: C.text, fontFamily: mono },
-  row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3, gap: Spacing.three },
-  rowLabel: { color: C.textSecondary, fontSize: 14 },
-  rowValue: { color: C.text, fontSize: 14, fontWeight: '600', flexShrink: 1, textAlign: 'right' },
+  // Wraps rather than clips. These labels are machine identifiers -- a real one
+  // from a CO2 run is "atomization_energy_electronic_kJ_per_mol" -- and an
+  // underscore is not a line-break opportunity, so no amount of flexShrink lets
+  // one wrap: the number was pushed off the right edge of the card and simply
+  // lost. With flexWrap the value drops to its own right-aligned line when the
+  // pair does not fit, which keeps both readable and truncates neither.
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    flexWrap: 'wrap',
+    paddingVertical: 3,
+    columnGap: Spacing.three,
+  },
+  rowLabel: { color: C.textSecondary, fontSize: 14, flexShrink: 1 },
+  rowValue: {
+    color: C.text,
+    fontSize: 14,
+    fontWeight: '600',
+    flexGrow: 1,
+    textAlign: 'right',
+  },
   note: { color: C.textSecondary, fontSize: 13, marginTop: Spacing.two, fontStyle: 'italic' },
   sectionHeading: { fontSize: 18, fontWeight: '700', color: C.text, marginTop: Spacing.two },
   sectionHint: { color: C.textSecondary, fontSize: 13, marginTop: -Spacing.two },
   empty: { color: C.textSecondary, fontSize: 14, fontStyle: 'italic' },
-  artifact: { borderRadius: 10, borderWidth: 1, borderColor: C.backgroundElement, overflow: 'hidden' },
+  artifact: {
+    borderRadius: Radius.control,
+    borderWidth: 1,
+    borderColor: 'rgba(26,6,12,0.06)',
+    overflow: 'hidden',
+  },
   artifactHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -682,7 +729,7 @@ const styles = StyleSheet.create({
   copyBtn: {
     paddingVertical: Spacing.one,
     paddingHorizontal: Spacing.two,
-    borderRadius: 6,
+    borderRadius: Radius.card,
     borderWidth: 1,
     borderColor: C.textSecondary,
     backgroundColor: C.washuWhite,

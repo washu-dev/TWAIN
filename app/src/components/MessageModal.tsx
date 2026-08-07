@@ -7,7 +7,7 @@ import {
   StyleSheet,
   Platform,
 } from 'react-native';
-import { Colors, Spacing } from '@/constants/theme';
+import { Colors, Elevation, Motion, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -73,22 +73,18 @@ export const MessageModal: React.FC<MessageModalProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: Motion.scrimColor,
     justifyContent: 'center',
     alignItems: 'center',
     padding: Spacing.four,
   },
   dialog: {
     backgroundColor: C.background,
-    borderRadius: 8,
+    borderRadius: Radius.control,
     width: Platform.OS === 'web' ? 420 : '100%',
     maxWidth: 480,
     overflow: 'hidden',
-    shadowColor: C.shadow,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 12,
-    elevation: 8,
+    boxShadow: Elevation.card,
   },
   header: {
     backgroundColor: C.washuRed,

@@ -1,7 +1,7 @@
 import { Stack } from 'expo-router';
 import { ActivityIndicator, View } from 'react-native';
 import { useColorScheme } from '@/hooks/useColorScheme';
-import { Colors } from '@/constants/theme';
+import { Colors, Motion } from '@/constants/theme';
 import { AuthProvider, useAuth } from '@/hooks/useAuth';
 
 function RootNavigator() {
@@ -33,6 +33,15 @@ function RootNavigator() {
         contentStyle: {
           backgroundColor: colors.background,
         },
+        // Screens slide in from the right and the outgoing one eases out under
+        // them, which is the platform-native reading of "deeper into the app".
+        // `simple_push` rather than the default because it does not dim or scale
+        // the outgoing screen -- at this app's page weights that read as a flash.
+        animation: 'simple_push',
+        animationDuration: Motion.page,
+        // Back-swipe from the left edge. Free on native, and it is what makes an
+        // app feel like an app rather than a site in a shell.
+        gestureEnabled: true,
       }}
     >
       {/* Always-present anchor. Expo Router redirects to it whenever a guarded
