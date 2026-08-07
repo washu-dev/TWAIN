@@ -202,9 +202,11 @@ export const Motion = {
   quick: 180,      // state change on a control
   smooth: 280,     // element entrance, screen content
   page: 320,       // screen transition
-  // Standard ease-out: fast start, settled end. Reanimated/CSS cubic-bezier.
+  // Standard ease-out: fast start, settled end. A CSS/Easing.bezier cubic-bezier.
   easeOut: [0.22, 1, 0.36, 1] as const,
-  // Gentle spring for press release, expressed for Reanimated's withSpring.
+  // Gentle spring for press release. Spelled for Animated.spring's physics config,
+  // which takes the same three parameters with the same meanings as Reanimated's
+  // withSpring -- so the feel is portable if this ever moves back.
   spring: { damping: 18, stiffness: 220, mass: 0.6 } as const,
   // How much a pressable shrinks. 0.97 is felt but not cartoonish.
   pressScale: 0.97,
