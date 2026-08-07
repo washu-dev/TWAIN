@@ -4,13 +4,14 @@ import {
   Text,
   ScrollView,
   StyleSheet,
-  TouchableOpacity,
   Platform,
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { PressableScale, Reveal } from '@/components';
 import { useRouter } from 'expo-router';
 import { Footer, WashUShield } from '@/components';
-import { APP_STRINGS, Colors, Elevation, LANDING_CONTENT, MaxContentWidth, Radius, Spacing } from '@/constants/theme';
+import { APP_STRINGS, Colors, Elevation, Gradients, LANDING_CONTENT, MaxContentWidth, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
@@ -32,7 +33,16 @@ export const LandingScreen: React.FC = () => {
         showsVerticalScrollIndicator={Platform.OS !== 'web'}
       >
         {/* Hero */}
-        <View style={styles.hero}>
+        {/* The one screen a visitor sees before deciding whether this is serious.
+            A flat red panel with a 4pt green rule reads as a department page; the
+            same crimson carried down into plum reads as a product. */}
+        <LinearGradient
+          colors={Gradients.brandHeader}
+          locations={Gradients.brandHeaderLocations}
+          start={{ x: 0.1, y: 0 }}
+          end={{ x: 0.9, y: 1 }}
+          style={styles.hero}
+        >
           <View style={styles.heroInner}>
             <WashUShield height={64} variant="white" />
             <Text style={styles.heroTitle} accessibilityRole="header">
@@ -46,19 +56,21 @@ export const LandingScreen: React.FC = () => {
               <Text style={styles.exampleQuote}>{LANDING_CONTENT.exampleQuote}</Text>
             </View>
 
-            <TouchableOpacity
+            <PressableScale
               style={styles.heroCta}
               onPress={goToLogin}
               accessibilityRole="button"
               accessibilityLabel={LANDING_CONTENT.heroCta}
             >
               <Text style={styles.heroCtaText}>{LANDING_CONTENT.heroCta}</Text>
-            </TouchableOpacity>
+            </PressableScale>
           </View>
-        </View>
+        </LinearGradient>
 
-        {/* Body */}
-        <View style={styles.body}>
+        {/* Body. Revealed in reading order -- the hero is already on screen when
+            the page paints, so the sections below are what benefit from arriving
+            rather than simply being there. */}
+        <Reveal index={1} style={styles.body}>
           {/* What is TWAIN */}
           <View style={styles.section}>
             <Text style={styles.sectionHeading} accessibilityRole="header">
@@ -109,16 +121,16 @@ export const LandingScreen: React.FC = () => {
               {LANDING_CONTENT.signInHeading}
             </Text>
             <Text style={styles.signInBody}>{LANDING_CONTENT.signInBody}</Text>
-            <TouchableOpacity
+            <PressableScale
               style={styles.signInCta}
               onPress={goToLogin}
               accessibilityRole="button"
               accessibilityLabel={LANDING_CONTENT.signInCta}
             >
               <Text style={styles.signInCtaText}>{LANDING_CONTENT.signInCta}</Text>
-            </TouchableOpacity>
+            </PressableScale>
           </View>
-        </View>
+        </Reveal>
 
         <Footer />
       </ScrollView>
@@ -143,9 +155,8 @@ const styles = StyleSheet.create({
 
   // Hero
   hero: {
-    backgroundColor: RED,
-    borderBottomWidth: 4,
-    borderBottomColor: GREEN,
+    borderBottomWidth: 2,
+    borderBottomColor: 'rgba(33,87,50,0.9)',
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.six,
     alignItems: 'center',
@@ -158,9 +169,11 @@ const styles = StyleSheet.create({
   },
   heroTitle: {
     fontSize: 52,
-    fontWeight: 'bold',
+    fontWeight: '700',
     color: C.washuWhite,
-    letterSpacing: 1,
+    // Generous tracking on a large short wordmark. At 52pt the default spacing
+    // reads as cramped, which is the difference between a logo and a heading.
+    letterSpacing: 4,
     textAlign: 'center',
   },
   heroTagline: {
@@ -279,12 +292,12 @@ const styles = StyleSheet.create({
     flexBasis: '47%',
     minWidth: 240,
     backgroundColor: C.background,
-    borderRadius: Radius.control,
+    borderRadius: Radius.card,
+    boxShadow: Elevation.card,
     borderWidth: 1,
     borderColor: C.border,
     padding: Spacing.three,
     gap: Spacing.two,
-    boxShadow: Elevation.card,
   },
   cardAccent: {
     width: 36,
