@@ -98,7 +98,10 @@ class RisApiAdapter:
             else self.select_partition(request)
         account = job.account or self.profile.account
 
-        lines: List[str] = []
+        # sbatch refuses a script whose first line isn't a #! interpreter line
+        # ("This does not look like a batch script") -- the API passes `script`
+        # to sbatch as the batch file, exactly like the SSH path's job.slurm.
+        lines: List[str] = ["#!/bin/bash"]
         modules = job.modules if job.modules is not None else list(self.profile.modules)
         if request.gpu_count > 0:
             modules += [m for m in self.profile.gpu_modules if m not in modules]
