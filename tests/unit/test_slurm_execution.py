@@ -210,6 +210,8 @@ def test_pull_rsyncs_back_into_local_dir(tmp_path):
     assert rsync[0] == "rsync"
     assert rsync[-2].startswith("c2-login-001.ris.wustl.edu:")
     assert local.is_dir()
+    # A secrets file a job didn't get to delete is never copied back.
+    assert "--exclude=.twain_secrets.env" in rsync
 
 
 def test_local_mode_uses_plain_commands(tmp_path):
@@ -246,7 +248,10 @@ def test_stager_requires_a_storage_root():
 # -- SlurmExecutionAdapter lifecycle ----------------------------------------------
 
 def _exec_adapter(tmp_path, cluster_runner, transfer_runner=None, **kwargs):
+    # These tests script sbatch/squeue/sacct responses on `cluster_runner`,
+    # i.e. they exercise the legacy SSH job-control path specifically.
     kwargs.setdefault("poll_interval", 0.0)
+    kwargs.setdefault("backend", "ssh")
     return SlurmExecutionAdapter(
         _profile(),
         request=SlurmRequest(cpu_count=8, gpu_count=0, max_time=45, ram=16000),
@@ -266,6 +271,213 @@ def _happy_cluster_runner():
     runner.on(_sacct_accounting, CommandResult(0, "COMPLETED|0:0|00:02:00|800M|general-cpu\n"))
     runner.on(_sacct_state, CommandResult(0, "COMPLETED\n"))
     return runner
+
+
+# -- backend selection -----------------------------------------------------------
+
+def test_backend_defaults_to_the_ris_api(tmp_path):
+    from execution_adapter.ris_api_adapter import RisApiAdapter
+    adapter = SlurmExecutionAdapter(_profile(), workspace_root=str(tmp_path))
+    assert adapter.backend == "api"
+    assert isinstance(adapter.slurm, RisApiAdapter)
+
+
+def test_backend_ssh_selects_the_legacy_slurm_adapter(tmp_path):
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="ssh")
+    assert isinstance(adapter.slurm, SlurmAdapter)
+
+
+def test_backend_env_var_selects_ssh(tmp_path, monkeypatch):
+    monkeypatch.setenv("TWAIN_SLURM_BACKEND", "ssh")
+    adapter = SlurmExecutionAdapter(_profile(), workspace_root=str(tmp_path))
+    assert isinstance(adapter.slurm, SlurmAdapter)
+
+
+def test_explicit_backend_arg_overrides_the_env_var(tmp_path, monkeypatch):
+    monkeypatch.setenv("TWAIN_SLURM_BACKEND", "ssh")
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api")
+    from execution_adapter.ris_api_adapter import RisApiAdapter
+    assert isinstance(adapter.slurm, RisApiAdapter)
+
+
+def test_unknown_backend_rejected(tmp_path):
+    with pytest.raises(ValueError, match="unknown Slurm backend"):
+        SlurmExecutionAdapter(_profile(), workspace_root=str(tmp_path), backend="ftp")
+
+
+def test_container_image_rejected_on_the_api_backend(tmp_path):
+    # JobSubmitSpec has no container/pyxis field -- fail fast at construction
+    # rather than silently dropping the container at submit time.
+    with pytest.raises(ValueError, match="container_image is not supported"):
+        SlurmExecutionAdapter(
+            _profile(), workspace_root=str(tmp_path), backend="api",
+            container_image="python:3.9-alpine")
+
+
+def test_container_image_allowed_on_the_ssh_backend(tmp_path):
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="ssh",
+        container_image="python:3.9-alpine")
+    assert adapter.container_image == "python:3.9-alpine"
+
+
+def test_cluster_runner_is_kept_separate_from_the_api_backend(tmp_path):
+    # The preflight probe needs a raw command runner on the login node even
+    # when job control goes through the API (which has no exec endpoint).
+    calls = []
+
+    def fake_runner(argv):
+        calls.append(list(argv))
+        return CommandResult(0, "")
+
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api",
+        cluster_runner=fake_runner)
+    assert adapter.cluster_runner is fake_runner
+
+
+# -- API-backend end-to-end execute() ---------------------------------------------
+
+class FakeRisClient:
+    """Records calls and returns scripted results for a happy-path run."""
+
+    def __init__(self, *, state="COMPLETED", exit_code="0:0", stderr=""):
+        self.calls = []
+        self.state, self.exit_code, self.stderr_text = state, exit_code, stderr
+
+    def submit_job(self, spec, *, idempotency_key=None):
+        self.calls.append(("submit_job", spec, idempotency_key))
+        return "42"
+
+    def get_job(self, job_id):
+        self.calls.append(("get_job", job_id))
+        return {"job_id": job_id, "state": self.state}
+
+    def cancel_job(self, job_id, *, signal=None):
+        self.calls.append(("cancel_job", job_id, signal))
+
+    def accounting(self, job_id):
+        self.calls.append(("accounting", job_id))
+        return {"job_id": job_id, "state": self.state, "exit_code": self.exit_code,
+                "elapsed": "00:02:00", "max_rss": "800M"}
+
+    def stdout(self, job_id):
+        self.calls.append(("stdout", job_id))
+        return "hello from the cluster\n"
+
+    def stderr(self, job_id):
+        self.calls.append(("stderr", job_id))
+        return self.stderr_text
+
+    def output_tail(self, job_id, stream, nbytes):
+        self.calls.append(("output_tail", job_id, stream, nbytes))
+        return self.stderr_text if stream == "stderr" else ""
+
+
+def test_execute_happy_path_via_the_ris_api_backend(tmp_path):
+    client = FakeRisClient()
+    transfer = ScriptedRunner()
+    adapter = SlurmExecutionAdapter(
+        _profile(),
+        request=SlurmRequest(cpu_count=8, gpu_count=0, max_time=45, ram=16000),
+        workspace_root=str(tmp_path),
+        backend="api",
+        ris_api_client=client,
+        transfer_runner=transfer,
+        poll_interval=0.0,
+        sleep=lambda _s: None,
+    )
+    bundle = _bundle(tmp_path)
+
+    result = adapter.execute(str(bundle), run_id="sess1")
+
+    assert result.status == ExecutionStatus.SUCCESS
+    assert result.exit_code == 0
+    assert result.duration_seconds == 120.0
+    assert result.peak_memory_mb == 800.0
+    assert result.stdout == "hello from the cluster\n"
+    assert result.install_log["job_id"] == "42"
+    # No job.slurm file written -- the API takes the script inline.
+    assert not (Path(bundle) / "job.slurm").exists()
+    submit_call = next(c for c in client.calls if c[0] == "submit_job")
+    assert submit_call[2].startswith("sess1-")  # key carries the run id
+    assert "python main.py" in submit_call[1]["script"]
+
+
+def _api_adapter(tmp_path, client):
+    return SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api",
+        ris_api_client=client, transfer_runner=ScriptedRunner(),
+        poll_interval=0.0, sleep=lambda _s: None,
+    )
+
+
+_TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "main.py", line 12, in <module>\n'
+    "    energy = atoms.get_potential_energy()\n"
+    "ZeroDivisionError: division by zero\n"
+)
+
+
+def test_api_backend_returns_the_jobs_stderr(tmp_path):
+    # The API keeps stderr in its own file; the crash traceback the
+    # self-heal loop repairs against lives there, not in stdout (#151).
+    client = FakeRisClient(state="FAILED", exit_code="1:0", stderr=_TRACEBACK)
+    result = _api_adapter(tmp_path, client).execute(
+        str(_bundle(tmp_path)), run_id="sess1")
+
+    assert result.status == ExecutionStatus.FAILED
+    assert result.stderr == _TRACEBACK
+    from statemachine import _runtime_traceback
+    assert "ZeroDivisionError" in (_runtime_traceback(result) or "")
+
+
+def test_api_backend_classifies_a_dependency_error_seen_only_in_stderr(tmp_path):
+    client = FakeRisClient(
+        state="FAILED", exit_code="1:0",
+        stderr="ModuleNotFoundError: No module named 'gpaw'\n")
+    result = _api_adapter(tmp_path, client).execute(
+        str(_bundle(tmp_path)), run_id="sess1")
+
+    assert result.status == ExecutionStatus.DEPENDENCY_ERROR
+
+
+def test_api_backend_reports_api_terms_not_sbatch(tmp_path):
+    client = FakeRisClient()
+    result = _api_adapter(tmp_path, client).execute(str(_bundle(tmp_path)), run_id="s")
+    assert result.command == ["ris-api", "POST", "/jobs"]
+
+
+def test_api_backend_timeout_points_at_the_ris_api(tmp_path):
+    client = FakeRisClient(state="RUNNING")
+    adapter = _api_adapter(tmp_path, client)
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s", timeout=0)
+    assert result.status == ExecutionStatus.TIMEOUT
+    assert "GET /jobs/42" in result.message and "squeue" not in result.message
+
+
+def test_each_execute_gets_a_fresh_idempotency_key(tmp_path):
+    # The self-heal loop re-runs execute() with the same run_id after
+    # repairing main.py. ris-api keeps keys forever and never compares bodies,
+    # so a reused key would hand back the original (failed) job and the
+    # repaired code would never run (#150).
+    client = FakeRisClient()
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api",
+        ris_api_client=client, transfer_runner=ScriptedRunner(),
+        poll_interval=0.0, sleep=lambda _s: None,
+    )
+    bundle = _bundle(tmp_path)
+
+    adapter.execute(str(bundle), run_id="sess1")
+    adapter.execute(str(bundle), run_id="sess1")
+
+    keys = [c[2] for c in client.calls if c[0] == "submit_job"]
+    assert len(keys) == 2 and keys[0] != keys[1]
+    assert all(k.startswith("sess1-") and len(k) <= 255 for k in keys)
 
 
 def test_execute_happy_path_stages_submits_and_fetches(tmp_path):
@@ -297,28 +509,83 @@ def test_execute_happy_path_stages_submits_and_fetches(tmp_path):
     assert transfer.calls[-1][0] == "rsync"
 
 
-def test_mp_api_key_is_forwarded_into_the_job_env(tmp_path, monkeypatch):
-    # A compute node gets a fresh shell, and an SSH-submitted job doesn't
-    # inherit the runner's environment -- the Materials Project key a lookup
-    # script reads must be exported in the sbatch script explicitly.
+def _capturing_transfer(bundle, seen):
+    """A transfer runner that snapshots the staged secrets file at push time."""
+    def capture(argv):
+        if argv[0] == "rsync" and "--delete" in argv:
+            path = Path(bundle) / ".twain_secrets.env"
+            if path.exists():
+                seen["mode"] = path.stat().st_mode & 0o777
+                seen["text"] = path.read_text()
+        return False
+    return ScriptedRunner().on(capture, CommandResult(0, ""))
+
+
+def test_mp_api_key_reaches_the_job_via_a_staged_0600_file(tmp_path, monkeypatch):
+    # A compute node gets a fresh shell, so the Materials Project key a lookup
+    # script reads must reach the job explicitly -- but never inside the job
+    # script, which the RIS API persists and copies into recipes (#153).
     monkeypatch.setenv("MP_API_KEY", "test-mp-key-123")
-    adapter = _exec_adapter(tmp_path, _happy_cluster_runner())
     bundle = _bundle(tmp_path)
+    seen = {}
+    adapter = _exec_adapter(tmp_path, _happy_cluster_runner(),
+                            _capturing_transfer(bundle, seen))
 
     adapter.execute(str(bundle), run_id="sess-mp")
 
     script = (bundle / "job.slurm").read_text()
-    assert "export MP_API_KEY=test-mp-key-123" in script
+    assert "test-mp-key-123" not in script
+    assert seen == {"mode": 0o600, "text": "export MP_API_KEY=test-mp-key-123\n"}
+    remote = "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-runs/sess-mp/.twain_secrets.env"
+    assert f"TWAIN_SECRETS_FILE={remote}" in script
+    assert """trap 'rm -f "$TWAIN_SECRETS_FILE"' EXIT""" in script
+    assert not (bundle / ".twain_secrets.env").exists()   # local copy removed
 
 
-def test_no_mp_api_key_means_no_export(tmp_path, monkeypatch):
-    monkeypatch.delenv("MP_API_KEY", raising=False)
-    adapter = _exec_adapter(tmp_path, _happy_cluster_runner())
+def test_api_spec_never_carries_the_secret(tmp_path, monkeypatch):
+    monkeypatch.setenv("MP_API_KEY", "test-mp-key-123")
+    client = FakeRisClient()
     bundle = _bundle(tmp_path)
+    seen = {}
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api", ris_api_client=client,
+        transfer_runner=_capturing_transfer(bundle, seen),
+        poll_interval=0.0, sleep=lambda _s: None)
 
     adapter.execute(str(bundle), run_id="sess-mp")
 
-    assert "MP_API_KEY" not in (bundle / "job.slurm").read_text()
+    spec = next(c[1] for c in client.calls if c[0] == "submit_job")
+    assert "test-mp-key-123" not in json.dumps(spec)
+    assert "MP_API_KEY" in seen["text"]
+
+
+def test_secrets_prologue_exports_to_children_then_deletes_the_file(tmp_path):
+    # Run the real prologue in bash: the key (with shell metacharacters)
+    # reaches a child process, and the file is gone once the job exits.
+    from execution_adapter.slurm_execution_adapter import _secrets_prologue
+    run_dir = tmp_path / "run dir"
+    run_dir.mkdir()
+    path = SlurmExecutionAdapter._write_secrets(run_dir, {"MP_API_KEY": "k'ey $x"})
+    script = (_secrets_prologue(str(path))
+              + "set -e\nbash -c 'printf %s \"$MP_API_KEY\"'\n")
+
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert out.returncode == 0 and out.stdout == "k'ey $x"
+    assert not path.exists()
+
+
+def test_no_mp_api_key_means_no_secrets_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("MP_API_KEY", raising=False)
+    bundle = _bundle(tmp_path)
+    seen = {}
+    adapter = _exec_adapter(tmp_path, _happy_cluster_runner(),
+                            _capturing_transfer(bundle, seen))
+
+    adapter.execute(str(bundle), run_id="sess-mp")
+
+    assert seen == {}
+    assert ".twain_secrets.env" not in (bundle / "job.slurm").read_text()
 
 
 def test_payload_builds_venv_runs_smoke_then_main(tmp_path):

@@ -35,6 +35,7 @@ import os
 import re
 import shlex
 import time
+import uuid
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -42,6 +43,8 @@ try:  # pragma: no cover - import shim (mirrors local_adapter)
     from execution_adapter.cluster_profile import ClusterProfile
     from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
     from execution_adapter.local_adapter import _DEP_ERROR_MARKERS, _safe_name
+    from execution_adapter.ris_api_adapter import RisApiAdapter
+    from execution_adapter.ris_api_client import RisApiClient, RisApiError
     from execution_adapter.slurm_adapter import (
         THREAD_ENV_VARS,
         JobSpec,
@@ -52,11 +55,13 @@ try:  # pragma: no cover - import shim (mirrors local_adapter)
         ssh_runner,
         subprocess_runner,
     )
-    from execution_adapter.staging import Stager, StagingError
+    from execution_adapter.staging import SECRETS_FILE, Stager, StagingError
 except ImportError:  # pragma: no cover
     from cluster_profile import ClusterProfile
     from execution_result import ExecutionResult, ExecutionStatus
     from local_adapter import _DEP_ERROR_MARKERS, _safe_name
+    from ris_api_adapter import RisApiAdapter
+    from ris_api_client import RisApiClient, RisApiError
     from slurm_adapter import (
         THREAD_ENV_VARS,
         JobSpec,
@@ -67,7 +72,7 @@ except ImportError:  # pragma: no cover
         ssh_runner,
         subprocess_runner,
     )
-    from staging import Stager, StagingError
+    from staging import SECRETS_FILE, Stager, StagingError
 
 from plan_synthesizer.execution_plan import SlurmRequest
 
@@ -110,12 +115,49 @@ def _maxrss_mb(text: str) -> Optional[float]:
     return round(value * factor[match.group(2).upper()], 3)
 
 
+def _secrets_prologue(path: str) -> str:
+    """Job-script lines that load the staged secrets file, then delete it.
+
+    The delete is an EXIT trap rather than an immediate ``rm`` so a job that
+    Slurm requeues after a node failure still finds the file on its next
+    attempt; the file is 0600 inside the run dir until then.
+    """
+    # Via a variable: a quoted path nested inside the trap's own quotes
+    # breaks on any path with a space.
+    return (f"TWAIN_SECRETS_FILE={shlex.quote(path)}\n"
+            """trap 'rm -f "$TWAIN_SECRETS_FILE"' EXIT\n"""
+            """if [ -f "$TWAIN_SECRETS_FILE" ]; then . "$TWAIN_SECRETS_FILE"; fi\n""")
+
+
+def _submission_key(run_id: str) -> str:
+    """A fresh RIS API ``Idempotency-Key`` for one genuine submission.
+
+    ris-api stores keys permanently and never compares request bodies, so a
+    key derived from ``run_id`` alone would hand every later ``execute()`` of
+    the same run -- the self-heal loop's repaired re-runs -- the ORIGINAL
+    job back, and the repaired code would never run. One key per call keeps
+    the run id readable in the key while making each submission distinct;
+    the adapter reuses it only to re-send this same POST after a transient
+    failure. Capped at ris-api's 255-character limit.
+    """
+    return f"{run_id}-{uuid.uuid4().hex[:12]}"[-255:]
+
+
 class _AbortRequested(Exception):
     """Internal: the terminate seam fired while polling a Slurm job."""
 
 
 class SlurmExecutionAdapter:
-    """Stage, submit, poll, and fetch one RunBundle as a Slurm job."""
+    """Stage, submit, poll, and fetch one RunBundle as a Slurm job.
+
+    Job control (submit/poll/cancel/accounting/logs) goes through one of two
+    backends, selected by ``backend``: ``"api"`` (default) talks to the RIS
+    API over HTTPS (:class:`RisApiAdapter`); ``"ssh"`` is the legacy
+    sbatch/squeue/sacct/scancel path (:class:`SlurmAdapter`), kept as a
+    fallback. Either way, staging (rsync) and the login-node preflight probe
+    still go over SSH -- the RIS API has no file-transfer or raw-command-exec
+    endpoints to replace them with.
+    """
 
     def __init__(
         self,
@@ -135,11 +177,20 @@ class SlurmExecutionAdapter:
         parallelism: str = "threads",
         sleep=None,
         should_abort=None,
+        backend: Optional[str] = None,
+        ris_api_client: Optional[RisApiClient] = None,
     ):
-        """``cluster_runner`` executes sbatch/squeue/sacct (defaults to SSH to the
-        profile's first login node, or locally when ``host`` is falsy -- i.e. the
-        process already runs on a login node). ``transfer_runner`` executes the
-        rsync/ssh staging commands locally. Both are injectable for tests.
+        """``cluster_runner`` executes commands on the login node -- sbatch/
+        squeue/sacct on the ``"ssh"`` backend, or just the preflight probe on
+        ``"api"`` (defaults to SSH to the profile's first login node, or
+        locally when ``host`` is falsy -- i.e. the process already runs on a
+        login node). ``transfer_runner`` executes the rsync/ssh staging
+        commands. Both are injectable for tests.
+
+        ``backend`` is ``"api"`` or ``"ssh"``, falling back to the
+        ``TWAIN_SLURM_BACKEND`` env var, then ``"api"``. ``ris_api_client`` is
+        injectable (tests pass a fake); production builds a real
+        :class:`RisApiClient` from ``RIS_API_TOKEN``/``RIS_API_BASE_URL``.
 
         ``env_pythons`` lists pre-provisioned interpreters on cluster storage
         (e.g. ``<envs_root>/gpaw/bin/python``), tried in order at job start;
@@ -168,11 +219,28 @@ class SlurmExecutionAdapter:
         # means the researcher pressed Terminate -> scancel the job and return.
         self.should_abort = should_abort
 
+        self.backend = (backend or os.environ.get("TWAIN_SLURM_BACKEND") or "api").strip().lower()
+        if self.backend not in ("api", "ssh"):
+            raise ValueError(
+                f"unknown Slurm backend {self.backend!r} (expected 'api' or 'ssh')")
+        if self.backend == "api" and container_image:
+            # JobSubmitSpec has no container/pyxis field -- the API can't run
+            # a containerized job, unlike sbatch's `srun --container-image`.
+            raise ValueError(
+                "container_image is not supported on backend='api' (the RIS "
+                "API has no container field) -- use backend='ssh' instead")
+
         if cluster_runner is None:
             cluster_runner = ssh_runner(
                 self.host, user=user, modules=self.profile.modules,
             ) if self.host else subprocess_runner
-        self.slurm = SlurmAdapter(self.profile, runner=cluster_runner)
+        # Kept separate from `self.slurm`: the preflight probe needs to run a
+        # raw command on the login node, which the API backend can't do.
+        self.cluster_runner = cluster_runner
+        if self.backend == "ssh":
+            self.slurm = SlurmAdapter(self.profile, runner=cluster_runner)
+        else:
+            self.slurm = RisApiAdapter(self.profile, client=ris_api_client)
         # host="" (already on a login node) degrades staging to local copies.
         self.stager = Stager(self.profile, host=self.host, user=user,
                              runner=transfer_runner)
@@ -217,17 +285,22 @@ class SlurmExecutionAdapter:
         remote_dir = self.stager.remote_run_dir(run_id)
         job_env = dict(env or {})
         # Secrets a generated script may read at run time (currently the
-        # Materials Project key for database-retrieval tasks). A locally
-        # submitted job inherits the runner's environment, but an
-        # SSH-submitted one gets a fresh shell -- export explicitly so both
-        # paths behave the same.
-        for secret in _PASSTHROUGH_ENV:
-            if secret not in job_env and os.environ.get(secret):
-                job_env[secret] = os.environ[secret]
+        # Materials Project key for database-retrieval tasks). A compute node
+        # gets a fresh shell, so they must reach the job explicitly -- but
+        # never inside the job script: the RIS API stores every submitted
+        # spec (script + environment), serves it back from /jobs/{id}/request,
+        # and copies it into recipes. They ride the rsync instead, in a 0600
+        # file the job sources and deletes (#153).
+        secrets = {name: os.environ[name] for name in _PASSTHROUGH_ENV
+                   if name not in job_env and os.environ.get(name)}
+        secrets_path = self._write_secrets(local_dir, secrets)
+        payload = self._payload(local_dir, install_deps=install_deps,
+                                run_smoke=run_smoke)
+        if secrets_path:
+            payload = _secrets_prologue(f"{remote_dir}/{SECRETS_FILE}") + payload
         job = JobSpec(
             job_name=job_name,
-            command=self._payload(local_dir, install_deps=install_deps,
-                                  run_smoke=run_smoke),
+            command=payload,
             workdir=remote_dir,
             output_path=f"{remote_dir}/{job_name}-%j.log",
             partition=self.partition,
@@ -238,9 +311,22 @@ class SlurmExecutionAdapter:
 
         # 2) stage + preflight + submit --------------------------------------------
         try:
-            script = self.slurm.render_sbatch(job, self.request)
-            (Path(local_dir) / "job.slurm").write_text(script, encoding="utf-8")
-            self.stager.push(local_dir, run_id)
+            if self._via_api:
+                # The API renders #SBATCH directives from structured fields
+                # itself, so there's no job.slurm file to write -- the spec's
+                # `script` carries the same shell payload inline.
+                to_submit = self.slurm.render_job_spec(job, self.request)
+            else:
+                script = self.slurm.render_sbatch(job, self.request)
+                (Path(local_dir) / "job.slurm").write_text(script, encoding="utf-8")
+                to_submit = f"{remote_dir}/job.slurm"
+            try:
+                self.stager.push(local_dir, run_id)
+            finally:
+                # Only the cluster copy is needed; don't leave the secret in
+                # the local workspace (or in artifacts_dir).
+                if secrets_path:
+                    secrets_path.unlink(missing_ok=True)
             preflight_error = self._preflight_env_check(
                 remote_dir, local_dir, install_deps=install_deps,
                 run_smoke=run_smoke)
@@ -251,11 +337,15 @@ class SlurmExecutionAdapter:
                     tool_name=tool_name,
                     artifacts_dir=local_dir if keep_artifacts else None,
                 )
-            job_id = self.slurm.submit(f"{remote_dir}/job.slurm")
-        except (SlurmError, StagingError, KeyError, OSError) as exc:
+            job_id = (self.slurm.submit(to_submit,
+                                        idempotency_key=_submission_key(run_id),
+                                        sleep=self._sleep)
+                     if self._via_api
+                     else self.slurm.submit(to_submit))
+        except (SlurmError, RisApiError, StagingError, KeyError, OSError) as exc:
             return ExecutionResult(
                 status=ExecutionStatus.SETUP_FAILED,
-                message=f"failed to submit the Slurm job: {exc}",
+                message=f"failed to submit the job: {exc}",
                 tool_name=tool_name,
                 artifacts_dir=local_dir if keep_artifacts else None,
             )
@@ -278,15 +368,17 @@ class SlurmExecutionAdapter:
         except _AbortRequested:
             try:
                 self.slurm.cancel(job_id)
-                note = f"Slurm job {job_id} was cancelled (scancel)"
+                note = (f"Slurm job {job_id} was cancelled "
+                        f"({'via the RIS API' if self._via_api else 'scancel'})")
             except SlurmError as exc:
                 note = (f"cancelling Slurm job {job_id} failed ({exc}) -- "
-                        f"cancel it manually with `scancel {job_id}`")
+                        f"cancel it manually with `scancel {job_id}` on a login node"
+                        + (" or in the RIS API web app" if self._via_api else ""))
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 message=f"run terminated by the researcher; {note}",
                 tool_name=tool_name,
-                command=["sbatch", f"{remote_dir}/job.slurm"],
+                command=self._submit_command(remote_dir),
                 artifacts_dir=local_dir if keep_artifacts else None,
             )
         except SlurmError as exc:
@@ -299,11 +391,11 @@ class SlurmExecutionAdapter:
                 message=(
                     f"the Slurm job is still running on {self.profile.name} "
                     f"(job id {job_id}); it was NOT cancelled. Check it with "
-                    f"`squeue --job {job_id}` and fetch outputs from {remote_dir} "
+                    f"{self._status_hint(job_id)} and fetch outputs from {remote_dir} "
                     f"when it completes. (wait ended because: {exc})"
                 ),
                 tool_name=tool_name,
-                command=["sbatch", f"{remote_dir}/job.slurm"],
+                command=self._submit_command(remote_dir),
                 artifacts_dir=local_dir if keep_artifacts else None,
             )
 
@@ -317,20 +409,31 @@ class SlurmExecutionAdapter:
                 tool_name=tool_name,
                 artifacts_dir=local_dir if keep_artifacts else None,
             )
-        stdout = self._read_log(local_dir, job_name, job_id)
+        if self._via_api:
+            # The API writes stderr to its own file, where the traceback and
+            # the OOM/dependency markers land -- fetch it, or self-heal and
+            # classification only see stdout (#151).
+            stdout = self._safe_stdout(job_id)
+            stderr = self._safe_stderr(job_id)
+        else:
+            # sbatch --output without --error: one log holds both streams.
+            stdout = self._read_log(local_dir, job_name, job_id)
+            stderr = ""
         accounting = self._safe_accounting(job_id)
         exit_code = self.slurm.exit_code(job_id) if accounting else None
 
-        status, message = self._classify(state, exit_code, stdout, job_id)
+        status, message = self._classify(
+            state, exit_code, f"{stdout}\n{stderr}" if stderr else stdout, job_id)
         return ExecutionResult(
             status=status,
             exit_code=exit_code,
             stdout=stdout,
+            stderr=stderr,
             duration_seconds=_elapsed_seconds(accounting.get("Elapsed", "")),
             peak_memory_mb=_maxrss_mb(accounting.get("MaxRSS", "")),
             artifacts_dir=local_dir if keep_artifacts else None,
             tool_name=tool_name,
-            command=["sbatch", f"{remote_dir}/job.slurm"],
+            command=self._submit_command(remote_dir),
             message=message,
             # Job identity + accounting for provenance / the budget tracker.
             install_log={"job_id": job_id, "cluster": self.profile.name,
@@ -383,7 +486,7 @@ class SlurmExecutionAdapter:
         rd = shlex.quote(remote_dir)
         for env_python in self.env_pythons:
             py = shlex.quote(env_python)
-            result = self.slurm.runner([
+            result = self.cluster_runner([
                 "bash", "-c",
                 f"cd {rd} && [ -x {py} ] && "
                 f"timeout {self._PREFLIGHT_TIMEOUT_S} {py} inline_tests.py",
@@ -398,7 +501,7 @@ class SlurmExecutionAdapter:
         # match the markers below -- so a conda-only requirement (psi4) used to
         # fail open here and die in the job instead.
         pys = " ".join(shlex.quote(p) for p in self.env_pythons)
-        result = self.slurm.runner([
+        result = self.cluster_runner([
             "bash", "-c",
             f'cd {rd} && py=python3; for c in {pys}; do '
             f'[ -x "$c" ] && py="$c" && break; done; '
@@ -705,11 +808,52 @@ class SlurmExecutionAdapter:
             ]
         return "\n".join(lines)
 
+    @property
+    def _via_api(self) -> bool:
+        return isinstance(self.slurm, RisApiAdapter)
+
+    def _submit_command(self, remote_dir: str) -> List[str]:
+        """How the job was submitted, for ExecutionResult.command/provenance."""
+        if self._via_api:
+            return ["ris-api", "POST", "/jobs"]
+        return ["sbatch", f"{remote_dir}/job.slurm"]
+
+    def _status_hint(self, job_id: str) -> str:
+        if self._via_api:
+            return f"the RIS API (`GET /jobs/{job_id}`, or its web app)"
+        return f"`squeue --job {job_id}`"
+
+    @staticmethod
+    def _write_secrets(local_dir, secrets: dict) -> Optional[Path]:
+        """Write ``secrets`` as ``export`` lines to a 0600 :data:`SECRETS_FILE`
+        in the bundle; None (and no file) when there are none."""
+        if not secrets:
+            return None
+        path = Path(local_dir) / SECRETS_FILE
+        path.unlink(missing_ok=True)  # O_CREAT keeps an old file's mode
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for name, value in secrets.items():
+                fh.write(f"export {name}={shlex.quote(value)}\n")
+        return path
+
     def _read_log(self, local_dir, job_name: str, job_id: str) -> str:
         path = Path(local_dir) / f"{job_name}-{job_id}.log"
         try:
             return path.read_text(encoding="utf-8")
         except OSError:
+            return ""
+
+    def _safe_stdout(self, job_id: str) -> str:
+        try:
+            return self.slurm.stdout(job_id)
+        except SlurmError:
+            return ""
+
+    def _safe_stderr(self, job_id: str) -> str:
+        try:
+            return self.slurm.stderr(job_id)
+        except SlurmError:
             return ""
 
     def _safe_accounting(self, job_id: str) -> dict:
