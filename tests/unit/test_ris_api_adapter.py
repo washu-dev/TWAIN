@@ -141,6 +141,15 @@ def test_render_job_spec_formats_walltime_over_a_day():
     assert adapter.render_job_spec(job, long)["time_limit"] == "1-01:00:00"
 
 
+def test_script_starts_with_an_interpreter_line():
+    # sbatch (behind ris-api) rejects a batch script without a #! first line;
+    # found by a live POST /jobs/preview, which the fakes can't catch.
+    adapter = RisApiAdapter(_profile(), client=FakeClient())
+    spec = adapter.render_job_spec(JobSpec(job_name="j", command="python main.py"),
+                                   SlurmRequest(cpu_count=2, gpu_count=0, max_time=10, ram=4096))
+    assert spec["script"].startswith("#!/bin/bash\n")
+
+
 def test_a_pinned_gpu_type_is_rejected_not_silently_dropped():
     # The API takes only a GPU count; quietly running on any GPU would be
     # wrong for a profile that pins e.g. H100s (#154).
