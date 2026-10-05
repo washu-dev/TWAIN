@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 try:  # pragma: no cover - import shim (mirrors local_adapter)
     from execution_adapter.cluster_profile import ClusterProfile
@@ -35,8 +35,31 @@ except ImportError:  # pragma: no cover
 RUNS_SUBDIR = "twain-runs"
 
 
+#: Job-time secrets staged next to the bundle (mode 0600), loaded and deleted
+#: by the job itself, so they never appear in a job script -- which the RIS
+#: API persists and copies into recipes. Never pulled back.
+SECRETS_FILE = ".twain_secrets.env"
+
+
 class StagingError(RuntimeError):
     """Raised when pushing/pulling the run directory fails."""
+
+
+@runtime_checkable
+class BundleTransport(Protocol):
+    """What :class:`~execution_adapter.slurm_execution_adapter.SlurmExecutionAdapter`
+    needs to get a RunBundle onto cluster storage and its outputs back.
+
+    :class:`Stager` (rsync over SSH) is the only implementation today -- the
+    RIS API has no file-transfer endpoints, so staging can't move to it yet.
+    This protocol exists so that boundary is named: a future API-based
+    transport can satisfy it without the adapter changing at all.
+    """
+
+    def remote_run_dir(self, run_id) -> str: ...
+    def push(self, local_dir, run_id) -> str: ...
+    def pull(self, run_id, local_dir) -> str: ...
+    def cleanup(self, run_id) -> None: ...
 
 
 class Stager:
@@ -112,8 +135,8 @@ class Stager:
         local = Path(local_dir)
         local.mkdir(parents=True, exist_ok=True)
         remote = self.remote_run_dir(run_id)
-        self._run(["rsync", "-az", f"{self._remote_arg(remote)}/",
-                   f"{str(local).rstrip('/')}/"])
+        self._run(["rsync", "-az", f"--exclude={SECRETS_FILE}",
+                   f"{self._remote_arg(remote)}/", f"{str(local).rstrip('/')}/"])
         return str(local)
 
     def cleanup(self, run_id) -> None:

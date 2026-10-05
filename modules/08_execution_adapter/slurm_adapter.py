@@ -225,6 +225,57 @@ THREAD_ENV_VARS = (
 _SUBMITTED_RE = re.compile(r"Submitted batch job (\d+)")
 
 
+# --------------------------------------------------------- partition selection
+def select_partition(
+    profile: ClusterProfile, request: SlurmRequest, override: Optional[str] = None
+) -> Partition:
+    """Choose a partition on ``profile`` for ``request`` (or validate ``override``).
+
+    Preference order, all constrained by GPU need and wall-clock limit:
+      1. an explicit override (validated against the request),
+      2. the dedicated GPU partition when GPUs are requested,
+      3. the short partition when the job fits its limit (faster scheduling),
+      4. the default partition,
+      5. any partition that admits the job.
+    Raises :class:`SlurmError` if nothing admits the request.
+
+    Module-level (not a method) so both :class:`SlurmAdapter` (SSH/sbatch) and
+    the RIS-API-backed adapter share one selection policy instead of
+    duplicating it -- the API takes a partition name directly rather than
+    rendering ``#SBATCH`` lines, but still needs the same choice made client-side.
+    """
+    needs_gpu = request.gpu_count > 0
+    minutes = float(request.max_time)
+
+    if override is not None:
+        part = profile.partition(override)  # KeyError if unknown
+        if not part.admits(minutes=minutes, needs_gpu=needs_gpu):
+            raise SlurmError(
+                f"partition {override!r} cannot satisfy the request "
+                f"(gpu={needs_gpu}, minutes={minutes})"
+            )
+        return part
+
+    candidates: List[str] = []
+    if needs_gpu and profile.gpu_partition:
+        candidates.append(profile.gpu_partition)
+    if not needs_gpu and profile.short_partition:
+        candidates.append(profile.short_partition)
+    if profile.default_partition:
+        candidates.append(profile.default_partition)
+    candidates += [p.name for p in profile.partitions]
+
+    for name in candidates:
+        part = profile.partition(name)
+        if part.admits(minutes=minutes, needs_gpu=needs_gpu):
+            return part
+
+    raise SlurmError(
+        f"no partition on cluster {profile.name!r} admits the request "
+        f"(gpu={needs_gpu}, minutes={minutes})"
+    )
+
+
 class SlurmAdapter:
     """Render, submit, and track Slurm jobs against a :class:`ClusterProfile`."""
 
@@ -236,44 +287,10 @@ class SlurmAdapter:
     def select_partition(self, request: SlurmRequest, override: Optional[str] = None) -> Partition:
         """Choose a partition for ``request`` (or validate an explicit ``override``).
 
-        Preference order, all constrained by GPU need and wall-clock limit:
-          1. an explicit override (validated against the request),
-          2. the dedicated GPU partition when GPUs are requested,
-          3. the short partition when the job fits its limit (faster scheduling),
-          4. the default partition,
-          5. any partition that admits the job.
-        Raises :class:`SlurmError` if nothing admits the request.
+        See the module-level :func:`select_partition` for the policy; this is a
+        thin instance-bound wrapper kept for backward compatibility.
         """
-        needs_gpu = request.gpu_count > 0
-        minutes = float(request.max_time)
-
-        if override is not None:
-            part = self.profile.partition(override)  # KeyError if unknown
-            if not part.admits(minutes=minutes, needs_gpu=needs_gpu):
-                raise SlurmError(
-                    f"partition {override!r} cannot satisfy the request "
-                    f"(gpu={needs_gpu}, minutes={minutes})"
-                )
-            return part
-
-        candidates: List[str] = []
-        if needs_gpu and self.profile.gpu_partition:
-            candidates.append(self.profile.gpu_partition)
-        if not needs_gpu and self.profile.short_partition:
-            candidates.append(self.profile.short_partition)
-        if self.profile.default_partition:
-            candidates.append(self.profile.default_partition)
-        candidates += [p.name for p in self.profile.partitions]
-
-        for name in candidates:
-            part = self.profile.partition(name)
-            if part.admits(minutes=minutes, needs_gpu=needs_gpu):
-                return part
-
-        raise SlurmError(
-            f"no partition on cluster {self.profile.name!r} admits the request "
-            f"(gpu={needs_gpu}, minutes={minutes})"
-        )
+        return select_partition(self.profile, request, override)
 
     # ------------------------------------------------------------ script rendering
     def render_sbatch(self, job: JobSpec, request: SlurmRequest) -> str:

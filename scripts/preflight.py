@@ -239,7 +239,7 @@ def check_aws(rep: Report) -> None:
     for label, arn in _secret_arns_from_task_defs():
         if arn.endswith("-REPLACE"):
             rep.bad(f"{label}: placeholder ARN not replaced ({arn})",
-                    "run scripts/aws/setup_secrets.sh --apply to create + wire the LLM secrets")
+                    "terraform apply in terraform/, then scripts/aws/setup_secrets.sh --apply to wire the ARNs")
             continue
         try:
             sm.describe_secret(SecretId=arn)

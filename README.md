@@ -245,15 +245,20 @@ code that runs in cloud. `make preflight` verifies local config.
 
 ### Step 1 — Fill `.env` with the LLM gateway credentials
 
-`API_KEY`, `CLIENT_ID`, `CLIENT_SECRET` (see `.env.example`). Required by both
-the local runner and `make secrets-apply`.
+`API_KEY`, `CLIENT_ID`, `CLIENT_SECRET` (see `.env.example`). Required by the
+local runner; the cloud runner reads them from Terraform-managed secrets
+(Step 2).
 
-### Step 2 — Create the LLM secrets and wire the runner task def
+### Step 2 — Create the runner secrets and wire the runner task def
 
 ```bash
-make secrets              # PLAN — see what it will do
-make secrets-apply        # creates 3 Secrets Manager entries + patches the task def
-git add runner/ecs-task-definition.json && git commit -m "Wire LLM secret ARNs"
+# terraform/secrets.json (git-ignored; template: secrets.example.json) holds the
+# LLM creds under secure_api/* and the RIS API PAT under ris_api/TOKEN.
+terraform -chdir=terraform apply   # secrets + ECS execution-role read access
+terraform -chdir=terraform output runner_secrets_missing   # must be []
+make secrets              # PLAN — show the ARNs it will wire
+make secrets-apply        # patches the -REPLACE ARNs in the task def
+git add runner/ecs-task-definition.json && git commit -m "Wire runner secret ARNs"
 ```
 
 This is the step that clears the `-REPLACE` placeholders.
@@ -361,7 +366,8 @@ Open the CloudFront URL, sign in, run a simulation end to end.
   (unit tests + local runs).
 - The **AWS scripts** (`setup_secrets.sh`, `provision.sh`) are syntax-checked but
   **not run against AWS from this repo** — review them and run the PLAN mode
-  (no `--apply`) first. They're idempotent and check-then-create.
+  (no `--apply`) first. `setup_secrets.sh` only reads Terraform outputs and
+  patches the task def; `provision.sh` is idempotent and check-then-create.
 - Creating the **API ECS service + ALB target group** is environment-specific
   (your VPC/subnets/SG/ALB); that piece is documented, not scripted.
 

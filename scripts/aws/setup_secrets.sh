@@ -1,99 +1,65 @@
 #!/usr/bin/env bash
 #
-# Create/update the runner's LLM-gateway secrets in AWS Secrets Manager from your
-# local .env, then wire the resulting ARNs into runner/ecs-task-definition.json
-# (replacing the `-REPLACE` placeholders). This removes the fiddliest manual
-# deploy step.
+# Wire the runner's secrets into runner/ecs-task-definition.json, replacing the
+# `-REPLACE` placeholders with the ARNs of the Terraform-managed TWAIN/* secrets.
 #
 #   scripts/aws/setup_secrets.sh            # PLAN: show what it would do (no changes)
-#   scripts/aws/setup_secrets.sh --apply    # create/update secrets + patch the task def
+#   scripts/aws/setup_secrets.sh --apply    # patch the task def
 #
-# Requires: awscli v2 configured with credentials for account 730335203321, and
-# the LLM creds present in the repo-root .env (API_KEY, CLIENT_ID, CLIENT_SECRET).
+# The secrets themselves live in Terraform (terraform/secrets.json, git-ignored):
+# the LLM gateway creds under secure_api/*, the RIS API PAT under ris_api/TOKEN.
+# `terraform apply` there creates them AND grants the ECS execution role read on
+# exactly these ARNs; this script only copies the ARNs (from the
+# `runner_secret_arns` output) into the task def. It reads no secret values.
+#
+# Requires: terraform, with `terraform apply` already run in terraform/.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENV_FILE="${ENV_FILE:-$REPO/.env}"
+TF_DIR="$REPO/terraform"
 TASKDEF="$REPO/runner/ecs-task-definition.json"
-REGION="${AWS_REGION:-us-east-1}"
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
-
-# Stable secret names (no random suffix), so the ARNs are predictable + re-usable.
-declare -A SECRET_NAME=(
-  [API_KEY]="twain/llm/api-key"
-  [CLIENT_ID]="twain/llm/client-id"
-  [CLIENT_SECRET]="twain/llm/client-secret"
-)
 
 info() { printf '\033[1;36m%s\033[0m\n' "$1"; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$1" >&2; exit 1; }
 
-command -v aws >/dev/null 2>&1 || die "awscli not found on PATH"
-[ -f "$ENV_FILE" ] || die "no .env at $ENV_FILE (copy .env.example and fill the LLM creds)"
-
-env_val() { grep -E "^$1=" "$ENV_FILE" | head -1 | cut -d= -f2- | sed 's/^"//; s/"$//'; }
-
-[ "$APPLY" = 1 ] && info "MODE: APPLY (will create/update secrets and patch the task def)" \
+command -v terraform >/dev/null 2>&1 || die "terraform not found on PATH"
+[ "$APPLY" = 1 ] && info "MODE: APPLY (will patch the task def)" \
                  || info "MODE: PLAN (read-only; re-run with --apply to make changes)"
-echo "Region: $REGION   Secret store: AWS Secrets Manager"
-echo
 
-declare -A RESULT_ARN
-for var in API_KEY CLIENT_ID CLIENT_SECRET; do
-  name="${SECRET_NAME[$var]}"
-  value="$(env_val "$var")"
-  [ -n "$value" ] || die "$var is empty in $ENV_FILE"
+arns_json="$(terraform -chdir="$TF_DIR" output -json runner_secret_arns 2>/dev/null)" \
+  || die "no runner_secret_arns output -- run 'terraform apply' in terraform/ first"
+missing_json="$(terraform -chdir="$TF_DIR" output -json runner_secrets_missing 2>/dev/null || echo '[]')"
 
-  if arn=$(aws secretsmanager describe-secret --secret-id "$name" --region "$REGION" \
-             --query ARN --output text 2>/dev/null); then
-    if [ "$APPLY" = 1 ]; then
-      aws secretsmanager put-secret-value --secret-id "$name" \
-        --secret-string "$value" --region "$REGION" >/dev/null
-      echo "  updated  $name"
-    else
-      echo "  would update  $name (exists)"
-    fi
-  else
-    if [ "$APPLY" = 1 ]; then
-      arn=$(aws secretsmanager create-secret --name "$name" \
-              --secret-string "$value" --region "$REGION" --query ARN --output text)
-      echo "  created  $name"
-    else
-      echo "  would create  $name (new)"
-      arn="(arn-assigned-on-create)"
-    fi
-  fi
-  RESULT_ARN[$var]="$arn"
-done
-
-echo
-if [ "$APPLY" = 1 ]; then
-  info "Wiring ARNs into runner/ecs-task-definition.json"
-  python3 - "$TASKDEF" "${RESULT_ARN[API_KEY]}" "${RESULT_ARN[CLIENT_ID]}" "${RESULT_ARN[CLIENT_SECRET]}" <<'PY'
+python3 - "$TASKDEF" "$APPLY" "$arns_json" "$missing_json" <<'PY'
 import json, sys
-path, api_key, client_id, client_secret = sys.argv[1:5]
-arns = {"API_KEY": api_key, "CLIENT_ID": client_id, "CLIENT_SECRET": client_secret}
+path, apply, arns, missing = sys.argv[1], sys.argv[2] == "1", json.loads(sys.argv[3]), json.loads(sys.argv[4])
 with open(path) as f:
-    data = json.load(f)
-patched = []
+    raw = f.read()
+data = json.loads(raw)
+wanted = [s["name"] for c in data.get("containerDefinitions", []) for s in c.get("secrets", [])]
+unmapped = [n for n in wanted if n not in arns]
+# Swap each valueFrom string in place rather than re-dumping the JSON, so the
+# file's hand-aligned layout survives and the diff is one line per secret.
 for c in data.get("containerDefinitions", []):
     for s in c.get("secrets", []):
         if s["name"] in arns:
-            s["valueFrom"] = arns[s["name"]]
-            patched.append(s["name"])
-with open(path, "w") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-print("  patched:", ", ".join(patched))
+            print(f"  {s['name']:14} -> {arns[s['name']]}")
+            raw = raw.replace(json.dumps(s["valueFrom"]), json.dumps(arns[s["name"]]), 1)
+if unmapped:
+    hint = (f" (add {', '.join(missing)} to terraform/secrets.json -- see "
+            f"secrets.example.json -- and re-apply)" if missing else "")
+    sys.exit(f"error: no Terraform-managed secret for {', '.join(unmapped)}{hint}")
+if apply:
+    json.loads(raw)  # still valid JSON
+    with open(path, "w") as f:
+        f.write(raw)
 PY
-  echo
+
+echo
+if [ "$APPLY" = 1 ]; then
   info "Done. Commit runner/ecs-task-definition.json, then deploy the runner."
 else
-  echo "Would set these valueFrom ARNs in runner/ecs-task-definition.json:"
-  for var in API_KEY CLIENT_ID CLIENT_SECRET; do
-    echo "  $var  ->  ${RESULT_ARN[$var]}"
-  done
-  echo
-  echo "Re-run with --apply to create the secrets and patch the task def."
+  echo "Re-run with --apply to patch runner/ecs-task-definition.json."
 fi

@@ -2607,6 +2607,12 @@ class StateMachine:
         process is already on a login node) and ``TWAIN_SLURM_USER``. Returns
         None when the profile can't be loaded, so execute() can skip gracefully
         with guidance instead of crashing.
+
+        Job control defaults to the RIS API (``RIS_API_TOKEN``/
+        ``RIS_API_BASE_URL``); set ``TWAIN_SLURM_BACKEND=ssh`` to fall back to
+        the legacy sbatch/squeue/sacct/scancel-over-SSH path -- see
+        SlurmExecutionAdapter's docstring. Staging (rsync) is unaffected by
+        this flag either way.
         """
         from execution_adapter.cluster_profile import ClusterProfile
         from execution_adapter.slurm_execution_adapter import SlurmExecutionAdapter

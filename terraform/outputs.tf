@@ -17,3 +17,13 @@ output "sso_ci_reader_role_arn" {
   description = "ARN of the SSO-only CI reader role (null if not created). Set this as TWAIN_SSO_CI_ROLE_ARN in CI."
   value       = local.create_ci_role ? aws_iam_role.sso_ci_reader[0].arn : null
 }
+
+output "runner_secret_arns" {
+  description = "Runner env var => secret ARN, for runner/ecs-task-definition.json (scripts/aws/setup_secrets.sh wires these)."
+  value       = local.runner_secret_arns
+}
+
+output "runner_secrets_missing" {
+  description = "secrets.json keys the runner needs that don't exist yet (add them, then re-apply)."
+  value       = local.runner_secrets_missing
+}

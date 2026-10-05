@@ -231,20 +231,53 @@ pass `--slurm` to the orchestrator CLI:
 pixi run python modules/07_runtime_orchestrator/orchestrator.py --slurm
 ```
 
+**Job control** (submit/poll/cancel/accounting/logs) goes through one of two
+backends, chosen by `TWAIN_SLURM_BACKEND`:
+- **`api`** (default) — the [RIS API](https://d3n2m687w2hvtj.cloudfront.net/api/redoc),
+  a hosted HTTPS gateway onto the same Slurm scheduler. Requires `RIS_API_TOKEN`
+  (a bearer PAT; in AWS it is the Terraform-managed `TWAIN/ris_api/TOKEN` -- see
+  the one-time prerequisites below -- or set directly in `.env`/`.env.ris`
+  locally). Generate it in the RIS API web app; it expires after a week, a
+  month, or never (your choice at creation), so pick deliberately and rotate it
+  in `terraform/secrets.json` + `terraform apply` + a runner redeploy. ris-api
+  rate-limits per token (60 requests/min): each running job polls twice a
+  minute at the default 30 s interval, so ~25 concurrent jobs on one PAT is the
+  ceiling before polls start failing with 429 (tolerated as lost contact). `RIS_API_BASE_URL` overrides
+  the endpoint if it ever changes.
+- **`ssh`** — the original `sbatch`/`squeue`/`sacct`/`scancel` path over SSH,
+  kept as a fallback (`SlurmAdapter`, `modules/08_execution_adapter/slurm_adapter.py`).
+
+Either way, **staging and the pre-submit preflight probe still go over SSH** —
+the RIS API has no file-transfer endpoints (job submission takes only an
+inline script, ≤64KB) and no way to run an arbitrary command on the login
+node, so those two things can't move to it. Only the scheduler control-plane
+calls (what used to be `sbatch`/`squeue`/`sacct`/`scancel` over SSH) go over
+HTTPS instead.
+
 What happens at EXECUTE:
 1. **stage** — the bundle is rsynced to
    `<storage_root>/twain-runs/<session_id>/` on the cluster
    (`configs/clusters/compute2.json` points at the writable allocation dir);
-2. **submit** — an `#SBATCH` script is rendered from the plan's `slurm_request`
-   (partition auto-selected from CPU/GPU/wall-time; `ml load ris slurm`) and
-   submitted on a login node over SSH;
-3. **wait** — `squeue`/`sacct` are polled (bounded). If the wait budget expires
-   the job is **left running** and the result says how to check on it
-   (`squeue --job <id>`) — a multi-hour job is never killed just because our
-   wait was shorter;
-4. **fetch** — outputs (`results.csv`, the job log) are rsynced back into the
-   session's artifacts dir, and `sacct` Elapsed/MaxRSS land on the execution
-   result for provenance.
+2. **submit** — on `api`, a `JobSubmitSpec` is POSTed directly (partition
+   auto-selected from CPU/GPU/wall-time; the script embeds the same
+   `module load ris slurm` + payload the SSH path renders into `#SBATCH`
+   lines); on `ssh`, an `#SBATCH` script is rendered and submitted via
+   `sbatch` on a login node over SSH;
+3. **wait** — the job is polled (bounded): `GET /jobs/{id}` on `api`,
+   `squeue`/`sacct` on `ssh`. If the wait budget expires the job is **left
+   running** and the result says how to check on it — a multi-hour job is
+   never killed just because our wait was shorter;
+4. **fetch** — outputs (`results.csv`) are rsynced back into the session's
+   artifacts dir either way; stdout, stderr (the last 64 KB, where tracebacks
+   land) and accounting (Elapsed/MaxRSS) come from `GET /jobs/{id}/stdout`,
+   `/output/stderr?tail=` and `/accounting` on `api`, or the rsynced job log
+   (both streams in one file) + `sacct` on `ssh`.
+
+Job-time secrets (`MP_API_KEY`) never go in the job script: the RIS API stores
+every submitted spec and copies it into recipes. They are staged next to the
+bundle as a 0600 `.twain_secrets.env` that the job loads and deletes, and the
+results pull excludes it. A GPU job whose cluster profile pins `gpu_type` must
+use `TWAIN_SLURM_BACKEND=ssh`, since the API takes only a GPU count.
 
 The job builds its own venv from the bundle's `requirements.txt` (compute
 nodes have no TWAIN environment), and the smoke test runs first so a missing
@@ -320,7 +353,11 @@ queue wait.
 
 Prerequisites and knobs:
 - WashU VPN (AnyConnect) + Duo, and an SSH key for the login node
-  (`ssh <wustl-key>@c2-login-001.ris.wustl.edu` must work non-interactively).
+  (`ssh <wustl-key>@c2-login-001.ris.wustl.edu` must work non-interactively) —
+  needed either way, for staging + the preflight probe.
+- `RIS_API_TOKEN` — bearer PAT for the RIS API; required unless
+  `TWAIN_SLURM_BACKEND=ssh`. `RIS_API_BASE_URL` overrides the default endpoint.
+- `TWAIN_SLURM_BACKEND` — `api` (default) or `ssh`.
 - `TWAIN_SLURM_USER` — your WUSTL key (omit if `~/.ssh/config` handles it);
   `TWAIN_SLURM_HOST` — override the login node, or set it to the empty string
   when the process already runs *on* a login node (no SSH hop);
@@ -460,11 +497,17 @@ One-time prerequisites (the deploy job assumes these exist):
 1. **ECR repo** `twain-runner-ecr`.
 2. **ECS service** `twain-runner` on cluster `twain-cluster` (Fargate; no load
    balancer — it's a worker). Size for DFT: the task def uses 2 vCPU / 8 GB.
-3. **Secrets Manager** entries for the WashU LLM creds, wired into the task def's
-   `secrets` block (replace the `…-REPLACE` ARNs): `API_KEY`, `CLIENT_ID`,
-   `CLIENT_SECRET`. The DB password is already the shared `AWS_SECRET_ARN`.
+3. **Secrets** in Terraform (`terraform/secrets.json`, git-ignored; template in
+   `secrets.example.json`): the WashU LLM creds under `secure_api/*` and the RIS
+   API PAT under `ris_api/TOKEN`. `terraform apply` creates them and grants the
+   ECS **execution** role (`ecsTaskExecutionRole`, which resolves the task def's
+   `secrets` before the container starts) read on exactly those ARNs plus
+   decrypt on the TWAIN KMS key; `terraform output runner_secrets_missing` lists
+   any key still to add. Then `scripts/aws/setup_secrets.sh --apply` replaces the
+   task def's `…-REPLACE` ARNs from `terraform output runner_secret_arns`.
+   The DB password is already the shared `AWS_SECRET_ARN`.
 4. Repo secrets `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (same as the API).
-5. Task role: RDS access + `secretsmanager:GetSecretValue` for those ARNs.
+5. Task role: RDS access. (Secret injection uses the execution role -- step 3.)
 
 Execution mode (env in the task def):
 - **`TWAIN_EXECUTE_LOCALLY=1`** (the default set here) — run calculations for real,
