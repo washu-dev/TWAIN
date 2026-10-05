@@ -459,6 +459,42 @@ def test_api_backend_timeout_points_at_the_ris_api(tmp_path):
     assert "GET /jobs/42" in result.message and "squeue" not in result.message
 
 
+def test_poll_sleep_goes_through_the_webhook_waiter(tmp_path):
+    # With a job_event_wait seam, the pause between polls is the waiter's
+    # (which returns early on a RIS webhook for the job), not a plain sleep (#157).
+    states = iter(["PENDING", "RUNNING", "COMPLETED"])
+    client = FakeRisClient()
+    client.get_job = lambda job_id: {"job_id": job_id, "state": next(states)}
+    waits, sleeps = [], []
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api",
+        ris_api_client=client, transfer_runner=ScriptedRunner(),
+        poll_interval=30.0, sleep=sleeps.append,
+        job_event_wait=lambda job_id, seconds: waits.append((job_id, seconds)) or True,
+    )
+
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s")
+
+    assert result.status == ExecutionStatus.SUCCESS
+    assert waits == [("42", 30.0), ("42", 30.0)] and sleeps == []
+
+
+def test_terminate_is_still_checked_before_each_webhook_wait(tmp_path):
+    client = FakeRisClient(state="RUNNING")
+    waits = []
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api",
+        ris_api_client=client, transfer_runner=ScriptedRunner(),
+        poll_interval=30.0, should_abort=lambda: True,
+        job_event_wait=lambda job_id, seconds: waits.append(job_id),
+    )
+
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s")
+
+    assert "terminated by the researcher" in result.message
+    assert waits == [] and ("cancel_job", "42", None) in client.calls
+
+
 def test_each_execute_gets_a_fresh_idempotency_key(tmp_path):
     # The self-heal loop re-runs execute() with the same run_id after
     # repairing main.py. ris-api keeps keys forever and never compares bodies,

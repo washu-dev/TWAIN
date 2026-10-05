@@ -6,7 +6,8 @@ import time
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -15,6 +16,7 @@ import auth
 import conversations as convo
 import github_issues
 import migrate
+import ris_webhooks
 import run_issue_github
 import run_issues
 from auth import AdminUser, CurrentUser
@@ -93,6 +95,31 @@ async def health_check():
     A deploy is now verifiable with one unauthenticated curl.
     """
     return {"status": "ok", "commit": git_sha(), "version": app.version}
+
+
+#: ris-api events are a few hundred bytes; refuse anything far larger unread.
+RIS_WEBHOOK_MAX_BYTES = 64 * 1024
+
+
+@app.post("/api/ris/webhooks", status_code=204)
+async def ris_webhook(request: Request):
+    """Receive a signed RIS API job event (see ris_webhooks.py).
+
+    No user auth: the Standard Webhooks signature is the authentication. A
+    duplicate delivery is a 204 like a new one -- ris-api delivers at least
+    once and only needs to hear that it can stop.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > RIS_WEBHOOK_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="webhook body too large")
+    body = await request.body()
+    if len(body) > RIS_WEBHOOK_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="webhook body too large")
+    try:
+        await run_in_threadpool(ris_webhooks.handle, request.headers, body)
+    except ris_webhooks.WebhookError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return Response(status_code=204)
 
 
 @app.get("/api/libraries")

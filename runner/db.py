@@ -9,6 +9,7 @@ vars, with the password resolved from AWS Secrets Manager in the cloud and from
 import json
 import os
 import select
+import time
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
@@ -25,6 +26,8 @@ RESUMABLE_STATUSES = ("running", "paused", "error")
 # LISTENs on it so a newly queued job wakes it immediately instead of on the next
 # poll tick — no always-on 1s spin (Phase 2).
 JOBS_CHANNEL = "twain_jobs"
+# NOTIFYed (payload: Slurm job id) when a RIS API webhook lands -- migration 012.
+RIS_EVENTS_CHANNEL = "ris_job_events"
 
 
 def _resolve_db_password() -> str:
@@ -528,4 +531,74 @@ class JobNotifyWaiter:
     def __exit__(self, *exc) -> None:
         if self._conn is not None:
             self._conn.close()
+            self._conn = None
+
+
+class RisJobEventWaiter:
+    """Sleeps between Slurm polls, waking early when RIS reports on the job.
+
+    The webhook receiver (api/ris_webhooks.py) records each ris-api job event,
+    and migration 012's trigger NOTIFYs :data:`RIS_EVENTS_CHANNEL` with the job
+    id. :meth:`wait` is the Slurm adapter's poll sleep: it returns as soon as a
+    NOTIFY for *its* job arrives, else after ``timeout`` -- so polling stays the
+    source of truth and a missed webhook only costs latency.
+
+    The LISTEN connection opens lazily on the first wait and is reused; call
+    :meth:`close` when the run ends. Any database trouble degrades to a plain
+    ``sleep`` for the rest of the run rather than failing the job's wait.
+    """
+
+    def __init__(self, db: RunnerDB, channel: str = RIS_EVENTS_CHANNEL,
+                 sleep=time.sleep, clock=time.monotonic):
+        self.db = db
+        self.channel = channel
+        self._sleep = sleep
+        self._clock = clock
+        self._conn = None
+        self._broken = False
+
+    def _listen(self):
+        if self._conn is None:
+            self._conn = self.db._connect()
+            self._conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            cur = self._conn.cursor()
+            cur.execute(f"LISTEN {self.channel};")
+            cur.close()
+        return self._conn
+
+    def wait(self, job_id: str, timeout: float) -> bool:
+        """Wait up to ``timeout`` s; True if an event for ``job_id`` cut it short."""
+        if self._broken:
+            self._sleep(timeout)
+            return False
+        deadline = self._clock() + timeout
+        try:
+            conn = self._listen()
+            while True:
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    return False
+                if select.select([conn], [], [], remaining) == ([], [], []):
+                    return False
+                conn.poll()
+                hit = any(n.payload == str(job_id) for n in conn.notifies)
+                conn.notifies.clear()
+                if hit:
+                    return True
+        except (psycopg2.Error, OSError, ValueError) as exc:
+            print(f"[runner] RIS job-event listener unavailable ({exc}); "
+                  f"falling back to plain polling")
+            self._broken = True
+            self.close()
+            remaining = deadline - self._clock()
+            if remaining > 0:
+                self._sleep(remaining)
+            return False
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except psycopg2.Error:
+                pass
             self._conn = None

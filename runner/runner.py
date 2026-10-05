@@ -50,7 +50,7 @@ from runner.bridges import (
     post_reject_feedback_question,
 )
 from runner.capabilities import publish as publish_capabilities
-from runner.db import JobNotifyWaiter, RunnerDB
+from runner.db import JobNotifyWaiter, RisJobEventWaiter, RunnerDB
 from runner.engine import _env_flag, default_engine
 from runner.notifications import default_notifier, make_notifier
 from runner.pg_store import PgStore
@@ -316,7 +316,8 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
     return "proceed"
 
 
-def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier, cancel):
+def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier, cancel,
+                        job_event_wait=None):
     """Wire an orchestrator for this session with the chat/event/store bridges."""
     sink = PgEventSink(db, session_id)
     orch = engine.build_orchestrator(
@@ -328,6 +329,8 @@ def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, not
         store=PgStore(db),
         # Terminate button: checked between stages (raises RunCancelled).
         cancel=cancel,
+        # Slurm poll sleep that wakes on a RIS webhook for the job.
+        job_event_wait=job_event_wait,
         # Per-run budget override (falls back to the deployment default in engine).
         max_cost=params.get("max_cost"),
     )
@@ -359,9 +362,13 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     # zero-arg callable that's True once the user pressed Terminate for this run.
     notifier = make_notifier(db)
     cancel = _cancel_check(db, session_id)
+    # RIS webhooks: the Slurm poll sleep wakes early when ris-api reports on the
+    # job (LISTEN on ris_job_events). Closed with the run, in the finally below.
+    job_events = RisJobEventWaiter(db)
     # On resume/rerun the orchestrator rebuilds its state + context from the session
     # store; request/researcher_id are only needed to *start* a run.
-    orch = _build_orchestrator(engine, db, session_id, params, notifier, cancel)
+    orch = _build_orchestrator(engine, db, session_id, params, notifier, cancel,
+                               job_event_wait=job_events.wait)
 
     if kind == "rerun":
         target = params.get("target_state")
@@ -429,6 +436,7 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
         print(f"[runner] run {session_id} terminated by user ({exc})")
         _finalize_cancelled(db, session_id, notifier)
     finally:
+        job_events.close()
         # Best-effort: persist the specs + generated code so the report can show
         # them (also on a suspend, so partial artifacts are visible while waiting).
         try:

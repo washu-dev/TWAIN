@@ -600,7 +600,7 @@ class StateMachine:
                  script_doctor=None, library_available=None, sim_available=None,
                  library_request_tracker=None, auto_approve=False,
                  execute_slurm: bool = False, slurm_cluster: str = None,
-                 should_abort=None):
+                 should_abort=None, job_event_wait=None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -645,6 +645,9 @@ class StateMachine:
         # squeue checks so a Terminate press scancels the cluster job instead
         # of letting it burn its whole wall time.
         self.should_abort = should_abort
+        # RIS webhook seam: ``(job_id, seconds)`` sleep the Slurm adapter uses
+        # between polls, returning early when ris-api reports on that job.
+        self.job_event_wait = job_event_wait
         # When on, the REPAIR stage may call the LLM to repair the synthesized
         # calculator script and proactively scan it for latent bugs. Off by
         # default so offline/seeded/test runs make no network calls there; the
@@ -2695,6 +2698,8 @@ class StateMachine:
             max_wait=self.slurm_wait_budget(),
             # Terminate button: checked between polls; scancels the job.
             should_abort=self.should_abort,
+            # Webhook wake-up: poll as soon as ris-api reports on the job.
+            job_event_wait=self.job_event_wait,
         )
 
     # Extra polling headroom on top of the job's wall time: covers time spent

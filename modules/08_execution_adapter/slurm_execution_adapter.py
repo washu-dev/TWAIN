@@ -177,6 +177,7 @@ class SlurmExecutionAdapter:
         parallelism: str = "threads",
         sleep=None,
         should_abort=None,
+        job_event_wait=None,
         backend: Optional[str] = None,
         ris_api_client: Optional[RisApiClient] = None,
     ):
@@ -218,6 +219,10 @@ class SlurmExecutionAdapter:
         # Terminate seam: zero-arg callable polled between squeue checks; True
         # means the researcher pressed Terminate -> scancel the job and return.
         self.should_abort = should_abort
+        # Webhook seam: ``(job_id, seconds) -> bool`` replacing the plain sleep
+        # between polls; it returns early when ris-api reports on the job (see
+        # runner/db.py RisJobEventWaiter). None => sleep the full interval.
+        self.job_event_wait = job_event_wait
 
         self.backend = (backend or os.environ.get("TWAIN_SLURM_BACKEND") or "api").strip().lower()
         if self.backend not in ("api", "ssh"):
@@ -359,7 +364,10 @@ class SlurmExecutionAdapter:
         def _abortable_sleep(seconds: float) -> None:
             if self.should_abort is not None and self.should_abort():
                 raise _AbortRequested()
-            base_sleep(seconds)
+            if self.job_event_wait is not None:
+                self.job_event_wait(job_id, seconds)
+            else:
+                base_sleep(seconds)
 
         try:
             wait_kwargs = dict(poll_interval=self.poll_interval, max_wait=max_wait,

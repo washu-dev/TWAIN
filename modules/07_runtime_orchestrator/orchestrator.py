@@ -149,6 +149,7 @@ class Orchestrator:
         execute_slurm: bool = False,
         slurm_cluster: Optional[str] = None,
         cancel_check=None,
+        job_event_wait=None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -246,6 +247,8 @@ class Orchestrator:
             # Terminate seam: lets a long EXECUTE (Slurm poll loop) notice the
             # researcher's terminate request and scancel the cluster job.
             should_abort=cancel_check,
+            # RIS webhook seam: the Slurm poll sleep wakes on a job event.
+            job_event_wait=job_event_wait,
         )
 
         if resuming:
