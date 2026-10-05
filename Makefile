@@ -30,7 +30,7 @@ migrate-dry: ## Show which migrations WOULD apply (no changes)
 secrets: ## PLAN: what setup_secrets.sh would do (no changes)
 	scripts/aws/setup_secrets.sh
 
-secrets-apply: ## Create/update the 3 LLM secrets + patch the runner task def
+secrets-apply: ## Wire the Terraform-managed runner secret ARNs into the runner task def
 	scripts/aws/setup_secrets.sh --apply
 
 provision: ## PLAN: what provision.sh would create (no changes)

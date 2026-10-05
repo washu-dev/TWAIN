@@ -67,3 +67,20 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "ecs_execution_role_name" {
+  description = "Existing ECS task execution role that injects the runner's `secrets` (runner/ecs-task-definition.json executionRoleArn). Granted read on var.runner_secrets only. Empty string = don't grant."
+  type        = string
+  default     = "ecsTaskExecutionRole"
+}
+
+variable "runner_secrets" {
+  description = "Runner container env var => secrets.json key, for the `secrets` block of runner/ecs-task-definition.json (wired by scripts/aws/setup_secrets.sh)."
+  type        = map(string)
+  default = {
+    API_KEY       = "secure_api/API_KEY"
+    CLIENT_ID     = "secure_api/CLIENT_ID"
+    CLIENT_SECRET = "secure_api/CLIENT_SECRET"
+    RIS_API_TOKEN = "ris_api/TOKEN"
+  }
+}

@@ -20,10 +20,10 @@
         { "name": "TWAIN_EXECUTE_LOCALLY", "value": "1" }
       ],
       "secrets": [
-        { "name": "API_KEY",       "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN_LLM_API_KEY-REPLACE" },
-        { "name": "CLIENT_ID",     "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN_LLM_CLIENT_ID-REPLACE" },
-        { "name": "CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN_LLM_CLIENT_SECRET-REPLACE" },
-        { "name": "RIS_API_TOKEN", "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN_RIS_API_TOKEN-REPLACE" }
+        { "name": "API_KEY",       "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/API_KEY-JN9yGe" },
+        { "name": "CLIENT_ID",     "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/CLIENT_ID-jxmr85" },
+        { "name": "CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/CLIENT_SECRET-0YnYKl" },
+        { "name": "RIS_API_TOKEN", "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/ris_api/TOKEN-ruCRKa" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

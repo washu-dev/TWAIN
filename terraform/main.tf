@@ -45,7 +45,9 @@ data "aws_iam_policy_document" "kms" {
     }
   }
 
-  # Only the TWAIN read role may decrypt secret values with this key.
+  # The TWAIN read role may decrypt secret values with this key. (Via the
+  # account-admin statement above, IAM policies can grant decrypt too -- the
+  # runner execution-role policy below relies on that.)
   statement {
     sid       = "AllowTwainRoleDecrypt"
     effect    = "Allow"
@@ -218,4 +220,47 @@ resource "aws_iam_role_policy" "sso_ci_reader" {
   name   = "${var.ci_role_name}-read"
   role   = aws_iam_role.sso_ci_reader[0].id
   policy = data.aws_iam_policy_document.ci_read[0].json
+}
+
+# ─── Runner: the ECS execution role reads exactly the runner's secrets ─────────
+# ECS resolves a task definition's `secrets` with the EXECUTION role (not the
+# task role), before the container starts. The AWS-managed execution policy
+# grants no Secrets Manager or KMS access, so without this the runner task
+# fails to start (ResourceInitializationError). Scoped to var.runner_secrets;
+# a key missing from secrets.json is left out (see output runner_secrets_missing).
+
+locals {
+  runner_secret_arns = {
+    for env, key in var.runner_secrets :
+    env => aws_secretsmanager_secret.this[key].arn if contains(keys(local.secrets), key)
+  }
+  runner_secrets_missing = [for env, key in var.runner_secrets : key if !contains(keys(local.secrets), key)]
+  grant_runner_secrets   = var.ecs_execution_role_name != "" && length(local.runner_secret_arns) > 0
+}
+
+data "aws_iam_policy_document" "runner_execution_secrets" {
+  count = local.grant_runner_secrets ? 1 : 0
+
+  statement {
+    sid       = "ReadRunnerSecrets"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = values(local.runner_secret_arns)
+  }
+
+  # Allowed by the key policy's EnableAccountAdmin statement, which delegates
+  # key access to IAM policies like this one.
+  statement {
+    sid       = "DecryptWithTwainKey"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt"]
+    resources = [aws_kms_key.twain_secrets.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "runner_execution_secrets" {
+  count  = local.grant_runner_secrets ? 1 : 0
+  name   = "${var.name_prefix}-runner-secrets"
+  role   = var.ecs_execution_role_name
+  policy = data.aws_iam_policy_document.runner_execution_secrets[0].json
 }
