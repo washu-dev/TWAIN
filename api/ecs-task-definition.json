@@ -19,8 +19,7 @@
       "environment": [
         { "name": "AWS_REGION",          "value": "us-east-1" },
         { "name": "TWAIN_SECRET_PREFIX", "value": "TWAIN/database" },
-        { "name": "GITHUB_ISSUE_REPO",   "value": "washu-dev/TWAIN" },
-        { "name": "TWAIN_RUN_BUCKET",    "value": "twain-run-data-730335203321" }
+        { "name": "GITHUB_ISSUE_REPO",   "value": "washu-dev/TWAIN" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
