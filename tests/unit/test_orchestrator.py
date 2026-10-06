@@ -824,3 +824,59 @@ class TestActivityEvents:
         before = list(env["bus"].types())
         orch.sm.publish_progress("run.completed", {})
         assert env["bus"].types() == before
+
+
+class TestFailureIsDescribed:
+    """A stopped run says where, why, and what next (#169) -- not 'see the log'."""
+
+    REAL = ("Stage EXECUTE failed — ConfigError: the generated run did not succeed "
+            "(dependency_error): no runnable environment for this bundle on compute2: "
+            "every pre-provisioned env failed the bundle's smoke test (tried: "
+            "/x/default/bin/python), and pip cannot install its requirements there:\n"
+            "ERROR: No matching distribution found for openff-toolkit==0.16.2")
+
+    def _classified(self, message, hint="Provision or extend a shared env, then rerun."):
+        return error_handler.ClassifiedError(
+            error_handler.ErrorCategory.CONFIG, message, hint, "fallback", False, "ConfigError()")
+
+    def test_an_execute_dependency_failure_reads_plainly(self):
+        f = error_handler.describe_failure(
+            self._classified(self.REAL), "EXECUTE",
+            {"status": "dependency_error", "install_log": {"job_id": "3337323"}})
+        assert f["stage_label"] == "Running on the cluster"
+        assert f["headline"] == "The cluster has no environment that can run this plan"
+        assert f["cause"] == "no runnable environment for this bundle on compute2"
+        assert "openff-toolkit==0.16.2" in f["detail"]          # nothing is lost
+        assert f["next_step"].startswith("Provision") and f["job_id"] == "3337323"
+        line = error_handler.failure_message(f)
+        assert line.startswith("The run stopped while running on the cluster (EXECUTE)")
+        assert "see the run log" not in line
+
+    def test_a_non_execute_failure_leads_with_its_own_cause(self):
+        f = error_handler.describe_failure(
+            self._classified("Stage DISCOVER failed — RuntimeError: registry unreachable"),
+            "DISCOVER")
+        assert f["headline"] == "Registry unreachable" and f["outcome"] is None
+
+    def test_long_detail_keeps_the_tail_where_errors_land(self):
+        f = error_handler.describe_failure(
+            self._classified("x" * 9000 + "THE REAL ERROR"), "BUILD")
+        assert f["detail"].endswith("THE REAL ERROR")
+        assert len(f["detail"]) <= error_handler.FAILURE_DETAIL_CHARS + 1
+
+    def test_run_error_event_carries_the_failure(self, env):
+        seen = []
+
+        class Bus:
+            def publish(self, event, priority=None):
+                seen.append((event.event_type, json.loads(event.payload)))
+
+        def boom():
+            raise RuntimeError("registry unreachable")
+        sm = make_sm(env["tmp"], discover=boom)
+        o = build(env, "described", sm=sm, event_bus=Bus())
+        assert o.run() == RunStatus.ERROR
+        payload = next(p for t, p in seen if t == "run.error")
+        assert payload["failure"]["stage"] == "DISCOVER"
+        assert payload["failure"]["headline"] == "Registry unreachable"
+        assert o.last_failure == payload["failure"]

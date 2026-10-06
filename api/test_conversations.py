@@ -463,7 +463,7 @@ class TestActivityFeed:
         mock_owns.assert_called_once_with("conv-1", "user-1")
         session, after, types, _limit = mock_activity.call_args.args
         assert (session, after) == ("conv-1", 40)
-        assert set(types) == {"stage.progress", "job.log"}
+        assert set(types) == {"stage.progress", "job.log", "run.error"}
 
     @patch("conversations.get_activity", return_value=[])
     @patch("conversations.owns_conversation", return_value=True)

@@ -55,9 +55,27 @@ export interface JobLog {
   truncated?: boolean;
 }
 
+/** Where a run stopped and why (the `failure` of a `run.error` event; runner error_handler.describe_failure). */
+export interface RunFailure {
+  stage: string;
+  stage_label: string;
+  /** One line, in plain words. */
+  headline: string;
+  cause?: string | null;
+  /** The full error, tail-trimmed. */
+  detail?: string;
+  next_step?: string;
+  category?: string;
+  recoverable?: boolean;
+  outcome?: string | null;
+  job_id?: string | null;
+}
+
 export type ActivityEvent =
   | { id: number; event_type: 'stage.progress'; created_at: string; payload: StageProgress }
-  | { id: number; event_type: 'job.log'; created_at: string; payload: JobLog };
+  | { id: number; event_type: 'job.log'; created_at: string; payload: JobLog }
+  | { id: number; event_type: 'run.error'; created_at: string;
+      payload: { state: string; failure?: RunFailure } };
 
 export interface ActivityPage {
   data: ActivityEvent[];

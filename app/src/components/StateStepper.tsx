@@ -41,9 +41,17 @@ export const StateStepper: React.FC<StateStepperProps> = ({ current, status }) =
       {PIPELINE_STATES.map((state, i) => {
         const done = currentIndex > i || status === 'completed';
         const active = currentIndex === i && status !== 'completed';
+        // A stopped run marks the stage it stopped in, not just "the current one".
+        const failed = active && status === 'error';
         return (
-          <View key={state} style={styles.step}>
-            <View style={[styles.dot, done && styles.dotDone, active && styles.dotActive]} />
+          <View
+            key={state}
+            style={styles.step}
+            accessibilityLabel={failed ? `${state}: the run stopped here` : undefined}
+          >
+            <View style={[styles.dot, done && styles.dotDone, active && styles.dotActive]}>
+              {failed && <Text style={styles.dotMark}>✕</Text>}
+            </View>
             <Text style={[styles.stepLabel, active && styles.stepLabelActive]}>{state}</Text>
           </View>
         );
@@ -59,6 +67,7 @@ const styles = StyleSheet.create({
   dot: { width: 12, height: 12, borderRadius: 6, backgroundColor: C.borderStrong },
   dotDone: { backgroundColor: C.washuGreen },
   dotActive: { backgroundColor: C.washuRed, transform: [{ scale: 1.3 }] },
+  dotMark: { color: C.washuWhite, fontSize: 8, lineHeight: 12, textAlign: 'center', fontWeight: '700' },
   stepLabel: { fontSize: 9, color: C.textSecondary },
   stepLabelActive: { color: C.washuRed, fontWeight: '700' },
 });

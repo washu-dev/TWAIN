@@ -487,6 +487,15 @@ class Orchestrator:
         self._raise_if_cancelled()
         classified = error_handler.classify(exc, state.name)
         self.last_error = classified
+        # Where it stopped and why, in words the submitter can act on -- the
+        # chat's failure card and the failure notification both read this.
+        try:
+            execution_result = (self.sm._load_artifact("execution_result")
+                                if state.name == "EXECUTE" else None)
+        except Exception:  # noqa: BLE001 - describing a failure must not fail
+            execution_result = None
+        self.last_failure = error_handler.describe_failure(
+            classified, state.name, execution_result)
         self.run_session.error = classified.to_dict()
         self.run_session.set_status(RunStatus.ERROR)
         self._checkpoint()
@@ -495,7 +504,8 @@ class Orchestrator:
         )
         self._publish(
             "run.error",
-            {"state": state.name, "error": classified.to_dict()},
+            {"state": state.name, "error": classified.to_dict(),
+             "failure": self.last_failure},
             priority=Priority.CRITICAL,
         )
         return RunStatus.ERROR

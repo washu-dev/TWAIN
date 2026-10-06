@@ -18,6 +18,7 @@ this decides *how to explain a failure that has already exhausted retries*.
 import _bootstrap  # noqa: F401
 
 import os
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
@@ -260,3 +261,80 @@ def notify_researcher(
     message = format_for_researcher(error, session_id=session_id, state=state)
     notifier(message)
     return message
+
+
+# ── what the researcher sees when a run stops (#169) ─────────────────────────────
+
+#: Plain-language headline per EXECUTE outcome (ExecutionStatus values).
+_EXECUTION_HEADLINES = {
+    "dependency_error": "The cluster has no environment that can run this plan",
+    "setup_failed": "The job could not be staged or submitted to the cluster",
+    "timeout": "The job ran out of time",
+    "failed": "The calculation crashed on the cluster",
+}
+
+#: Stage names as a researcher reads them.
+STAGE_LABELS = {
+    "INTAKE": "Understanding the request", "CLARIFY": "Clarifying the request",
+    "DECOMPOSE": "Breaking down the goal", "DISCOVER": "Choosing methods",
+    "PLAN": "Planning", "BUILD": "Writing the simulation", "REPAIR": "Checking the script",
+    "EXECUTE": "Running on the cluster", "INTERPRET": "Reading the results",
+    "VALIDATE": "Validating the result", "ACCEPT": "Accepting the result",
+}
+
+#: Detail kept for the failure card (the tail: errors print last).
+FAILURE_DETAIL_CHARS = 4000
+
+_PREFIX = re.compile(r"^Stage \w+ failed\s*[—-]\s*(?:\w+Error|\w+Exception|\w+):\s*")
+_RUN_PREFIX = re.compile(r"^the generated run did not succeed \((\w+)\):\s*")
+
+
+def describe_failure(classified: "ClassifiedError", state: str,
+                     execution_result: Optional[dict] = None) -> dict:
+    """A run's failure as the chat shows it: where, why, the detail, what next.
+
+    ``classified.message`` is complete but written for logs ("Stage EXECUTE
+    failed — ConfigError: the generated run did not succeed (dependency_error):
+    no runnable environment ... ERROR: Could not find a version ..."). This keeps
+    all of it as ``detail`` and leads with a one-line ``headline`` -- for an
+    EXECUTE failure, from the job's outcome class -- so the submitter is never
+    left with "see the run log" and no log to see.
+    """
+    text = (classified.message or "").strip()
+    body = _PREFIX.sub("", text)
+    outcome = None
+    match = _RUN_PREFIX.match(body)
+    if match:
+        outcome, body = match.group(1), body[match.end():]
+    if isinstance(execution_result, dict) and execution_result.get("status"):
+        outcome = outcome or str(execution_result["status"])
+    first = body.splitlines()[0] if body else ""
+    # The cause before its elaboration: "no runnable environment ... on compute2"
+    # rather than the full ": every pre-provisioned env failed ..." sentence.
+    cause = re.split(r":\s(?=[a-z])", first, maxsplit=1)[0].strip().rstrip(".")
+    headline = _EXECUTION_HEADLINES.get(outcome or "") or (cause[:1].upper() + cause[1:]) \
+        or "The run stopped unexpectedly"
+    install_log = (execution_result or {}).get("install_log") or {}
+    detail = body if len(body) <= FAILURE_DETAIL_CHARS else "…" + body[-FAILURE_DETAIL_CHARS:]
+    return {
+        "stage": state,
+        "stage_label": STAGE_LABELS.get(state, state.title()),
+        "headline": headline,
+        "cause": cause if cause and cause.lower() != headline.lower() else None,
+        "detail": detail,
+        "next_step": classified.hint or classified.fallback,
+        "category": classified.category.value,
+        "recoverable": classified.recoverable,
+        "outcome": outcome,
+        "job_id": install_log.get("job_id"),
+    }
+
+
+def failure_message(failure: dict) -> str:
+    """The one chat/email line for a stopped run."""
+    # The cause and full detail live on the failure card; one line here.
+    parts = [f"The run stopped while {failure['stage_label'].lower()} "
+             f"({failure['stage']}): {failure['headline']}."]
+    if failure.get("next_step"):
+        parts.append(f"Next step: {failure['next_step']}")
+    return " ".join(parts)
