@@ -981,10 +981,10 @@ class TestSlurmClusterGrounding:
 
     @pytest.fixture(autouse=True)
     def _fresh_caches(self):
-        SM._CLUSTER_ENV_PKGS_CACHE = None
+        SM._CLUSTER_ENV_SPECS_CACHE = None
         SM._PYPI_VERDICTS.clear()
         yield
-        SM._CLUSTER_ENV_PKGS_CACHE = None
+        SM._CLUSTER_ENV_SPECS_CACHE = None
         SM._PYPI_VERDICTS.clear()
 
     def test_env_specs_parse_to_package_names(self):
@@ -1016,7 +1016,7 @@ class TestSlurmClusterGrounding:
         # Simulated rather than taken from the real specs: every conda-only engine
         # now HAS a spec (see the test above), so the only way to exercise the veto
         # is to stand in an inventory that lacks one. The fixture resets the cache.
-        SM._CLUSTER_ENV_PKGS_CACHE = frozenset({"ase", "numpy", "pandas"})
+        SM._CLUSTER_ENV_SPECS_CACHE = {"default": frozenset({"ase", "numpy", "pandas"})}
         assert SM._cluster_cannot_run("cp2k") is True
 
     def test_engines_with_a_spec_are_runnable_on_the_cluster(self):
@@ -1040,7 +1040,7 @@ class TestSlurmClusterGrounding:
         # importability is irrelevant when the cluster can't run the library.
         # Inventory simulated for the same reason as above -- every conda-only
         # engine now ships a spec.
-        SM._CLUSTER_ENV_PKGS_CACHE = frozenset({"ase", "numpy", "pandas"})
+        SM._CLUSTER_ENV_SPECS_CACHE = {"default": frozenset({"ase", "numpy", "pandas"})}
         m = _make_machine(tmp_path)
         m.execute_slurm = True
         m._library_available = lambda name: True
@@ -1326,7 +1326,8 @@ class TestClusterEnvCandidates:
         assert got[0] == "psi4", (
             "Psi4 sits in `libraries`, not in calculator/tool_name; without it "
             "the job can only reach an env that cannot run the toolset")
-        assert got[-1] == "default"
+        # default lacks conda-only psi4, so layering pip on it can't work (#169).
+        assert "default" not in got
 
     def test_display_names_resolve_to_their_env_names(self, tmp_path):
         """The env is named for the conda package, not the prose name.
@@ -1341,12 +1342,14 @@ class TestClusterEnvCandidates:
                 "tool_name": "ASE", "calculator": calculator, "libraries": ["ASE"]})
             assert got[0] == env, f"{calculator} -> {got}"
 
-    def test_default_is_always_last(self, tmp_path):
-        """It exists but carries only the common stack, so it must never shadow."""
-        for method in ({"tool_name": "ASE", "calculator": "GPAW", "libraries": ["ASE"]},
-                       {"tool_name": "Pymatgen", "calculator": None,
-                        "libraries": ["Pymatgen"]}):
-            assert self._candidates(tmp_path, method)[-1] == "default"
+    def test_default_is_last_when_offered_and_absent_when_it_cannot_run(self, tmp_path):
+        """It carries only the common stack: never shadowing an engine env, and
+        not offered at all for a conda-only engine it lacks (#169)."""
+        assert self._candidates(tmp_path, {
+            "tool_name": "Pymatgen", "calculator": None,
+            "libraries": ["Pymatgen"]})[-1] == "default"
+        assert "default" not in self._candidates(tmp_path, {
+            "tool_name": "ASE", "calculator": "GPAW", "libraries": ["ASE"]})
 
     def test_a_pip_installable_toolset_gets_only_default(self, tmp_path):
         assert self._candidates(tmp_path, {
@@ -1361,17 +1364,17 @@ class TestClusterEnvCandidates:
     def test_no_duplicates_when_a_library_repeats_the_calculator(self, tmp_path):
         got = self._candidates(tmp_path, {
             "tool_name": "Psi4", "calculator": "Psi4", "libraries": ["Psi4", "ASE"]})
-        assert got == ["psi4", "default"], got
+        assert got == ["psi4"], got
 
     def test_only_provisioned_envs_are_offered(self, tmp_path):
         """A conda-only library with no spec must not invent a candidate path."""
-        SM._CLUSTER_ENV_NAMES_CACHE = frozenset({"default"})
+        SM._CLUSTER_ENV_SPECS_CACHE = {"default": frozenset({"ase", "numpy"})}
         try:
             assert self._candidates(tmp_path, {
                 "tool_name": "ASE", "calculator": "GPAW",
                 "libraries": ["ASE"]}) == ["default"]
         finally:
-            SM._CLUSTER_ENV_NAMES_CACHE = None
+            SM._CLUSTER_ENV_SPECS_CACHE = None
 
     def test_env_names_match_the_spec_files(self):
         names = SM._cluster_env_names()
@@ -1608,3 +1611,43 @@ class TestActivityPublishing:
             raise RuntimeError("bus down")
         sm.publish_progress = boom
         sm._progress("BUILD", "codegen", "active", "x")
+
+
+
+class TestOneEnvMustFitTheWholeToolset:
+    """#169: planning and the job agree on which env runs a plan.
+
+    Runs 21ffdacd and 786bd6b1 planned OpenMM + OpenFF Toolkit + RDKit. Each
+    passed the old per-library veto (nwchem.yml lists openff-toolkit), but the
+    job tried only `default` -- no package is named "nwchem" -- and pip can't
+    install openff-toolkit, so EXECUTE died after approval.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _offline_pypi(self, monkeypatch):
+        SM._CLUSTER_ENV_SPECS_CACHE = None
+        monkeypatch.setattr(SM, "_pip_installable", lambda dep: True)
+        yield
+        SM._CLUSTER_ENV_SPECS_CACHE = None
+
+    def test_the_openff_plan_runs_in_the_env_that_has_openff(self):
+        assert SM.cluster_env_candidates(["OpenMM", "OpenFF Toolkit", "RDKit"])[0] == "nwchem"
+
+    def test_a_pure_pip_toolset_gets_default_alone(self):
+        # Every env qualifies, but each candidate costs the job a probe.
+        assert SM.cluster_env_candidates(["Pymatgen"]) == ["default"]
+
+    def test_no_env_fits_when_conda_only_packages_live_apart(self):
+        SM._CLUSTER_ENV_SPECS_CACHE = {
+            "default": frozenset({"ase"}), "psi4": frozenset({"psi4"}),
+            "gpaw": frozenset({"gpaw"})}
+        assert SM.cluster_env_candidates(["Psi4", "GPAW"]) is None
+        gap = SM._cluster_env_gap(["Psi4", "GPAW"])
+        assert "psi4 (only in psi4" in gap and "gpaw (only in gpaw" in gap
+
+    def test_each_library_alone_still_passes_the_early_veto(self):
+        SM._CLUSTER_ENV_SPECS_CACHE = {
+            "default": frozenset({"ase"}), "psi4": frozenset({"psi4"}),
+            "gpaw": frozenset({"gpaw"})}
+        assert SM._cluster_cannot_run("Psi4") is False
+        assert SM._cluster_cannot_run("GPAW") is False

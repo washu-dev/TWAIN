@@ -1024,10 +1024,9 @@ def test_build_slurm_adapter_wires_env_candidates_from_profile(machine, tmp_path
 
     adapter = machine._build_slurm_adapter()
     root = "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs"
-    assert adapter.env_pythons == [
-        f"{root}/gpaw/bin/python",
-        f"{root}/default/bin/python",
-    ]
+    # default is not offered: it lacks conda-only gpaw, so a pip venv layered
+    # on it could never run this plan -- only an env that can is tried (#169).
+    assert adapter.env_pythons == [f"{root}/gpaw/bin/python"]
 
 
 def test_build_slurm_adapter_applies_ram_floor(machine, tmp_path):

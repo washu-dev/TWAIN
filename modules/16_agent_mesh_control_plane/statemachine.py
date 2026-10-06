@@ -84,27 +84,27 @@ def _module_importable(module: str) -> bool:
         return False
 
 
-_CLUSTER_ENV_PKGS_CACHE: Optional[frozenset] = None
+_CLUSTER_ENV_SPECS_CACHE: Optional[dict] = None
 
 
-def _cluster_env_packages() -> frozenset:
-    """Package names declared across the cluster env specs (scripts/ris/envs).
+def _cluster_env_specs() -> dict:
+    """``{env name: frozenset(package names)}`` from the cluster env specs.
 
-    These YAML specs are the declarative source of truth for what the shared
-    Slurm environments contain (applied by provision_envs.sh), so they are also
-    the ground truth for "can the cluster run this conda-only library?" --
-    readable locally, no SSH round-trip. Parsed line-wise (``- pkg=ver`` under
-    ``dependencies:``) to avoid a YAML dependency; an unreadable/absent specs
-    dir yields the empty set, which simply means "nothing conda-only is
-    provisioned".
+    ``scripts/ris/envs/<name>.yml`` provisions ``<envs_root>/<name>``; its
+    ``dependencies:`` list is the declarative truth for what that ONE env holds.
+    Parsed line-wise (``- pkg=ver``) to avoid a YAML dependency; an unreadable
+    or absent specs dir yields ``{}`` ("nothing conda-only is provisioned").
+    Kept per env -- not as one union -- because a job runs in a single env:
+    "some spec lists it" is not "the env this job uses has it" (#169).
     """
-    global _CLUSTER_ENV_PKGS_CACHE
-    if _CLUSTER_ENV_PKGS_CACHE is not None:
-        return _CLUSTER_ENV_PKGS_CACHE
-    pkgs = set()
+    global _CLUSTER_ENV_SPECS_CACHE
+    if _CLUSTER_ENV_SPECS_CACHE is not None:
+        return _CLUSTER_ENV_SPECS_CACHE
+    specs = {}
     specs_dir = twain_paths.REPO_ROOT / "scripts" / "ris" / "envs"
     try:
         for spec in sorted(specs_dir.glob("*.yml")):
+            pkgs = set()
             in_deps = False
             for raw in spec.read_text(encoding="utf-8").splitlines():
                 line = raw.split("#", 1)[0].rstrip()
@@ -119,33 +119,23 @@ def _cluster_env_packages() -> frozenset:
                         pkgs.add(name.lower())
                 elif not line.startswith(" "):
                     in_deps = False
+            specs[spec.stem.lower()] = frozenset(pkgs)
     except OSError:
-        pkgs = set()
-    _CLUSTER_ENV_PKGS_CACHE = frozenset(pkgs)
-    return _CLUSTER_ENV_PKGS_CACHE
+        specs = {}
+    _CLUSTER_ENV_SPECS_CACHE = specs
+    return _CLUSTER_ENV_SPECS_CACHE
 
 
-_CLUSTER_ENV_NAMES_CACHE: Optional[frozenset] = None
+def _cluster_env_packages() -> frozenset:
+    """Every package declared by any cluster env spec (the union)."""
+    return frozenset().union(*_cluster_env_specs().values())
+
+
 
 
 def _cluster_env_names() -> frozenset:
-    """Names of the pre-provisioned cluster envs (the spec filenames' stems).
-
-    ``scripts/ris/envs/psi4.yml`` provisions ``<envs_root>/psi4``, so the stems
-    are exactly the env directory names -- and each stem is the conda PACKAGE the
-    env exists to provide, which is what makes a library's package name the right
-    key for finding its env (see the candidate list in ``_slurm_adapter``).
-    """
-    global _CLUSTER_ENV_NAMES_CACHE
-    if _CLUSTER_ENV_NAMES_CACHE is not None:
-        return _CLUSTER_ENV_NAMES_CACHE
-    specs_dir = twain_paths.REPO_ROOT / "scripts" / "ris" / "envs"
-    try:
-        names = {spec.stem.lower() for spec in specs_dir.glob("*.yml")}
-    except OSError:
-        names = set()
-    _CLUSTER_ENV_NAMES_CACHE = frozenset(names)
-    return _CLUSTER_ENV_NAMES_CACHE
+    """Names of the pre-provisioned cluster envs (the spec filenames' stems)."""
+    return frozenset(_cluster_env_specs())
 
 
 # Cache of PyPI availability verdicts keyed by (package, version): a plan-time
@@ -177,40 +167,101 @@ def _config_error(message: str, hint: str) -> Exception:
         return RuntimeError(f"{message} -- {hint}")
 
 
-def _cluster_cannot_run(library: str) -> bool:
-    """Whether the Slurm cluster has no way to provide ``library``'s packages.
+def _pip_gettable(dep) -> bool:
+    """Whether a job's pip fallback can supply ``dep`` on a compute node."""
+    package = dep.package.lower()
+    if package in _depinf.CONDA_ONLY_PACKAGES:
+        return False
+    # On PyPI, yet not gettable inside a job's wall clock (a multi-GB torch
+    # download onto a compute node) -- see CLUSTER_UNRUNNABLE_PACKAGES.
+    if package in _depinf.CLUSTER_UNRUNNABLE_PACKAGES:
+        return False
+    # Offline / ambiguous PyPI answers fail open: the job's own smoke test
+    # still vets the environment before the real calculation.
+    return _pip_installable(dep) is not False
 
-    On the cluster a job only gets the pre-provisioned shared envs plus a pip
-    fallback -- so a library is runnable iff every package it needs is either
-    declared by a cluster env spec (scripts/ris/envs/*.yml) or genuinely
-    installable from PyPI. Anything else is guaranteed to die in
-    ``pip install`` after staging + a queue wait (observed with a Psi4 plan:
-    locally importable via pixi, absent from every cluster env, no PyPI
-    distribution). Callers gate on ``self.execute_slurm`` (the machine's own
-    routing flag) and reroute the plan to a runnable tool instead.
 
-    The verdict is derived, not curated: a package missing from the specs is
-    checked against the known conda-only set (covers "exists on PyPI but can't
-    build on a compute node", e.g. gpaw's sdist) and then against PyPI itself
-    (covers everything else, including tools added later and names the model
-    invented). Offline/ambiguous PyPI answers fail open -- the pre-submit
-    preflight still vets the final requirements before sbatch.
-    """
-    provided = _cluster_env_packages()
-    for dep in _depinf.import_names(library):
-        if dep.package.lower() in provided:
+def _plan_dependencies(libraries) -> list:
+    """The distinct dependencies (``_depinf`` objects) behind ``libraries``."""
+    deps, seen = [], set()
+    for entry in libraries:
+        if not isinstance(entry, str) or not entry.strip():
             continue
-        if dep.package.lower() in _depinf.CONDA_ONLY_PACKAGES:
-            return True
-        # On PyPI, yet not gettable inside a job's wall clock (a multi-GB torch
-        # download onto a compute node). Without this the veto reads
-        # "pip-installable" as "runnable" and plans a calculator the cluster has
-        # no way to provide -- see CLUSTER_UNRUNNABLE_PACKAGES.
-        if dep.package.lower() in _depinf.CLUSTER_UNRUNNABLE_PACKAGES:
-            return True
-        if _pip_installable(dep) is False:
-            return True
-    return False
+        for dep in _depinf.import_names(entry.strip()):
+            if dep.package.lower() not in seen:
+                seen.add(dep.package.lower())
+                deps.append(dep)
+    return deps
+
+
+def cluster_env_candidates(libraries) -> Optional[list]:
+    """The cluster envs that can run ``libraries`` together, best first, or None.
+
+    A Slurm job runs in ONE pre-provisioned env and layers a pip venv on it for
+    whatever that env lacks (slurm_execution_adapter's ``_env_payload``). So an
+    env qualifies iff every package the libraries need is either declared by
+    THAT env's spec or gettable with pip. Planning vetoes on this rule, and the
+    job tries exactly these envs in this order, layering on the first -- the two
+    can no longer disagree (#169). The old rule checked each library against
+    the union of all specs and picked envs by name: OpenMM + OpenFF passed
+    planning because nwchem.yml lists OpenFF, then the job tried only
+    ``default`` (no package is named "nwchem") and died in pip (runs 21ffdacd,
+    786bd6b1).
+
+    Ranking: fewest packages left to pip, then an env named after one of the
+    packages (it exists to provide that engine), with ``default`` last at equal
+    coverage. ``None`` means no env works; ``[]`` only when there are no specs
+    at all (nothing to choose from -- the job uses its plain-pip path).
+    """
+    specs = _cluster_env_specs()
+    if not specs:
+        return []
+    deps = _plan_dependencies(libraries)
+    wanted = {d.package.lower() for d in deps}
+    blockers = {d.package.lower() for d in deps if not _pip_gettable(d)}
+    viable = []
+    for name, provided in specs.items():
+        missing = [d for d in deps if d.package.lower() not in provided]
+        if not all(_pip_gettable(d) for d in missing):
+            continue
+        # Only envs with a reason to be tried: each candidate costs the job a
+        # smoke-test probe, and an unrelated engine env (cp2k for a pymatgen
+        # run) offers nothing default doesn't.
+        if name != "default" and name not in wanted and not (provided & blockers):
+            continue
+        viable.append((len(missing), name not in wanted, name == "default", name))
+    if not viable:
+        return None
+    return [entry[-1] for entry in sorted(viable)]
+
+
+def _selected_toolset(plan: dict) -> list:
+    """The calculator, libraries and tool a plan selected (names, unfiltered)."""
+    method = (plan or {}).get("selected_method") or {}
+    return ([method.get("calculator")] + list(method.get("libraries") or [])
+            + [method.get("tool_name")])
+
+
+def _cluster_env_gap(libraries) -> str:
+    """Why no env fits ``libraries``, in one line (for the refusal message)."""
+    deps = _plan_dependencies(libraries)
+    blockers = sorted(d.package for d in deps if not _pip_gettable(d))
+    specs = _cluster_env_specs()
+    homes = {b: sorted(n for n, pk in specs.items() if b.lower() in pk) for b in blockers}
+    parts = [f"{b} ({'only in ' + ', '.join(homes[b]) if homes[b] else 'in no env spec'}"
+             f"; not pip-installable)" for b in blockers]
+    names = ", ".join(n for n in libraries if isinstance(n, str) and n.strip())
+    return (f"{names} need {'; '.join(parts) or 'packages no single env provides'} "
+            f"-- no single env provides all of them")
+
+
+def _cluster_cannot_run(library: str) -> bool:
+    """Whether no cluster env (plus pip) can provide ``library``'s packages.
+
+    Per library, for ranking candidates early; the whole toolset is checked
+    together with :func:`cluster_env_candidates` once PLAN has picked it.
+    """
+    return cluster_env_candidates([library]) is None
 
 
 # Formula tokens for counting atoms: an element symbol + optional multiplier.
@@ -2007,6 +2058,19 @@ class StateMachine:
         execution_plan.summary = self._compose_plan_summary(
             intent, requested_property, libraries, calc_entry, recommendation)
 
+        if self.execute_slurm:
+            # The whole toolset must fit ONE cluster env (+ pip): each library can
+            # pass the per-library veto alone yet no env holds them together.
+            # Refuse here, before the researcher approves an allocation for a job
+            # that can only die in pip (#169).
+            toolset = _selected_toolset(asdict(execution_plan))
+            if cluster_env_candidates(toolset) is None:
+                raise _config_error(
+                    "no RIS cluster environment can run this plan: "
+                    + _cluster_env_gap(toolset),
+                    "Provision or extend a shared env so one env provides these "
+                    "packages together (scripts/ris/envs/*.yml + "
+                    "scripts/ris/provision_envs.sh), then rerun.")
         self.context.artifacts["execution_plan"] = self._write_artifact(
             "execution_plan", asdict(execution_plan))
         self._revoke_approval_if_plan_changed()
@@ -2708,22 +2772,13 @@ class StateMachine:
         #     never have been selected however well provisioned they were.
         env_pythons = []
         if profile.envs_root:
-            method = plan.get("selected_method") or {}
-            provisioned = _cluster_env_names()
-            names = []
-            wanted = ([method.get("calculator")]
-                      + list(method.get("libraries") or [])
-                      + [method.get("tool_name")])
-            for entry in wanted:
-                if not isinstance(entry, str) or not entry.strip():
-                    continue
-                for dep in _depinf.import_names(entry.strip()):
-                    package = dep.package.lower()
-                    if package in provisioned and package not in names:
-                        names.append(package)
-            # Always last: it exists but carries only the common stack, so it must
-            # never shadow an engine env (see the adapter's candidate probe).
-            names.append("default")
+            # Exactly the envs that can run this toolset (an env's own spec plus
+            # pip for the rest), best first: the job tries them in this order and
+            # layers its pip venv on the first -- the same rule PLAN vetoed on, so
+            # an approved plan can't land in an env that lacks what it needs (#169).
+            names = cluster_env_candidates(_selected_toolset(plan))
+            if names is None:
+                names = ["default"]  # PLAN refuses these; keep a pre-#169 plan runnable-ish
             env_pythons = [f"{profile.envs_root}/{n}/bin/python" for n in names]
 
         host = os.environ.get("TWAIN_SLURM_HOST")  # None => profile login node
