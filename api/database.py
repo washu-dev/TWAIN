@@ -109,9 +109,26 @@ def read_secret(secret_id: str) -> str:
         raise RuntimeError(f"Failed to load secret '{secret_id}': {e}") from e
 
 
+def connection_options() -> dict:
+    """libpq options every TWAIN connection uses (the runner mirrors these).
+
+    * ``connect_timeout`` -- a dead or unreachable server fails the request in
+      seconds instead of hanging it (``DB_CONNECT_TIMEOUT``, default 10).
+    * ``gssencmode=disable`` -- never negotiate Kerberos encryption. Neither the
+      local Postgres nor RDS uses it, but with a WashU Kerberos ticket cached
+      libpq tries GSS first and asks the KDC for a ticket; with the VPN down that
+      lookup hung PQconnectdb indefinitely (and ``connect_timeout`` doesn't bound
+      it). Override with ``PGGSSENCMODE`` if a deployment ever needs GSS.
+    """
+    return {
+        "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10")),
+        "gssencmode": os.getenv("PGGSSENCMODE", "disable"),
+    }
+
+
 def get_connection():
     """Create and return a database connection using the resolved credentials."""
-    return psycopg2.connect(**_load_db_config())
+    return psycopg2.connect(**_load_db_config(), **connection_options())
 
 
 ALLOWED_ROLES = ("user", "admin")

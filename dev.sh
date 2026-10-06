@@ -33,6 +33,16 @@ TWAIN_DB_FROM_ENV="${TWAIN_DB_FROM_ENV:-true}"
 API_PORT="${API_PORT:-8000}"
 AUTH_DISABLED="${AUTH_DISABLED:-true}"
 PG_CONTAINER="${PG_CONTAINER:-twain-pg}"
+# Never negotiate GSSAPI (Kerberos) encryption with the local Postgres. With a
+# WashU Kerberos ticket in the cache (klist shows ...@ACCOUNTS.AD.WUSTL.EDU),
+# libpq tries GSS first and asks the KDC for a ticket -- and when the VPN is down
+# or flapping, that KDC DNS lookup hangs inside PQconnectdb. The API connects on
+# its event loop in several async routes, so one hung connect froze the whole
+# API (even /api/health) and every app request died with axios's "timeout of
+# 10000ms exceeded". Local Postgres needs no Kerberos; this applies to the API,
+# the runner, and every psql call here (exported now, before the first probe).
+# Override by exporting PGGSSENCMODE.
+export PGGSSENCMODE="${PGGSSENCMODE:-disable}"
 # Local dev executes the generated calculation for real by default (the
 # plan-approval gate in the UI still applies). --no-execute or
 # TWAIN_EXECUTE_LOCALLY=0 keeps the pipeline planning-only.

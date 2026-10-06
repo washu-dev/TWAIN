@@ -52,9 +52,14 @@ class RunnerDB:
     """Short-lived-connection helpers for everything the runner reads/writes."""
 
     def _connect(self):
+        # Same libpq options as the API (api/database.py connection_options):
+        # fail fast on a dead server, and never negotiate Kerberos encryption --
+        # a cached WashU ticket plus a down VPN hung GSS negotiation for good.
         return psycopg2.connect(
             host=DB_HOST, port=DB_PORT, database=DB_NAME,
             user=DB_USER, password=_resolve_db_password(),
+            connect_timeout=int(os.environ.get("DB_CONNECT_TIMEOUT", "10")),
+            gssencmode=os.environ.get("PGGSSENCMODE", "disable"),
         )
 
     # ---- jobs -----------------------------------------------------------------

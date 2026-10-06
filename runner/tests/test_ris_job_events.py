@@ -111,3 +111,15 @@ def test_db_trouble_degrades_to_plain_sleep_for_the_rest_of_the_run():
     assert waiter.wait("42", 30.0) is False
     assert waiter.wait("42", 30.0) is False
     assert sleeps == [30.0, 30.0]
+
+
+def test_runner_connections_never_negotiate_gss_and_fail_fast(monkeypatch):
+    # Mirrors api/database.py connection_options (#165): a cached Kerberos
+    # ticket plus a down VPN must not hang the runner's connect either.
+    seen = {}
+    monkeypatch.setattr(runner_db.psycopg2, "connect", lambda **kw: seen.update(kw))
+    monkeypatch.setattr(runner_db, "_resolve_db_password", lambda: "pw")
+    monkeypatch.delenv("PGGSSENCMODE", raising=False)
+    monkeypatch.delenv("DB_CONNECT_TIMEOUT", raising=False)
+    runner_db.RunnerDB.__new__(runner_db.RunnerDB)._connect()
+    assert seen["gssencmode"] == "disable" and seen["connect_timeout"] == 10
