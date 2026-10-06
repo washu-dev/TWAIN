@@ -1,0 +1,29 @@
+{
+  "_comment": "Accepted high/critical advisories for the app's production dependency tree, read by scripts/audit-gate.mjs. Each entry needs a reason and a review_by date; the gate fails on any advisory not listed here and on any entry past its review_by. Accept only advisories with no usable fix -- update the package instead whenever one exists.",
+  "accepted": [
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "reason": "No fixed version (every release through 3.0.3, the latest, is affected). Reached only via metro/@expo/cli file watching and glob matching at build/dev time, on patterns from the repo's own config -- not in the shipped web bundle and never fed untrusted input.",
+      "review_by": "2027-01-06"
+    },
+    {
+      "id": "GHSA-86w9-cpqp-85rv",
+      "package": "node-forge",
+      "reason": "No fixed version (1.4.0 is the latest). Used by @expo/cli's code-signing certificates for development builds; TWAIN ships a static web build and verifies no signatures with it. RETICLE accepts the same advisory for the same reason.",
+      "review_by": "2027-01-06"
+    },
+    {
+      "id": "GHSA-5p2g-fcmc-qvqq",
+      "package": "image-size",
+      "reason": "Fixed only in image-size 2.x, but metro 0.84 (via react-native 0.85) requires ^1.0.2 and calls the 1.x API, so the fix can't be forced without breaking the bundler. Metro reads the dimensions of the repo's own image assets at build time; no untrusted images are parsed and it is not in the web bundle. Drop this entry when metro moves to image-size 2.",
+      "review_by": "2027-01-06"
+    },
+    {
+      "id": "GHSA-w3rx-r6r6-pgpr",
+      "package": "image-size",
+      "reason": "Same as GHSA-5p2g-fcmc-qvqq: fixed only in 2.x, which metro's ^1.0.2 range excludes; build-time parsing of repo-controlled assets only.",
+      "review_by": "2027-01-06"
+    }
+  ]
+}
