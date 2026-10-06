@@ -5,9 +5,9 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -16,6 +16,7 @@ from pydantic import BaseModel
 import auth
 import conversations as convo
 import github_issues
+import job_tickets
 import migrate
 import ris_webhooks
 import run_issue_github
@@ -96,6 +97,19 @@ async def health_check():
     A deploy is now verifiable with one unauthenticated curl.
     """
     return {"status": "ok", "commit": git_sha(), "version": app.version}
+
+
+@app.post("/api/job-tickets/urls")
+def job_ticket_urls(body: dict, x_twain_ticket: Annotated[str | None, Header()] = None):
+    """Presigned S3 URLs for a Slurm job, traded for its job ticket (see job_tickets.py).
+
+    No user auth: the job on RIS has no user; the ticket -- random, scoped to
+    one run attempt, expiring -- is the credential, sent as X-TWAIN-Ticket.
+    """
+    try:
+        return job_tickets.handle(x_twain_ticket or "", body)
+    except job_tickets.TicketError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
 
 #: ris-api events are a few hundred bytes; refuse anything far larger unread.

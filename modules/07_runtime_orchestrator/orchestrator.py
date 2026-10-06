@@ -150,6 +150,7 @@ class Orchestrator:
         slurm_cluster: Optional[str] = None,
         cancel_check=None,
         job_event_wait=None,
+        issue_job_ticket=None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -249,6 +250,8 @@ class Orchestrator:
             should_abort=cancel_check,
             # RIS webhook seam: the Slurm poll sleep wakes on a job event.
             job_event_wait=job_event_wait,
+            # S3 staging seam: per-attempt job tickets (#170).
+            issue_job_ticket=issue_job_ticket,
         )
 
         # Let stages report what they're doing between stage events (the UI's

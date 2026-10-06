@@ -27,3 +27,8 @@ output "runner_secrets_missing" {
   description = "secrets.json keys the runner needs that don't exist yet (add them, then re-apply)."
   value       = local.runner_secrets_missing
 }
+
+output "run_bucket_name" {
+  description = "S3 bucket for Slurm job file I/O; set as TWAIN_RUN_BUCKET for the API and the runner/worker."
+  value       = aws_s3_bucket.run_data.bucket
+}

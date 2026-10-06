@@ -1,0 +1,37 @@
+# twain.sh -- the RIS-side configuration every TWAIN Slurm job sources (#170).
+#
+# Copy to RIS storage, fill in, and lock it down -- every job runs it as YOU:
+#
+#   cp scripts/ris/twain.sh.example <somewhere on RIS storage>/twain.sh
+#   chmod 640 <...>/twain.sh            # owner rw, group r, world nothing
+#
+# then point the runner/worker at it with TWAIN_ENV_FILE=<...>/twain.sh. A job
+# only reads it; it never writes it. Keep it out of any world-writable directory:
+# whoever can edit it can run code as you and read what it exports.
+#
+# How a job uses it (modules/08_execution_adapter/slurm_execution_adapter.py,
+# _s3_job_script): source this file -> check $TWAIN_DIR contains the commit that
+# submitted the job (else exit 4, "git -C $TWAIN_DIR pull") -> exec
+# $TWAIN_DIR/scripts/ris/job_wrapper.sh, which fetches the bundle from S3 with
+# the job's ticket, runs it in $TWAIN_SCRATCH, and uploads the outputs.
+
+# ── Required ──────────────────────────────────────────────────────────────────
+# Your TWAIN area on RIS storage.
+export TWAIN_HOME="/storage2/fs1/mdan/Active/dtrc2026-workshop/twain"
+# A checkout of github.com/washu-dev/TWAIN (master). Jobs run
+# scripts/ris/job_wrapper.sh from here, so keep it current: `git -C "$TWAIN_DIR" pull`.
+export TWAIN_DIR="$TWAIN_HOME/TWAIN"
+
+# ── Optional ──────────────────────────────────────────────────────────────────
+# Pre-provisioned cluster envs (scripts/ris/provision_envs.sh builds them from
+# scripts/ris/envs/*.yml). Defaults to the cluster profile's envs_root.
+# export TWAIN_ENVS_ROOT="/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs"
+
+# Where a job unpacks and runs its bundle. Defaults to $TMPDIR (node-local
+# scratch), then /tmp. Outputs are uploaded to S3, so nothing here must persist.
+# export TWAIN_SCRATCH="$TMPDIR"
+
+# Secrets a generated script may read at run time, exported to the job. With S3
+# staging this file is their only route to the cluster -- nothing is sent with
+# the job (the RIS API stores every submitted script and environment).
+# export MP_API_KEY=""                # Materials Project lookups (free key: materialsproject.org/api)

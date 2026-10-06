@@ -321,7 +321,7 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
 
 
 def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier, cancel,
-                        job_event_wait=None):
+                        job_event_wait=None, issue_job_ticket=None):
     """Wire an orchestrator for this session with the chat/event/store bridges."""
     sink = PgEventSink(db, session_id)
     orch = engine.build_orchestrator(
@@ -335,6 +335,8 @@ def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, not
         cancel=cancel,
         # Slurm poll sleep that wakes on a RIS webhook for the job.
         job_event_wait=job_event_wait,
+        # S3 staging: tickets a Slurm job trades for presigned URLs (#170).
+        issue_job_ticket=issue_job_ticket,
         # Per-run budget override (falls back to the deployment default in engine).
         max_cost=params.get("max_cost"),
     )
@@ -372,7 +374,8 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     # On resume/rerun the orchestrator rebuilds its state + context from the session
     # store; request/researcher_id are only needed to *start* a run.
     orch = _build_orchestrator(engine, db, session_id, params, notifier, cancel,
-                               job_event_wait=job_events.wait)
+                               job_event_wait=job_events.wait,
+                               issue_job_ticket=getattr(db, "issue_job_ticket", None))
 
     if kind == "rerun":
         target = params.get("target_state")

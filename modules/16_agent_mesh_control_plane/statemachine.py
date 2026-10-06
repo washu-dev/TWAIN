@@ -651,7 +651,7 @@ class StateMachine:
                  script_doctor=None, library_available=None, sim_available=None,
                  library_request_tracker=None, auto_approve=False,
                  execute_slurm: bool = False, slurm_cluster: str = None,
-                 should_abort=None, job_event_wait=None):
+                 should_abort=None, job_event_wait=None, issue_job_ticket=None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -699,6 +699,9 @@ class StateMachine:
         # RIS webhook seam: ``(job_id, seconds)`` sleep the Slurm adapter uses
         # between polls, returning early when ris-api reports on that job.
         self.job_event_wait = job_event_wait
+        # S3 staging seam (TWAIN_STAGING=s3, #170): ``(run_id, attempt, prefix,
+        # ttl) -> token`` issuing the ticket a Slurm job trades for presigned URLs.
+        self.issue_job_ticket = issue_job_ticket
         # Activity seam: ``(event_type, payload)`` publisher the orchestrator
         # sets so stages can report what they're doing (``stage.progress``,
         # ``job.log``) instead of leaving the UI on "Working…". None => silent.
@@ -2802,6 +2805,7 @@ class StateMachine:
             job_event_wait=self.job_event_wait,
             # Live EXECUTE checklist + job log for the UI.
             on_progress=self._publish_progress,
+            issue_job_ticket=self.issue_job_ticket,
         )
 
     # Extra polling headroom on top of the job's wall time: covers time spent

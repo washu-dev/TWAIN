@@ -43,6 +43,7 @@ try:  # pragma: no cover - import shim (mirrors local_adapter)
     from execution_adapter.cluster_profile import ClusterProfile
     from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
     from execution_adapter.job_activity import JobActivity
+    from execution_adapter.s3_transport import S3Transport, attempt_prefix
     from execution_adapter.local_adapter import _DEP_ERROR_MARKERS, _safe_name
     from execution_adapter.ris_api_adapter import RisApiAdapter
     from execution_adapter.ris_api_client import RisApiClient, RisApiError
@@ -61,6 +62,7 @@ except ImportError:  # pragma: no cover
     from cluster_profile import ClusterProfile
     from execution_result import ExecutionResult, ExecutionStatus
     from job_activity import JobActivity
+    from s3_transport import S3Transport, attempt_prefix
     from local_adapter import _DEP_ERROR_MARKERS, _safe_name
     from ris_api_adapter import RisApiAdapter
     from ris_api_client import RisApiClient, RisApiError
@@ -131,6 +133,33 @@ _STEP_FAILED = {
     "preflight": "The environment check failed",
     "submit": "Submitting the job failed",
 }
+
+
+def _s3_job_script() -> str:
+    """The job's command for S3 staging: twain.sh -> stale-checkout guard -> wrapper.
+
+    Modelled on RETICLE's jobs.py prologue. The wrapper and the env specs come
+    from the RIS checkout at $TWAIN_DIR, so a checkout older than the code that
+    submitted the job fails here, loudly, with the fix (exit 4) -- not halfway
+    through the run.
+    """
+    return "\n".join([
+        'if [ -n "${TWAIN_ENV_FILE:-}" ] && [ -f "$TWAIN_ENV_FILE" ]; then',
+        '  . "$TWAIN_ENV_FILE"',
+        "fi",
+        ': "${TWAIN_DIR:?TWAIN_DIR is not set -- define it in $TWAIN_ENV_FILE (twain.sh)}"',
+        'if [ -n "${TWAIN_EXPECTED_SHA:-}" ] && command -v git >/dev/null 2>&1; then',
+        '  if ! git -c safe.directory="*" -C "$TWAIN_DIR" merge-base --is-ancestor '
+        '"$TWAIN_EXPECTED_SHA" HEAD 2>/dev/null; then',
+        '    echo "TWAIN_STALE_CHECKOUT: $TWAIN_DIR is at $(git -c safe.directory="*" '
+        '-C "$TWAIN_DIR" rev-parse --short HEAD 2>/dev/null) and does not contain '
+        '$TWAIN_EXPECTED_SHA (the code that submitted this job). '
+        'Run: git -C $TWAIN_DIR pull" >&2',
+        "    exit 4",
+        "  fi",
+        "fi",
+        'exec bash "$TWAIN_DIR/scripts/ris/job_wrapper.sh"',
+    ])
 
 
 def _bundle_size(local_dir) -> tuple:
@@ -205,6 +234,12 @@ class SlurmExecutionAdapter:
         on_progress=None,
         backend: Optional[str] = None,
         ris_api_client: Optional[RisApiClient] = None,
+        staging: Optional[str] = None,
+        s3_transport: Optional[S3Transport] = None,
+        issue_job_ticket=None,
+        api_public_url: Optional[str] = None,
+        env_file: Optional[str] = None,
+        expected_sha: Optional[str] = None,
     ):
         """``cluster_runner`` executes commands on the login node -- sbatch/
         squeue/sacct on the ``"ssh"`` backend, or just the preflight probe on
@@ -279,6 +314,36 @@ class SlurmExecutionAdapter:
         self.stager = Stager(self.profile, host=self.host, user=user,
                              runner=transfer_runner)
 
+        # File I/O. "ssh" (default): rsync to RIS storage + a login-node env
+        # probe. "s3" (#170): the bundle and outputs travel through S3 and the job
+        # fetches/uploads them itself with a job ticket -- no SSH, no VPN, no AWS
+        # credentials on the cluster, so this side can run anywhere (an ECS
+        # worker). Requires the RIS API backend.
+        self.staging = (staging or os.environ.get("TWAIN_STAGING") or "ssh").strip().lower()
+        if self.staging not in ("ssh", "s3"):
+            raise ValueError(f"unknown staging {self.staging!r} (expected 'ssh' or 's3')")
+        self.s3 = None
+        self._attempts: dict = {}
+        if self.staging == "s3":
+            if self.backend != "api":
+                raise ValueError("staging='s3' needs backend='api' (the job is "
+                                 "submitted through the RIS API)")
+            self.api_public_url = (api_public_url or os.environ.get("TWAIN_API_PUBLIC_URL")
+                                   or "").rstrip("/")
+            if not self.api_public_url.startswith("https://"):
+                raise ValueError("staging='s3' needs TWAIN_API_PUBLIC_URL (https) -- the "
+                                 "address jobs on RIS use to trade their ticket for URLs")
+            if issue_job_ticket is None:
+                raise ValueError("staging='s3' needs an issue_job_ticket callable")
+            self.issue_job_ticket = issue_job_ticket
+            self.s3 = s3_transport or S3Transport()
+            # twain.sh on cluster storage (owner-managed): TWAIN_HOME, TWAIN_DIR, ...
+            self.env_file = env_file or os.environ.get("TWAIN_ENV_FILE")
+            if not self.env_file:
+                raise ValueError("staging='s3' needs TWAIN_ENV_FILE: the path of "
+                                 "twain.sh on RIS storage (see scripts/ris/twain.sh.example)")
+            self.expected_sha = expected_sha or os.environ.get("TWAIN_GIT_SHA") or None
+
     # ---------------------------------------------------------------- execute
     def execute(
         self,
@@ -316,7 +381,16 @@ class SlurmExecutionAdapter:
                 tool_name=tool_name,
             )
         tool_name = getattr(bundle, "tool_name", None)
-        remote_dir = self.stager.remote_run_dir(run_id)
+        via_s3 = self.s3 is not None
+        attempt = None
+        if via_s3:
+            # Each execute() of a run is its own attempt with its own S3 prefix
+            # and ticket -- a self-heal re-run never reads the last one's files.
+            attempt = self._attempts.get(run_id, 0) + 1
+            self._attempts[run_id] = attempt
+            remote_dir = f"s3://{self.s3.bucket}/{attempt_prefix(run_id, attempt)}"
+        else:
+            remote_dir = self.stager.remote_run_dir(run_id)
         job_env = dict(env or {})
         # Secrets a generated script may read at run time (currently the
         # Materials Project key for database-retrieval tasks). A compute node
@@ -325,18 +399,28 @@ class SlurmExecutionAdapter:
         # spec (script + environment), serves it back from /jobs/{id}/request,
         # and copies it into recipes. They ride the rsync instead, in a 0600
         # file the job sources and deletes (#153).
-        secrets = {name: os.environ[name] for name in _PASSTHROUGH_ENV
-                   if name not in job_env and os.environ.get(name)}
+        # With S3 staging they come from twain.sh on the cluster instead
+        # (owner-managed, mode 640), so none leave this side at all.
+        secrets = {} if via_s3 else {
+            name: os.environ[name] for name in _PASSTHROUGH_ENV
+            if name not in job_env and os.environ.get(name)}
         secrets_path = self._write_secrets(local_dir, secrets)
         payload = self._payload(local_dir, install_deps=install_deps,
                                 run_smoke=run_smoke)
         if secrets_path:
             payload = _secrets_prologue(f"{remote_dir}/{SECRETS_FILE}") + payload
+        if via_s3:
+            # The job unpacks the bundle in node scratch and runs this file
+            # (job_wrapper.sh); the submitted script only sources twain.sh,
+            # checks the checkout, and starts the wrapper.
+            (Path(local_dir) / "twain_payload.sh").write_text(payload + "\n", encoding="utf-8")
+            job_env.update(self._s3_job_env(run_id, attempt, max_wait))
+            payload = _s3_job_script()
         job = JobSpec(
             job_name=job_name,
             command=payload,
-            workdir=remote_dir,
-            output_path=f"{remote_dir}/{job_name}-%j.log",
+            workdir=None if via_s3 else remote_dir,
+            output_path=None if via_s3 else f"{remote_dir}/{job_name}-%j.log",
             partition=self.partition,
             container_image=self.container_image,
             container_mounts=[f"{remote_dir}:{remote_dir}"] if self.container_image else [],
@@ -362,21 +446,30 @@ class SlurmExecutionAdapter:
                 (Path(local_dir) / "job.slurm").write_text(script, encoding="utf-8")
                 to_submit = f"{remote_dir}/job.slurm"
             files, size_kb = _bundle_size(local_dir)
-            activity.step("stage", "active", f"Copying the run bundle to {cluster} storage")
+            activity.step("stage", "active",
+                          "Uploading the run bundle to S3" if via_s3
+                          else f"Copying the run bundle to {cluster} storage")
             try:
-                self.stager.push(local_dir, run_id)
+                if via_s3:
+                    self.s3.push(local_dir, run_id, attempt)
+                else:
+                    self.stager.push(local_dir, run_id)
             finally:
                 # Only the cluster copy is needed; don't leave the secret in
                 # the local workspace (or in artifacts_dir).
                 if secrets_path:
                     secrets_path.unlink(missing_ok=True)
             activity.step("stage", "done",
-                          f"Bundle staged to {cluster} storage ({files} files, {size_kb} KB)",
+                          (f"Bundle uploaded to S3 ({files} files, {size_kb} KB)" if via_s3
+                           else f"Bundle staged to {cluster} storage ({files} files, {size_kb} KB)"),
                           remote_dir=remote_dir, files=files, size_kb=size_kb)
             current = "preflight"
             activity.step("preflight", "active",
                           "Checking that a cluster environment can run it")
-            preflight_error = self._preflight_env_check(
+            # S3 staging: nothing runs on a login node. Planning already chose an
+            # env that can run the plan (#169), and the job smoke-tests it before
+            # the real calculation (exit 2 = missing dependency).
+            preflight_error = None if via_s3 else self._preflight_env_check(
                 remote_dir, local_dir, install_deps=install_deps,
                 run_smoke=run_smoke)
             if preflight_error:
@@ -389,7 +482,9 @@ class SlurmExecutionAdapter:
                     tool_name=tool_name,
                     artifacts_dir=local_dir if keep_artifacts else None,
                 )
-            activity.step("preflight", "done", "Environment check passed")
+            activity.step("preflight", "done",
+                          "Environment check runs in the job (smoke test first)" if via_s3
+                          else "Environment check passed")
             current = "submit"
             partition = (to_submit.get("partition") if isinstance(to_submit, dict)
                          else self._partition_name())
@@ -476,11 +571,21 @@ class SlurmExecutionAdapter:
             )
 
         # 4) fetch results + accounting ------------------------------------------
-        activity.step("fetch", "active", f"Fetching results from {cluster}")
+        activity.step("fetch", "active",
+                      "Fetching results from S3" if via_s3 else f"Fetching results from {cluster}")
+        pull_error = None
         try:
-            self.stager.pull(run_id, local_dir)
+            if via_s3:
+                self.s3.pull(run_id, attempt, local_dir)
+            else:
+                self.stager.pull(run_id, local_dir)
         except StagingError as exc:
             activity.step("fetch", "failed", f"Fetching results failed: {exc}"[:500])
+            # S3: a job that stopped before its upload step (stale checkout,
+            # bundle fetch) leaves no outputs -- its exit code and stderr still
+            # say why, so classify instead of reporting only "no outputs".
+            pull_error = str(exc)
+        if pull_error and not via_s3:
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 message=f"job finished ({state.value}) but fetching outputs failed: {exc}",
@@ -500,9 +605,14 @@ class SlurmExecutionAdapter:
         accounting = self._safe_accounting(job_id)
         exit_code = self.slurm.exit_code(job_id) if accounting else None
 
-        activity.step("fetch", "done", "Results fetched")
+        if not pull_error:
+            activity.step("fetch", "done", "Results fetched")
         status, message = self._classify(
             state, exit_code, f"{stdout}\n{stderr}" if stderr else stdout, job_id)
+        if pull_error and status is ExecutionStatus.SUCCESS:
+            status, message = (ExecutionStatus.FAILED,
+                               f"Slurm job {job_id} finished but its outputs are "
+                               f"missing: {pull_error}")
         return ExecutionResult(
             status=status,
             exit_code=exit_code,
@@ -648,7 +758,7 @@ class SlurmExecutionAdapter:
         ``set -e`` keeps the fail-fast behavior of the ``&&`` chain.
         """
         have_smoke = run_smoke and (bundle / "inline_tests.py").is_file()
-        candidates = " ".join(shlex.quote(p) for p in self.env_pythons)
+        candidates = " ".join(self._env_candidate_word(p) for p in self.env_pythons)
         lines = [
             "set -e",
             # Calculation scratch goes on NODE-LOCAL disk, never on the shared
@@ -895,6 +1005,37 @@ class SlurmExecutionAdapter:
         root = re.sub(r"/api(/v\d+)?/?$", "", base)
         return f"{root}/jobs" if root.startswith("https://") else None
 
+    def _env_candidate_word(self, path: str) -> str:
+        """A candidate env python as a shell word that honours $TWAIN_ENVS_ROOT.
+
+        The paths come from the cluster profile's envs_root on this side; twain.sh
+        may move the envs (TWAIN_ENVS_ROOT), so expand the root on the node.
+        """
+        root = (self.profile.envs_root or "").rstrip("/")
+        if root and path.startswith(root + "/"):
+            rest = path[len(root):]
+            if re.fullmatch(r"[A-Za-z0-9._/+-]+", rest) and re.fullmatch(r"[A-Za-z0-9._/+-]+", root):
+                return f'"${{TWAIN_ENVS_ROOT:-{root}}}{rest}"'
+        return shlex.quote(path)
+
+    def _s3_job_env(self, run_id: str, attempt: int, max_wait) -> dict:
+        """What an S3-staged job needs to find its files (all non-secret pointers
+        but the ticket, which is scoped to this attempt and expires)."""
+        # Valid for the whole wait plus the job's own wall time, plus slack.
+        ttl = min(7 * 86400.0, float(max_wait or DEFAULT_MAX_WAIT)
+                  + float(self.request.max_time) * 60.0 + 3600.0)
+        ticket = self.issue_job_ticket(run_id, attempt, attempt_prefix(run_id, attempt), ttl)
+        env = {
+            "TWAIN_API_URL": self.api_public_url,
+            "TWAIN_TICKET": ticket,
+            "TWAIN_RUN_ID": run_id,
+            "TWAIN_ATTEMPT": str(attempt),
+            "TWAIN_ENV_FILE": self.env_file,
+        }
+        if self.expected_sha:
+            env["TWAIN_EXPECTED_SHA"] = self.expected_sha
+        return env
+
     def _partition_name(self) -> Optional[str]:
         """The partition the SSH path's sbatch script asks for (for display)."""
         try:
@@ -967,6 +1108,22 @@ class SlurmExecutionAdapter:
                     f"Slurm job {job_id} hit its wall-clock limit and was killed")
         if state is JobState.CANCELLED:
             return ExecutionStatus.FAILED, f"Slurm job {job_id} was cancelled"
+        # The S3 job wrapper's own exits (scripts/ris/job_wrapper.sh, #170):
+        # setup problems on the cluster side, not the calculation.
+        if exit_code == 4 and "TWAIN_STALE_CHECKOUT" in (stdout or ""):
+            line = next((ln for ln in stdout.splitlines() if "TWAIN_STALE_CHECKOUT" in ln), "")
+            return (ExecutionStatus.SETUP_FAILED,
+                    f"the RIS checkout is older than the code that submitted Slurm job "
+                    f"{job_id} -- {line.split('TWAIN_STALE_CHECKOUT:', 1)[-1].strip()}")
+        if exit_code == 6:
+            return (ExecutionStatus.SETUP_FAILED,
+                    f"Slurm job {job_id} could not download its run bundle from S3 "
+                    f"(the TWAIN API or the ticket was unreachable from the compute "
+                    f"node) -- see the job's stderr")
+        if exit_code == 7:
+            return (ExecutionStatus.FAILED,
+                    f"Slurm job {job_id} ran, but could not upload its outputs to S3 "
+                    f"-- see the job's stderr")
         # Our own in-job `timeout` fires ~2 min before Slurm's limit so a wedged
         # engine dies with a diagnosable code instead of idling out the
         # allocation. That means Slurm never reports its own TIMEOUT state for

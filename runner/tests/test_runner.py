@@ -261,7 +261,7 @@ class FakeEngine:
 
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store,
-        cancel=None, max_cost=None, job_event_wait=None,
+        cancel=None, max_cost=None, job_event_wait=None, issue_job_ticket=None,
     ):
         self.built_with = {
             "session_id": session_id, "researcher_id": researcher_id,

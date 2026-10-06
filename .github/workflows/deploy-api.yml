@@ -138,6 +138,13 @@ jobs:
           task-definition: api/task-definition.json
           container-name: twain-api
           image: ${{ steps.build-image.outputs.image }}
+          # This step starts from the LIVE task definition (downloaded above),
+          # not api/ecs-task-definition.json, so new API config must be set here
+          # to reach production. TWAIN_RUN_BUCKET: the run bucket the job-ticket
+          # endpoint signs URLs for (terraform output run_bucket_name, #170);
+          # repo variable, falling back to the Terraform default name.
+          environment-variables: |
+            TWAIN_RUN_BUCKET=${{ vars.TWAIN_RUN_BUCKET || 'twain-run-data-730335203321' }}
 
       - name: Deploy to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
