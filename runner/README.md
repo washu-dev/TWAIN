@@ -273,6 +273,28 @@ What happens at EXECUTE:
    `/output/stderr?tail=` and `/accounting` on `api`, or the rsynced job log
    (both streams in one file) + `sacct` on `ssh`.
 
+**Live activity in the chat UI.** Between "Plan approved" and the result, each
+stage publishes `stage.progress` run events (BUILD: script written; REPAIR:
+smoke test, fix rounds, review; EXECUTE: bundle staged → env check → submitted
+with job id and resources → queued with Slurm's reason in plain words →
+running on its node → finished → results fetched). On the API backend, the
+running job's stdout is followed through ris-api's paged output endpoint and
+published as `job.log` events (at most 8 KB per poll and 256 KB per job). The
+chat screen polls `GET /api/conversations/{id}/activity?after=<id>` over the
+authenticated client (the SSE stream can't send the bearer token) and renders
+them as a live checklist plus a job-output tail. Reporting is best effort:
+a dropped event only means less detail on screen.
+
+**Webhooks (optional, latency only).** ris-api can POST signed job events
+(`job.running`/`completed`/`failed`/`cancelled`/`retrying`) to
+`https://d1z5umg4xc2bl8.cloudfront.net/api/ris/webhooks`. The API verifies the
+Standard Webhooks signature against `TWAIN/ris_api/WEBHOOK_SECRET`, records the
+event in `ris_job_events` (deduped on `webhook-id`), and a trigger NOTIFYs the
+runner waiting on that job, which re-polls immediately instead of at its next
+30 s tick. Polling stays the source of truth: with no webhook, a bad secret, or
+the DB listener down, runs behave exactly as before. ris-api delivers only to
+public HTTPS on port 443, so a local API can't receive them.
+
 Job-time secrets (`MP_API_KEY`) never go in the job script: the RIS API stores
 every submitted spec and copies it into recipes. They are staged next to the
 bundle as a 0600 `.twain_secrets.env` that the job loads and deletes, and the

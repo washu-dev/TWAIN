@@ -1909,3 +1909,42 @@ class TestAnFStringFieldIsNotAnUnfilledPlaceholder:
                   "if __name__ == '__main__':\n    run()\n")
         assert self._placeholders(script) == []
         assert ("NEVER_DEFINED", 2) in _undefined_names(script)
+
+
+class TestHealReportsItsSteps:
+    """REPAIR's live checklist (#162): heal() narrates smoke, fix, review."""
+
+    def test_a_smoke_failure_then_fix_reads_in_order(self):
+        steps = []
+        doctor = ScriptDoctor(
+            agent=lambda p: FIXED.replace("runtime", "runtime!"), brief=_brief(),
+            verifier=_seq([SmokeOutcome("repairable", error="NameError: x"),
+                           SmokeOutcome("pass")]),
+            review=False, on_step=lambda *s: steps.append(s))
+
+        report = doctor.heal(FIXED)
+
+        assert report.status == "repaired"
+        assert [(s, st) for s, st, _ in steps] == [
+            ("smoke", "active"), ("smoke", "failed"),
+            ("fix", "active"), ("fix", "done"),
+            ("smoke", "active"), ("smoke", "done"),
+        ]
+        assert "NameError" in steps[1][2] and "round 1 of 3" in steps[2][2]
+        assert steps[-1][2] == "Smoke test passed"
+
+    def test_review_is_reported(self):
+        steps = []
+        doctor = ScriptDoctor(agent=lambda p: "[]", brief=_brief(),
+                              verifier=_seq([SmokeOutcome("pass")]),
+                              on_step=lambda *s: steps.append(s))
+        doctor.heal(FIXED)
+        assert ("review", "active") in [(s, st) for s, st, _ in steps]
+        assert steps[-1][:2] == ("review", "done")
+
+    def test_a_broken_reporter_never_breaks_the_repair(self):
+        def boom(*_):
+            raise RuntimeError("bus down")
+        doctor = ScriptDoctor(agent=None, brief=_brief(),
+                              verifier=_seq([SmokeOutcome("pass")]), on_step=boom)
+        assert doctor.heal(FIXED).source == FIXED

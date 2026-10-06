@@ -99,7 +99,7 @@ class _RealEngine:
 
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store,
-        cancel=None, max_cost=None,
+        cancel=None, max_cost=None, job_event_wait=None,
     ):
         # Real execution is env-gated so the SAME image works everywhere: set
         # TWAIN_EXECUTE_LOCALLY=1 (local `docker run -e ...` or the ECS task
@@ -155,6 +155,9 @@ class _RealEngine:
             # checks it between stages (raising RunCancelled) and the Slurm poll
             # loop checks it between squeue polls (scancelling the job).
             cancel_check=cancel,
+            # RIS webhooks: (job_id, seconds) sleep between Slurm polls that
+            # returns early when ris-api reports on that job.
+            job_event_wait=job_event_wait,
         )
 
     def current_state_name(self, orch) -> str:

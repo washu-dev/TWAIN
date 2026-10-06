@@ -149,6 +149,7 @@ class Orchestrator:
         execute_slurm: bool = False,
         slurm_cluster: Optional[str] = None,
         cancel_check=None,
+        job_event_wait=None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -246,7 +247,14 @@ class Orchestrator:
             # Terminate seam: lets a long EXECUTE (Slurm poll loop) notice the
             # researcher's terminate request and scancel the cluster job.
             should_abort=cancel_check,
+            # RIS webhook seam: the Slurm poll sleep wakes on a job event.
+            job_event_wait=job_event_wait,
         )
+
+        # Let stages report what they're doing between stage events (the UI's
+        # live checklist and job log). Set on injected machines too; one that
+        # predates the seam just gains an unused attribute.
+        self.sm.publish_progress = self._publish_activity
 
         if resuming:
             # The session is the orchestrator's record of truth; align the SM to it.
@@ -285,6 +293,14 @@ class Orchestrator:
         self.session.checkpoint()
         if self.store is not None:
             self.store.save_session(self.run_session.to_dict())
+
+    #: Event types a stage may publish through ``StateMachine.publish_progress``.
+    _ACTIVITY_EVENTS = ("stage.progress", "job.log")
+
+    def _publish_activity(self, event_type: str, payload: Dict) -> None:
+        """The state machine's activity publisher: in-stage progress + job log."""
+        if event_type in self._ACTIVITY_EVENTS:
+            self._publish(event_type, payload)
 
     def _publish(self, event_type: str, payload: Dict, priority=Priority.DEFAULT) -> None:
         if self.event_bus is None:

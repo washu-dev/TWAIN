@@ -439,3 +439,40 @@ class TestRerunStatusGate:
         # every gate's kind, not just the two that used to share 'clarification'
         assert "validation_gate" in conversations.QUESTION_KINDS
         assert "heavy_confirm" in conversations.QUESTION_KINDS
+
+
+class TestActivityFeed:
+    """GET /api/conversations/{id}/activity -- the live checklist's feed (#160)."""
+
+    EVENTS = [
+        {"id": 41, "event_type": "stage.progress", "created_at": "2026-10-06T08:41:40Z",
+         "payload": {"stage": "EXECUTE", "step": "submit", "status": "done",
+                     "label": "Submitted — Slurm job 3337323", "detail": {}}},
+        {"id": 44, "event_type": "job.log", "created_at": "2026-10-06T08:43:00Z",
+         "payload": {"job_id": "3337323", "text": "SCF converged\n"}},
+    ]
+
+    @patch("conversations.get_activity")
+    @patch("conversations.owns_conversation", return_value=True)
+    def test_returns_new_events_and_a_cursor(self, mock_owns, mock_activity):
+        mock_activity.return_value = self.EVENTS
+        response = client.get("/api/conversations/conv-1/activity?after=40")
+        assert response.status_code == 200
+        body = response.json()
+        assert [e["id"] for e in body["data"]] == [41, 44] and body["next_after"] == 44
+        mock_owns.assert_called_once_with("conv-1", "user-1")
+        session, after, types, _limit = mock_activity.call_args.args
+        assert (session, after) == ("conv-1", 40)
+        assert set(types) == {"stage.progress", "job.log"}
+
+    @patch("conversations.get_activity", return_value=[])
+    @patch("conversations.owns_conversation", return_value=True)
+    def test_nothing_new_keeps_the_cursor(self, _owns, _activity):
+        assert client.get("/api/conversations/conv-1/activity?after=44").json() == {
+            "data": [], "next_after": 44}
+
+    @patch("conversations.get_activity")
+    @patch("conversations.owns_conversation", return_value=False)
+    def test_someone_elses_run_is_404(self, _owns, mock_activity):
+        assert client.get("/api/conversations/conv-1/activity").status_code == 404
+        mock_activity.assert_not_called()

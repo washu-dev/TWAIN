@@ -48,7 +48,9 @@ def _client(responses):
 
 # ── construction ────────────────────────────────────────────────────────────
 
-def test_missing_token_raises_lazily_on_first_call_not_at_construction():
+def test_missing_token_raises_lazily_on_first_call_not_at_construction(monkeypatch):
+    # A developer's .env (loaded by other modules' load_dotenv) may set one.
+    monkeypatch.delenv("RIS_API_TOKEN", raising=False)
     # Constructing a client (or an adapter that holds one) shouldn't require a
     # token up front -- only actually calling the API should.
     client = RisApiClient(token=None, session=FakeSession({}))
