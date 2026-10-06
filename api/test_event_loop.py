@@ -12,7 +12,10 @@ import re
 import time
 from pathlib import Path
 
-import httpx
+try:  # what requirements.txt installs (and Starlette's TestClient prefers)
+    import httpx2 as httpx
+except ImportError:  # an older env with plain httpx
+    import httpx
 
 import conversations
 import database
