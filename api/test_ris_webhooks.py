@@ -17,7 +17,7 @@ import ris_webhooks
 from main import app
 
 # Standard Webhooks reference vector (standard-webhooks spec test suite).
-REF_SECRET = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+REF_SECRET = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"  # gitleaks:allow -- the spec's public test vector
 REF_ID = "msg_p5jXN8AQM9LWM0D4loKWxJek"
 REF_TS = 1614265330
 REF_BODY = b'{"test": 2432232314}'

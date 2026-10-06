@@ -6,8 +6,10 @@ back the user's replies. Connection settings mirror `api/database.py`: DB_* env
 vars, with the password resolved from AWS Secrets Manager in the cloud and from
 ``DB_PASSWORD`` locally.
 """
+import hashlib
 import json
 import os
+import secrets
 import select
 import time
 
@@ -330,6 +332,26 @@ class RunnerDB:
             """,
             (session_id, seq, event_type, Json(payload)),
         )
+
+    # ---- job tickets (S3 file I/O for Slurm jobs, #170) ---------------------------
+    def issue_job_ticket(self, run_id: str, attempt: int, s3_prefix: str,
+                         ttl_seconds: float) -> str:
+        """A new random ticket for one run attempt's S3 prefix; returns the token.
+
+        Only its SHA-256 is stored (migration 013). The job trades the token at
+        POST /api/job-tickets/urls for presigned URLs -- read input/, write
+        output/ -- so no AWS credential ever reaches the cluster.
+        """
+        token = secrets.token_urlsafe(32)
+        self._execute(
+            """
+            INSERT INTO job_tickets (token_hash, run_id, attempt, s3_prefix, expires_at)
+            VALUES (%s, %s, %s, %s, now() + make_interval(secs => %s));
+            """,
+            (hashlib.sha256(token.encode("utf-8")).hexdigest(), run_id, int(attempt),
+             s3_prefix, float(ttl_seconds)),
+        )
+        return token
 
     # ---- artifacts ------------------------------------------------------------
     def replace_library_availability(self, rows) -> None:

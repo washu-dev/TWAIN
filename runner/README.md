@@ -373,6 +373,30 @@ the requirements. A definite "no matching distribution" verdict fails the run
 immediately with a pointer to the env specs — instead of after staging plus a
 queue wait.
 
+### S3 staging (`TWAIN_STAGING=s3`) -- no SSH, no VPN, nothing on a login node
+
+With `TWAIN_STAGING=s3` (RIS API backend only), a run's files go through the
+run bucket (`terraform output run_bucket_name`) instead of rsync:
+
+1. **submit side** (runner today, the ECS worker in P2) uploads the bundle to
+   `runs/<run>/attempt-<n>/input/bundle.tar.gz`, issues a **job ticket** for that
+   attempt (random, only its hash is stored, expires after the wait budget plus
+   the wall time), and submits a tiny script through the RIS API;
+2. **the job** sources `$TWAIN_ENV_FILE` (`twain.sh`, owner-managed, mode 640 --
+   template: `scripts/ris/twain.sh.example`), checks that `$TWAIN_DIR` contains
+   the commit that submitted it (exit 4 with `git pull` otherwise), and runs
+   `$TWAIN_DIR/scripts/ris/job_wrapper.sh`: it trades the ticket at
+   `POST /api/job-tickets/urls` for presigned URLs (GET `input/`, PUT `output/`
+   only), unpacks the bundle in node scratch, picks an env and **smoke-tests it in
+   the job** (exit 2 = missing dependency), runs `main.py`, and uploads
+   `output/outputs.tar.gz` -- always, so a failed run's logs come back too;
+3. the submit side downloads and unpacks the outputs.
+
+No AWS credentials exist on the cluster; the API signs URLs with its task role.
+Wrapper exits the failure card explains: **4** stale RIS checkout, **6** could
+not fetch the bundle, **7** could not upload the outputs. The SSH path (rsync +
+login-node preflight) is unchanged and remains the default until P2.
+
 ### Keeping the RIS runner current (interim, until the ECS worker)
 
 The login-node runner updates itself: `scripts/ris/auto_update.sh` runs from

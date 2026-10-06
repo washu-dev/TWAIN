@@ -84,3 +84,15 @@ variable "runner_secrets" {
     RIS_API_TOKEN = "ris_api/TOKEN"
   }
 }
+
+variable "run_bucket_name" {
+  description = "S3 bucket for Slurm job file I/O (bundles in, outputs out). Empty = twain-run-data-<account id>."
+  type        = string
+  default     = ""
+}
+
+variable "run_data_retention_days" {
+  description = "Days a run attempt's files stay in the run bucket before expiring."
+  type        = number
+  default     = 90
+}
