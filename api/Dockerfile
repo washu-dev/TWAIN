@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # its own SHA is correct wherever it runs -- including a local `docker run`.
 ARG GIT_SHA=unknown
 ENV TWAIN_GIT_SHA=$GIT_SHA
+# Release version, computed once per deploy by scripts/bump-version.sh (#173).
+ARG VERSION=dev
+ENV TWAIN_VERSION=$VERSION
 
 # Copy application code
 COPY . .

@@ -22,6 +22,7 @@ import run_issue_github
 import run_issues
 from auth import AdminUser, CurrentUser
 from database import list_users, set_notify_prefs, set_user_role, upsert_user
+from version import get_version
 
 # How often (seconds) the SSE stream polls run_events, and its hard time cap.
 SSE_POLL_SECONDS = float(os.getenv("SSE_POLL_SECONDS", "1.0"))
@@ -55,7 +56,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="TWAIN API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="TWAIN API", version=get_version(), lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,7 +96,13 @@ async def health_check():
     way to tell one release from another was to authenticate and probe behaviour.
     A deploy is now verifiable with one unauthenticated curl.
     """
-    return {"status": "ok", "commit": git_sha(), "version": app.version}
+    return {"status": "ok", "commit": git_sha(), "version": get_version()}
+
+
+@app.get("/api/version")
+async def version_info():
+    """The API's release version (YYYY.MM.DD.NNN) and commit; no credentials needed."""
+    return {"service": "twain-api", "version": get_version(), "commit": git_sha()}
 
 
 #: ris-api events are a few hundred bytes; refuse anything far larger unread.

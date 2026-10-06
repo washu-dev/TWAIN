@@ -1,11 +1,24 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Colors, Spacing } from '@/constants/theme';
+import { apiClient } from '@/api/client';
+import { APP_VERSION, Colors, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
 export const Footer: React.FC = () => {
+  // Both release versions side by side (#173): the app's, baked in at build
+  // time, and the API's, as it reports itself -- so "which release am I on?"
+  // has an answer on every screen, and a half-finished deploy is visible.
+  const [apiVersion, setApiVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    apiClient.getVersion()
+      .then((v) => live && setApiVersion(v.version))
+      .catch(() => live && setApiVersion('unreachable'));
+    return () => { live = false; };
+  }, []);
+
   return (
     <LinearGradient
       // Plum-black rather than a flat #1A1A1A slab. Against a warm canvas the
@@ -31,6 +44,9 @@ export const Footer: React.FC = () => {
       <View style={styles.content}>
         <Text style={styles.brandName}>Washington University in St. Louis</Text>
         <Text style={styles.address}>One Brookings Drive, St. Louis, MO 63130</Text>
+        <Text style={styles.version} accessibilityLabel={`App version ${APP_VERSION}, API version ${apiVersion ?? 'loading'}`}>
+          {`App ${APP_VERSION} · API ${apiVersion ?? '…'}`}
+        </Text>
       </View>
     </LinearGradient>
   );
@@ -58,6 +74,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'center',
     letterSpacing: 0.2,
+  },
+  version: {
+    color: 'rgba(255,255,255,0.42)',
+    fontSize: 11,
+    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
   },
   address: {
     // Warmed slightly off the neutral grey so it belongs to the tinted dark it

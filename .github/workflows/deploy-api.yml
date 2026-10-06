@@ -85,10 +85,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: quality
     if: github.event_name != 'pull_request'
+    # Push the release commit + tag after a successful deploy (#173).
+    permissions:
+      contents: write
+    # One API release at a time, so two can't claim the same build number.
+    concurrency:
+      group: release-api
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the release commit is pushed back to master
+
+      # Computed once and threaded through, so the image and the tag never
+      # disagree (YYYY.MM.DD.NNN; scripts/bump-version.sh).
+      - name: Next API version
+        id: version
+        run: echo "version=$(scripts/bump-version.sh api/VERSION --dry-run)" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -117,6 +132,7 @@ jobs:
         run: |
           docker build \
             --build-arg GIT_SHA=$IMAGE_TAG \
+            --build-arg VERSION=${{ steps.version.outputs.version }} \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
             ./api
@@ -146,3 +162,7 @@ jobs:
           service: ${{ env.ECS_SERVICE }}
           cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
+
+      # Only once the service is stable on the new image.
+      - name: Record the API release
+        run: scripts/release-commit.sh api "${{ steps.version.outputs.version }}"
