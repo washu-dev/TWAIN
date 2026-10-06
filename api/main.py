@@ -100,7 +100,7 @@ async def health_check():
 
 
 @app.get("/api/version")
-async def version_info():
+def version_info():
     """The API's release version (YYYY.MM.DD.NNN) and commit; no credentials needed."""
     return {"service": "twain-api", "version": get_version(), "commit": git_sha()}
 
