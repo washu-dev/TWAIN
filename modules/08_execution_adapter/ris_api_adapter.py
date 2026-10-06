@@ -68,6 +68,10 @@ class RisApiAdapter:
     def __init__(self, profile: ClusterProfile, client: Optional[RisApiClient] = None):
         self.profile = profile
         self.client = client or RisApiClient()
+        #: The latest ``GET /jobs/{id}`` body per job (node, Slurm's pending
+        #: ``reason``, start time ...), kept so progress reporting can say more
+        #: than the bare state :meth:`poll` returns.
+        self.last_detail: Dict[str, Dict[str, Any]] = {}
 
     # -------------------------------------------------------- partition selection
     def select_partition(self, request: SlurmRequest, override: Optional[str] = None):
@@ -177,6 +181,7 @@ class RisApiAdapter:
                 detail = self.client.accounting(job_id)
             except RisApiError as acct_exc:
                 raise SlurmError(str(acct_exc)) from acct_exc
+        self.last_detail[job_id] = detail
         return parse_slurm_state(detail.get("state", ""))
 
     #: Seconds of *consecutive* failed polls tolerated before giving up -- see
@@ -269,6 +274,14 @@ class RisApiAdapter:
         """The job's captured standard output, fetched directly via the API."""
         try:
             return self.client.stdout(job_id)
+        except RisApiError as exc:
+            raise SlurmError(str(exc)) from exc
+
+    def stdout_page(self, job_id: str, offset: int, limit: int) -> Dict[str, Any]:
+        """One page of the job's stdout from byte ``offset`` (see
+        :meth:`RisApiClient.output_page`) -- how a running job's log is followed."""
+        try:
+            return self.client.output_page(job_id, "stdout", offset=offset, limit=limit)
         except RisApiError as exc:
             raise SlurmError(str(exc)) from exc
 

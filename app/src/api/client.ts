@@ -38,6 +38,33 @@ export interface Message {
   created_at: string;
 }
 
+/** One in-stage checklist step (a `stage.progress` run event; see runner job_activity.py). */
+export interface StageProgress {
+  stage: string;
+  step: string;
+  status: 'active' | 'done' | 'failed';
+  label: string;
+  detail?: Record<string, unknown>;
+}
+
+/** New stdout from the running Slurm job (a `job.log` run event). */
+export interface JobLog {
+  job_id: string;
+  text: string;
+  skipped_bytes?: number;
+  truncated?: boolean;
+}
+
+export type ActivityEvent =
+  | { id: number; event_type: 'stage.progress'; created_at: string; payload: StageProgress }
+  | { id: number; event_type: 'job.log'; created_at: string; payload: JobLog };
+
+export interface ActivityPage {
+  data: ActivityEvent[];
+  /** Pass back as `after` to receive only newer events. */
+  next_after: number;
+}
+
 export interface Conversation {
   id: string;
   title?: string;
@@ -340,6 +367,14 @@ class APIClient {
   async listConversations(): Promise<Conversation[]> {
     const response = await this.client.get('/api/conversations');
     return response.data.data;
+  }
+
+  // Live activity (checklist steps + job log) newer than event `after`.
+  async getActivity(id: string, after: number): Promise<ActivityPage> {
+    const response = await this.client.get(`/api/conversations/${id}/activity`, {
+      params: { after },
+    });
+    return response.data;
   }
 
   async getConversation(id: string): Promise<Conversation> {

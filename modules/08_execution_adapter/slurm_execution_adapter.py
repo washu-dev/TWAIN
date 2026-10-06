@@ -42,6 +42,7 @@ from typing import List, Optional, Union
 try:  # pragma: no cover - import shim (mirrors local_adapter)
     from execution_adapter.cluster_profile import ClusterProfile
     from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+    from execution_adapter.job_activity import JobActivity
     from execution_adapter.local_adapter import _DEP_ERROR_MARKERS, _safe_name
     from execution_adapter.ris_api_adapter import RisApiAdapter
     from execution_adapter.ris_api_client import RisApiClient, RisApiError
@@ -59,6 +60,7 @@ try:  # pragma: no cover - import shim (mirrors local_adapter)
 except ImportError:  # pragma: no cover
     from cluster_profile import ClusterProfile
     from execution_result import ExecutionResult, ExecutionStatus
+    from job_activity import JobActivity
     from local_adapter import _DEP_ERROR_MARKERS, _safe_name
     from ris_api_adapter import RisApiAdapter
     from ris_api_client import RisApiClient, RisApiError
@@ -97,8 +99,16 @@ _STATE_TO_STATUS = {
 
 
 def _elapsed_seconds(text: str) -> float:
-    """``sacct`` Elapsed (``[D-]HH:MM:SS``) -> seconds (0.0 when unparseable)."""
-    match = re.match(r"(?:(\d+)-)?(\d+):(\d+):(\d+)$", (text or "").strip())
+    """Elapsed time -> seconds (0.0 when unparseable).
+
+    ``sacct`` (SSH backend) writes ``[D-]HH:MM:SS``; ris-api's accounting
+    (API backend) reports plain seconds, e.g. ``"220"`` -- reading only the
+    first form made every API run report a duration of 0 (#163).
+    """
+    text = (text or "").strip()
+    if re.fullmatch(r"\d+(\.\d+)?", text):
+        return float(text)
+    match = re.match(r"(?:(\d+)-)?(\d+):(\d+):(\d+)$", text)
     if not match:
         return 0.0
     days, hours, minutes, seconds = (int(g or 0) for g in match.groups())
@@ -113,6 +123,20 @@ def _maxrss_mb(text: str) -> Optional[float]:
     value = float(match.group(1))
     factor = {"": 1 / 1024, "K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 ** 2}
     return round(value * factor[match.group(2).upper()], 3)
+
+
+#: How each pre-queue step's failure reads in the activity checklist.
+_STEP_FAILED = {
+    "stage": "Copying the bundle to the cluster failed",
+    "preflight": "The environment check failed",
+    "submit": "Submitting the job failed",
+}
+
+
+def _bundle_size(local_dir) -> tuple:
+    """``(file count, size in KB)`` of the bundle about to be staged."""
+    files = [p for p in Path(local_dir).rglob("*") if p.is_file()]
+    return len(files), max(1, round(sum(p.stat().st_size for p in files) / 1024))
 
 
 def _secrets_prologue(path: str) -> str:
@@ -178,6 +202,7 @@ class SlurmExecutionAdapter:
         sleep=None,
         should_abort=None,
         job_event_wait=None,
+        on_progress=None,
         backend: Optional[str] = None,
         ris_api_client: Optional[RisApiClient] = None,
     ):
@@ -223,6 +248,10 @@ class SlurmExecutionAdapter:
         # between polls; it returns early when ris-api reports on the job (see
         # runner/db.py RisJobEventWaiter). None => sleep the full interval.
         self.job_event_wait = job_event_wait
+        # Activity seam: ``(event_type, payload)`` publisher for the live
+        # checklist + job log the UI shows during EXECUTE (job_activity.py).
+        # None => nothing is reported; the run itself is unaffected.
+        self.on_progress = on_progress
 
         self.backend = (backend or os.environ.get("TWAIN_SLURM_BACKEND") or "api").strip().lower()
         if self.backend not in ("api", "ssh"):
@@ -315,6 +344,13 @@ class SlurmExecutionAdapter:
         )
 
         # 2) stage + preflight + submit --------------------------------------------
+        activity = JobActivity(
+            self.on_progress,
+            detail=lambda jid: getattr(self.slurm, "last_detail", {}).get(jid, {}),
+            read_log=self.slurm.stdout_page if self._via_api else None,
+        )
+        cluster = self.profile.name
+        current = "stage"
         try:
             if self._via_api:
                 # The API renders #SBATCH directives from structured fields
@@ -325,6 +361,8 @@ class SlurmExecutionAdapter:
                 script = self.slurm.render_sbatch(job, self.request)
                 (Path(local_dir) / "job.slurm").write_text(script, encoding="utf-8")
                 to_submit = f"{remote_dir}/job.slurm"
+            files, size_kb = _bundle_size(local_dir)
+            activity.step("stage", "active", f"Copying the run bundle to {cluster} storage")
             try:
                 self.stager.push(local_dir, run_id)
             finally:
@@ -332,22 +370,39 @@ class SlurmExecutionAdapter:
                 # the local workspace (or in artifacts_dir).
                 if secrets_path:
                     secrets_path.unlink(missing_ok=True)
+            activity.step("stage", "done",
+                          f"Bundle staged to {cluster} storage ({files} files, {size_kb} KB)",
+                          remote_dir=remote_dir, files=files, size_kb=size_kb)
+            current = "preflight"
+            activity.step("preflight", "active",
+                          "Checking that a cluster environment can run it")
             preflight_error = self._preflight_env_check(
                 remote_dir, local_dir, install_deps=install_deps,
                 run_smoke=run_smoke)
             if preflight_error:
+                activity.step("preflight", "failed",
+                              "No cluster environment can run this bundle",
+                              message=preflight_error[:2000])
                 return ExecutionResult(
                     status=ExecutionStatus.DEPENDENCY_ERROR,
                     message=preflight_error,
                     tool_name=tool_name,
                     artifacts_dir=local_dir if keep_artifacts else None,
                 )
+            activity.step("preflight", "done", "Environment check passed")
+            current = "submit"
+            partition = (to_submit.get("partition") if isinstance(to_submit, dict)
+                         else self._partition_name())
+            activity.step("submit", "active",
+                          f"Submitting to Slurm on {cluster}"
+                          + (" via the RIS API" if self._via_api else ""))
             job_id = (self.slurm.submit(to_submit,
                                         idempotency_key=_submission_key(run_id),
                                         sleep=self._sleep)
                      if self._via_api
                      else self.slurm.submit(to_submit))
         except (SlurmError, RisApiError, StagingError, KeyError, OSError) as exc:
+            activity.step(current, "failed", f"{_STEP_FAILED[current]}: {exc}"[:500])
             return ExecutionResult(
                 status=ExecutionStatus.SETUP_FAILED,
                 message=f"failed to submit the job: {exc}",
@@ -369,10 +424,18 @@ class SlurmExecutionAdapter:
             else:
                 base_sleep(seconds)
 
+        activity.step("submit", "done", f"Submitted — Slurm job {job_id}",
+                      job_id=job_id, partition=partition, backend=self.backend,
+                      cpus=self.request.cpu_count, memory_mb=self.request.ram,
+                      time_limit_minutes=round(float(self.request.max_time)),
+                      gpus=self.request.gpu_count or None,
+                      portal_url=self._portal_url())
         try:
             wait_kwargs = dict(poll_interval=self.poll_interval, max_wait=max_wait,
-                               sleep=_abortable_sleep)
+                               sleep=_abortable_sleep,
+                               on_state=lambda st: activity.observe(job_id, st))
             state = self.slurm.wait(job_id, **wait_kwargs)
+            activity.finished(job_id, state)
         except _AbortRequested:
             try:
                 self.slurm.cancel(job_id)
@@ -382,6 +445,8 @@ class SlurmExecutionAdapter:
                 note = (f"cancelling Slurm job {job_id} failed ({exc}) -- "
                         f"cancel it manually with `scancel {job_id}` on a login node"
                         + (" or in the RIS API web app" if self._via_api else ""))
+            activity.step("run", "failed", "Stopped at your request", job_id=job_id,
+                          note=note)
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 message=f"run terminated by the researcher; {note}",
@@ -394,6 +459,9 @@ class SlurmExecutionAdapter:
             # job still queued/running: leave it alone (a multi-hour DFT run
             # must not die because our wait was shorter) and tell the researcher
             # exactly how to follow up.
+            activity.step("run", "failed",
+                          "TWAIN stopped waiting — the job is still on the cluster",
+                          job_id=job_id, reason=str(exc)[:500])
             return ExecutionResult(
                 status=ExecutionStatus.TIMEOUT,
                 message=(
@@ -408,9 +476,11 @@ class SlurmExecutionAdapter:
             )
 
         # 4) fetch results + accounting ------------------------------------------
+        activity.step("fetch", "active", f"Fetching results from {cluster}")
         try:
             self.stager.pull(run_id, local_dir)
         except StagingError as exc:
+            activity.step("fetch", "failed", f"Fetching results failed: {exc}"[:500])
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 message=f"job finished ({state.value}) but fetching outputs failed: {exc}",
@@ -430,6 +500,7 @@ class SlurmExecutionAdapter:
         accounting = self._safe_accounting(job_id)
         exit_code = self.slurm.exit_code(job_id) if accounting else None
 
+        activity.step("fetch", "done", "Results fetched")
         status, message = self._classify(
             state, exit_code, f"{stdout}\n{stderr}" if stderr else stdout, job_id)
         return ExecutionResult(
@@ -815,6 +886,22 @@ class SlurmExecutionAdapter:
                 "fi",
             ]
         return "\n".join(lines)
+
+    def _portal_url(self) -> Optional[str]:
+        """The RIS API Portal's jobs page (it has no per-job route), API backend only."""
+        if not self._via_api:
+            return None
+        base = getattr(getattr(self.slurm, "client", None), "base_url", "") or ""
+        root = re.sub(r"/api(/v\d+)?/?$", "", base)
+        return f"{root}/jobs" if root.startswith("https://") else None
+
+    def _partition_name(self) -> Optional[str]:
+        """The partition the SSH path's sbatch script asks for (for display)."""
+        try:
+            return (self.partition
+                    or self.slurm.select_partition(self.request).name)
+        except Exception:  # noqa: BLE001 - display only
+            return None
 
     @property
     def _via_api(self) -> bool:

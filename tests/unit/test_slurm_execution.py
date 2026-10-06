@@ -495,6 +495,68 @@ def test_terminate_is_still_checked_before_each_webhook_wait(tmp_path):
     assert waits == [] and ("cancel_job", "42", None) in client.calls
 
 
+def test_api_execute_publishes_the_live_checklist_and_job_log(tmp_path):
+    # The UI's EXECUTE checklist (#160) and job log (#161), in order.
+    states = iter([("PENDING", {"reason": "Priority"}),
+                   ("RUNNING", {"nodes": "c2-node-006", "start_time": "1791237760"}),
+                   ("COMPLETED", {})])
+    client = FakeRisClient()
+
+    def get_job(job_id):
+        state, extra = next(states)
+        return {"job_id": job_id, "state": state, **extra}
+    client.get_job = get_job
+    client.base_url = "https://d3n2m687w2hvtj.cloudfront.net/api/v1"
+    client.output_page = lambda job_id, stream, offset=0, limit=0: (
+        {"content": "SCF converged\n", "next_offset": 14, "size": 14} if offset == 0
+        else {"content": "", "next_offset": 14, "size": 14})
+    events = []
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api",
+        ris_api_client=client, transfer_runner=ScriptedRunner(),
+        poll_interval=0.0, sleep=lambda _s: None,
+        on_progress=lambda t, p: events.append((t, p)),
+    )
+
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s")
+
+    assert result.status == ExecutionStatus.SUCCESS
+    steps = [(p["step"], p["status"]) for t, p in events if t == "stage.progress"]
+    assert steps == [
+        ("stage", "active"), ("stage", "done"),
+        ("preflight", "active"), ("preflight", "done"),
+        ("submit", "active"), ("submit", "done"),
+        ("queue", "active"), ("queue", "done"), ("run", "active"),
+        ("run", "done"),
+        ("fetch", "active"), ("fetch", "done"),
+    ]
+    submitted = next(p for t, p in events if p.get("step") == "submit" and p["status"] == "done")
+    assert submitted["label"] == "Submitted — Slurm job 42"
+    assert submitted["detail"]["partition"] == "general-cpu"
+    assert submitted["detail"]["cpus"] == adapter.request.cpu_count
+    assert submitted["detail"]["portal_url"] == "https://d3n2m687w2hvtj.cloudfront.net/jobs"
+    assert [p["text"] for t, p in events if t == "job.log"] == ["SCF converged\n"]
+
+
+def test_a_failed_preflight_marks_its_step_failed(tmp_path, monkeypatch):
+    events = []
+    adapter = SlurmExecutionAdapter(
+        _profile(), workspace_root=str(tmp_path), backend="api",
+        ris_api_client=FakeRisClient(), transfer_runner=ScriptedRunner(),
+        poll_interval=0.0, sleep=lambda _s: None,
+        on_progress=lambda t, p: events.append((t, p)),
+    )
+    monkeypatch.setattr(adapter, "_preflight_env_check",
+                        lambda *a, **k: "no runnable environment for this bundle")
+
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s")
+
+    assert result.status == ExecutionStatus.DEPENDENCY_ERROR
+    last = [p for t, p in events if t == "stage.progress"][-1]
+    assert (last["step"], last["status"]) == ("preflight", "failed")
+    assert "no runnable environment" in last["detail"]["message"]
+
+
 def test_each_execute_gets_a_fresh_idempotency_key(tmp_path):
     # The self-heal loop re-runs execute() with the same run_id after
     # repairing main.py. ris-api keeps keys forever and never compares bodies,
@@ -1345,3 +1407,14 @@ class TestScratchStaysOffTheSharedFilesystem:
         path, created = out.stdout.split()
         assert path == f"{tmp_path}/twain-424242"
         assert created == "created"
+
+
+@pytest.mark.parametrize("text, seconds", [
+    ("220", 220.0),            # ris-api accounting (#163)
+    ("00:03:40", 220.0),       # sacct
+    ("1-02:00:00", 93600.0),   # sacct, with days
+    ("", 0.0), ("n/a", 0.0),
+])
+def test_elapsed_seconds_reads_both_backends(text, seconds):
+    from execution_adapter.slurm_execution_adapter import _elapsed_seconds
+    assert _elapsed_seconds(text) == seconds

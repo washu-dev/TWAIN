@@ -1585,3 +1585,26 @@ class TestScaledWorkersGetTheirOwnLog:
             proc = subprocess.run(["bash", "-n", str(self.RIS / name)],
                                   capture_output=True, text=True)
             assert proc.returncode == 0, f"{name}: {proc.stderr}"
+
+
+class TestActivityPublishing:
+    """The state machine's activity seam (#160-#162) is best effort."""
+
+    def test_progress_goes_through_the_publisher(self):
+        sm = SM.StateMachine.__new__(SM.StateMachine)
+        seen = []
+        sm.publish_progress = lambda t, p: seen.append((t, p))
+        sm._progress("BUILD", "codegen", "active", "Writing", tool="xtb")
+        assert seen == [("stage.progress", {"stage": "BUILD", "step": "codegen",
+                                            "status": "active", "label": "Writing",
+                                            "detail": {"tool": "xtb"}})]
+
+    def test_silent_without_a_publisher_and_safe_when_it_breaks(self):
+        sm = SM.StateMachine.__new__(SM.StateMachine)
+        sm.publish_progress = None
+        sm._progress("BUILD", "codegen", "active", "x")
+
+        def boom(*_):
+            raise RuntimeError("bus down")
+        sm.publish_progress = boom
+        sm._progress("BUILD", "codegen", "active", "x")

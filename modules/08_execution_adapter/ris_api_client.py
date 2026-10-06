@@ -192,6 +192,16 @@ class RisApiClient:
         """``GET /jobs/{id}/stderr`` -- the job's captured standard error."""
         return self._json("GET", f"/jobs/{job_id}/stderr", "content")["content"]
 
+    def output_page(self, job_id: str, stream: str, *, offset: int = 0,
+                    limit: int = 65_536) -> Dict[str, Any]:
+        """``GET /jobs/{id}/output/{stream}?offset=N`` -- one page from a byte
+        cursor: ``{content, offset, next_offset, size, eof, job_finished, ...}``.
+        Following a live job means calling again with ``offset=next_offset``;
+        a page never ends mid-character."""
+        return self._json("GET", f"/jobs/{job_id}/output/{stream}",
+                          "content", "next_offset",
+                          params={"offset": offset, "limit": limit})
+
     def output_tail(self, job_id: str, stream: str, nbytes: int) -> str:
         """``GET /jobs/{id}/output/{stream}?tail=N`` -- the last ``nbytes`` of
         ``stream`` (``"stdout"``/``"stderr"``), never split mid-character.

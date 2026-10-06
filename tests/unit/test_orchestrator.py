@@ -807,3 +807,20 @@ class TestATransientStageFailureIsRetried:
         orch.resilient_caller.retry_policy.base_delay = 0.0
         self._attempts(orch, State.INTAKE, failures=1)
         assert orch.resilient_caller.circuit_breaker is breaker
+
+
+class TestActivityEvents:
+    """The state machine's activity publisher reaches the run's event bus (#160)."""
+
+    def test_stage_progress_and_job_log_are_published(self, env):
+        orch = build(env, "activity-1")
+        orch.sm.publish_progress("stage.progress", {"stage": "EXECUTE", "step": "submit"})
+        orch.sm.publish_progress("job.log", {"job_id": "42", "text": "hi\n"})
+        assert env["bus"].types()[-2:] == ["stage.progress", "job.log"]
+
+    def test_other_event_types_are_not_forwarded(self, env):
+        # A stage can't impersonate run lifecycle events (run.completed etc.).
+        orch = build(env, "activity-2")
+        before = list(env["bus"].types())
+        orch.sm.publish_progress("run.completed", {})
+        assert env["bus"].types() == before

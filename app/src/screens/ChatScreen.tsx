@@ -6,7 +6,6 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  ActivityIndicator,
   Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -22,6 +21,8 @@ import { PIPELINE_STATES, StateStepper } from '@/components/StateStepper';
 import { MIN_WALL_HOURS, WallTimeField, wallTimeLabel } from '@/components/WallTimeField';
 import { useAuth } from '@/hooks/useAuth';
 import { useNow } from '@/hooks/useNow';
+import { useRunActivity } from '@/hooks/useRunActivity';
+import { RunActivity } from '@/components/RunActivity';
 import {
   DurationUnit, durationToHours, formatDurationHours, formatElapsed, splitDurationHours,
 } from '@/utils/duration';
@@ -219,6 +220,8 @@ export const ChatScreen: React.FC = () => {
   const isTerminal = !!status && TERMINAL_STATUSES.includes(status);
   // One clock, ticking only while the run is active (see useNow).
   const now = useNow(isActive);
+  // What the run is doing inside its current stage (checklist + job log).
+  const activity = useRunActivity(conversation?.id, isActive);
   const terminalMessage =
     status === 'completed'
       ? '✓ Simulation complete — your results are ready.'
@@ -729,23 +732,24 @@ export const ChatScreen: React.FC = () => {
           />
         ))}
         {isActive && !awaitingApproval && (
-          <View style={styles.working}>
-            <ActivityIndicator color={C.washuRed} />
-            <Text style={styles.workingText}>
-              {cancelling
+          // Live running time sits beside the activity that explains it -- the
+          // two answer one question together ("what is it doing, and for how
+          // long?"). The checklist and job log come from the run's activity
+          // events; with none yet it reads like the old spinner line.
+          <RunActivity
+            stage={conversation?.current_state ?? ''}
+            activity={activity}
+            now={now}
+            runElapsed={runElapsed}
+            preferFallback={cancelling || status === 'awaiting_input'}
+            fallbackLabel={
+              cancelling
                 ? 'Terminating the run…'
                 : status === 'awaiting_input'
                   ? 'Waiting for your answer…'
-                  : 'Working…'}
-            </Text>
-            {/* Live running time, next to the spinner that says the run is alive --
-                the two answer one question together ("is it still going, and for
-                how long?"), and up in the header the number sat far from the thing
-                it described. Paired with the wall-time cap when the plan is at
-                hand, so the clock is visible against the limit it races. Ticks
-                only while the run is active (see useNow). */}
-            {runElapsed && <Text style={styles.workingElapsed}>{runElapsed}</Text>}
-          </View>
+                  : 'Working…'
+            }
+          />
         )}
       </ScrollView>
 
@@ -1424,15 +1428,6 @@ const styles = StyleSheet.create({
   bubbleTag: { fontSize: 10, fontWeight: '700', color: C.washuGreen, marginBottom: 4 },
   bubbleText: { fontSize: 15, color: C.text, lineHeight: 21 },
   userBubbleText: { color: C.washuWhite },
-  working: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, padding: Spacing.two },
-  workingText: { color: C.textSecondary, fontSize: 13 },
-  // Tabular figures so a ticking counter doesn't shuffle its own width each
-  // second and nudge the spinner beside it.
-  workingElapsed: {
-    color: C.textSecondary,
-    fontSize: 13,
-    fontVariant: ['tabular-nums'],
-  },
   error: { color: C.washuRed, paddingHorizontal: Spacing.three, paddingVertical: Spacing.one },
   composer: {
     borderTopWidth: 1,

@@ -564,6 +564,51 @@ def get_artifact(session_id: str, name: str) -> dict | None:
         conn.close()
 
 
+def owns_conversation(conversation_id: str, user_id: str) -> bool:
+    """Cheap ownership check for endpoints polled every few seconds.
+
+    ``get_conversation`` loads the whole transcript; the activity feed only
+    needs to know the caller may see this run.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM conversations WHERE id = %s AND user_id = %s;",
+            (conversation_id, user_id),
+        )
+        found = cursor.fetchone() is not None
+        cursor.close()
+        return found
+    except Exception as e:
+        raise Exception(f"Failed to check conversation ownership: {e}") from e
+    finally:
+        conn.close()
+
+
+def get_activity(session_id: str, after_id: int, types: tuple, limit: int) -> list:
+    """run_events of ``types`` with id > ``after_id``, oldest first, at most ``limit``."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            SELECT id, event_type, payload, created_at
+            FROM run_events
+            WHERE session_id = %s AND id > %s AND event_type = ANY(%s)
+            ORDER BY id LIMIT %s;
+            """,
+            (session_id, after_id, list(types), limit),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+    except Exception as e:
+        raise Exception(f"Failed to read activity: {e}") from e
+    finally:
+        conn.close()
+
+
 def get_events(session_id: str, after_id: int = 0) -> list:
     """Return run_events for a session with id greater than ``after_id``."""
     conn = get_connection()

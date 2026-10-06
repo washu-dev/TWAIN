@@ -273,6 +273,18 @@ What happens at EXECUTE:
    `/output/stderr?tail=` and `/accounting` on `api`, or the rsynced job log
    (both streams in one file) + `sacct` on `ssh`.
 
+**Live activity in the chat UI.** Between "Plan approved" and the result, each
+stage publishes `stage.progress` run events (BUILD: script written; REPAIR:
+smoke test, fix rounds, review; EXECUTE: bundle staged → env check → submitted
+with job id and resources → queued with Slurm's reason in plain words →
+running on its node → finished → results fetched). On the API backend, the
+running job's stdout is followed through ris-api's paged output endpoint and
+published as `job.log` events (at most 8 KB per poll and 256 KB per job). The
+chat screen polls `GET /api/conversations/{id}/activity?after=<id>` over the
+authenticated client (the SSE stream can't send the bearer token) and renders
+them as a live checklist plus a job-output tail. Reporting is best effort:
+a dropped event only means less detail on screen.
+
 **Webhooks (optional, latency only).** ris-api can POST signed job events
 (`job.running`/`completed`/`failed`/`cancelled`/`retrying`) to
 `https://d1z5umg4xc2bl8.cloudfront.net/api/ris/webhooks`. The API verifies the

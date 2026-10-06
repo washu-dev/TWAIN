@@ -463,6 +463,29 @@ def _sse_event_stream(conversation_id: str):
         time.sleep(SSE_POLL_SECONDS)
 
 
+#: Event types the live activity feed serves (stage checklists + job log).
+ACTIVITY_EVENT_TYPES = ("stage.progress", "job.log")
+ACTIVITY_PAGE_LIMIT = 500
+
+
+@app.get("/api/conversations/{conversation_id}/activity")
+async def conversation_activity(conversation_id: str, user: CurrentUser, after: int = 0):
+    """In-stage progress + job log since event ``after`` (an id cursor).
+
+    The chat screen's live checklist polls this rather than the SSE stream:
+    EventSource can't send the bearer token, so under auth the stream is
+    refused while this rides the normal authenticated client. Returns
+    ``{"data": [...events], "next_after": <cursor>}``; pass ``next_after`` back
+    to get only what's new.
+    """
+    if not await run_in_threadpool(convo.owns_conversation, conversation_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    events = await run_in_threadpool(
+        convo.get_activity, conversation_id, max(0, after),
+        ACTIVITY_EVENT_TYPES, ACTIVITY_PAGE_LIMIT)
+    return {"data": events, "next_after": events[-1]["id"] if events else max(0, after)}
+
+
 @app.get("/api/conversations/{conversation_id}/stream")
 async def stream_conversation(conversation_id: str, user: CurrentUser):
     """Live Server-Sent Events of pipeline progress for a conversation."""

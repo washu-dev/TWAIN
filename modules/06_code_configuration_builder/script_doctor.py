@@ -229,6 +229,13 @@ COMPLETE script in one reply -- do not stop partway or omit the entrypoint.
 Return the full corrected script now."""
 
 
+#: How a smoke outcome reads in the REPAIR checklist ("repairable" is a failure).
+_SMOKE_LABELS = {
+    "pass": "Smoke test passed",
+    "unverifiable": "Smoke test can't run here -- the cluster checks it before queueing",
+}
+
+
 class ScriptDoctor:
     """Verify and repair a synthesized ``main.py`` (the REPAIR stage's engine).
 
@@ -245,8 +252,12 @@ class ScriptDoctor:
                  sim_python: Union[str, None, object] = _UNSET,
                  verifier: Optional[Callable[[str, dict], SmokeOutcome]] = None,
                  max_rounds: int = 3, review: bool = True,
-                 bundle_files: Optional[Dict[str, str]] = None):
+                 bundle_files: Optional[Dict[str, str]] = None,
+                 on_step: Optional[Callable[[str, str, str], None]] = None):
         self.agent = agent
+        # ``(step, status, label)`` progress callback -- the REPAIR checklist
+        # the UI shows while this runs (#162). None => silent.
+        self._on_step = on_step
         self.brief = dict(brief or {})
         # Extra bundle files (filename -> source) placed beside main.py in the
         # smoke sandbox. A bundle can now carry helper modules the script imports
@@ -260,6 +271,14 @@ class ScriptDoctor:
         self._verifier = verifier
         self.max_rounds = max(1, max_rounds)
         self.review_enabled = review
+
+    def _step(self, step: str, status: str, label: str) -> None:
+        if self._on_step is None:
+            return
+        try:
+            self._on_step(step, status, label)
+        except Exception:  # noqa: BLE001 - reporting must never break a repair
+            pass
 
     # -- public API ----------------------------------------------------------
     def heal(self, source: str) -> HealReport:
@@ -283,9 +302,16 @@ class ScriptDoctor:
             errors = [d for d in static if d.severity == "error"]
             last_smoke = None
             if not errors:
+                self._step("smoke", "active", "Smoke-testing the script"
+                           + (f" (after fix {rounds})" if rounds else ""))
                 last_smoke = self.smoke(source)
                 if last_smoke.status == "repairable":
                     errors = [Diagnostic("smoke", "error", last_smoke.error)]
+                    self._step("smoke", "failed",
+                               "Smoke test failed: " + _summarize(errors)[:200])
+                else:
+                    self._step("smoke", "done", _SMOKE_LABELS.get(
+                        last_smoke.status, f"Smoke test: {last_smoke.status}"))
             if not errors:
                 break  # runnable: compiles, has an entrypoint, and smoke is clean
 
@@ -294,11 +320,15 @@ class ScriptDoctor:
                 return HealReport(source, "unrepairable", rounds, fixes, static or errors)
 
             warnings = [d for d in static if d.severity == "warning"]
+            self._step("fix", "active", f"Fixing the script (round {rounds + 1} of "
+                       f"{self.max_rounds}): " + _summarize(errors)[:200])
             fixed = self._repair(source, errors + warnings)
             rounds += 1
             if not fixed or fixed == source:
+                self._step("fix", "failed", "Could not repair the script automatically")
                 return HealReport(source, "unrepairable", rounds, fixes, static or errors)
             fixes.append(f"round {rounds}: " + _summarize(errors))
+            self._step("fix", "done", f"Applied fix {rounds}")
             source = fixed
         else:
             # Budget exhausted with errors still present.
@@ -307,6 +337,7 @@ class ScriptDoctor:
 
         # -- phase 2: proactive hardening (one LLM review of a runnable script) -
         if self.agent is not None and self.review_enabled:
+            self._step("review", "active", "Reviewing the script for latent problems")
             findings = self.review(source)
             # Static warnings ride along here rather than in phase 1. Phase 1 only
             # repairs when an error exists, and promoting a warning to an error
@@ -331,6 +362,10 @@ class ScriptDoctor:
                         source = verified
                         rounds += 1
                         fixes.append(f"proactive review: addressed {len(actionable)} latent issue(s)")
+
+            self._step("review", "done", next(
+                (f for f in fixes if f.startswith("proactive review")),
+                "Review found nothing to change"))
 
         return HealReport(source, _final_status(fixes, last_smoke), rounds, fixes,
                           self.static_diagnostics(source))
