@@ -119,19 +119,6 @@ def job_ticket_urls(body: dict, x_twain_ticket: Annotated[str | None, Header()] 
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
 
-@app.post("/api/job-tickets/urls")
-def job_ticket_urls(body: dict, x_twain_ticket: Annotated[str | None, Header()] = None):
-    """Presigned S3 URLs for a Slurm job, traded for its job ticket (see job_tickets.py).
-
-    No user auth: the job on RIS has no user; the ticket -- random, scoped to
-    one run attempt, expiring -- is the credential, sent as X-TWAIN-Ticket.
-    """
-    try:
-        return job_tickets.handle(x_twain_ticket or "", body)
-    except job_tickets.TicketError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-
-
 #: ris-api events are a few hundred bytes; refuse anything far larger unread.
 RIS_WEBHOOK_MAX_BYTES = 64 * 1024
 
