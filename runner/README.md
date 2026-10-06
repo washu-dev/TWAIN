@@ -373,6 +373,33 @@ the requirements. A definite "no matching distribution" verdict fails the run
 immediately with a pointer to the env specs — instead of after staging plus a
 queue wait.
 
+### Keeping the RIS runner current (interim, until the ECS worker)
+
+The login-node runner updates itself: `scripts/ris/auto_update.sh` runs from
+cron every 10 minutes, fetches `master`, and restarts the runner when it is
+idle. The repo has been **private** since Aug 2026, so the fetch needs a
+credential. Without one it failed 7,186 times in a row, silently, while
+production ran Aug 6 code. A failure now writes `auto-update.status` (with when
+it began) and one `ERROR` line per run with the fix. One-time setup, **as the
+account that owns the runner** (its tmux session, cron, and deploy dir):
+
+```bash
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/twain_deploy -C "twain-ris-runner"   # private key stays in ~/.ssh
+# GitHub -> washu-dev/TWAIN -> Settings -> Deploy keys -> Add: paste ~/.ssh/twain_deploy.pub, read-only
+cd /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend
+echo "TWAIN_DEPLOY_KEY=$HOME/.ssh/twain_deploy" >> .env                    # .env is untracked
+bash scripts/ris/auto_update.sh && git log -1 --format='%h %s'             # now on current master
+cat auto-update.status 2>/dev/null || echo "auto-update healthy"
+```
+
+If the runner, cron, and deploy dir belong to someone else (today `junbo.y`),
+that account must either do the above, or stop its runner (`tmux kill-session
+-t twain-runner`, and remove `auto_update.sh` from its crontab) so a new owner
+can start one: `tmux new -d -s twain-runner bash scripts/ris/start_runner.sh`,
+then `bash scripts/ris/auto_update.sh --install-cron`. Never run two
+always-on runners on different code: both claim from the same queue, so runs
+would split between them.
+
 Prerequisites and knobs:
 - WashU VPN (AnyConnect) + Duo, and an SSH key for the login node
   (`ssh <wustl-key>@c2-login-001.ris.wustl.edu` must work non-interactively) —

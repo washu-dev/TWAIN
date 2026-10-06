@@ -472,7 +472,7 @@ async def _sse_event_stream(conversation_id: str):
 
 
 #: Event types the live activity feed serves (stage checklists + job log).
-ACTIVITY_EVENT_TYPES = ("stage.progress", "job.log")
+ACTIVITY_EVENT_TYPES = ("stage.progress", "job.log", "run.error")
 ACTIVITY_PAGE_LIMIT = 500
 
 

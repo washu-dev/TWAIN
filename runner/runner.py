@@ -220,7 +220,11 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
             notifier(session_id, "completed", summary)
             return
         if status == "error":
-            fail_msg = "The run failed — see the run log for details."
+            # Where it stopped and why -- the old "see the run log" pointed at a
+            # log nothing in the UI shows (#169).
+            describe = getattr(engine, "failure_message", None)
+            fail_msg = (describe(orch) if describe else
+                        "The run stopped unexpectedly. Open the run to see what happened.")
             db.add_assistant_message(session_id, fail_msg, kind="chat")
             notifier(session_id, "failed", fail_msg)
             return

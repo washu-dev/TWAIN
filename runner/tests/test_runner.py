@@ -713,6 +713,33 @@ class TestProcessJob:
         runner._drive_run(db, SESSION, FailOrch(), FakeEngine(), notifier=notes)
         assert "failed" in [reason for _sid, reason, _msg in notes.calls]
 
+    def test_a_failed_run_says_where_and_why_in_the_chat(self):
+        # #169: the chat used to say "see the run log for details" -- a log
+        # nothing in the UI showed.
+        db = FakeDB()
+        notes = RecordingNotifier()
+
+        class FailOrch:
+            last_failure = {"stage": "EXECUTE", "stage_label": "Running on the cluster",
+                            "headline": "The job ran out of time",
+                            "next_step": "Raise max_time and rerun."}
+
+            def __init__(self):
+                self.sm = types.SimpleNamespace(
+                    context=types.SimpleNamespace(artifacts={}),
+                    current_state=types.SimpleNamespace(name="EXECUTE"))
+
+            def run(self, until=None):
+                return "error"
+
+        from runner.engine import _RealEngine
+        engine = FakeEngine()
+        engine.failure_message = lambda orch: _RealEngine.failure_message(engine, orch)
+        runner._drive_run(db, SESSION, FailOrch(), engine, notifier=notes)
+        sent = [msg for _sid, reason, msg in notes.calls if reason == "failed"][0]
+        assert sent == ("The run stopped while running on the cluster (EXECUTE): "
+                        "The job ran out of time. Next step: Raise max_time and rerun.")
+
     # ── Slurm / compute target ────────────────────────────────────────────────
     def test_slurm_target_announced_on_start(self):
         # A fresh start announces where it will execute (RIS vs local) up front.

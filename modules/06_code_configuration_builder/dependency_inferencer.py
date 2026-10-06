@@ -172,6 +172,9 @@ TOOL_REGISTRY: Dict[str, ToolDependencies] = {
 # where a pre-provisioned env (scripts/ris/envs/*.yml) already provides it.
 CONDA_ONLY_PACKAGES = frozenset({
     "psi4", "xtb-python", "gpaw", "dftbplus", "qe", "abinit", "cp2k", "nwchem",
+    # PyPI holds only a yanked 0.18.0 placeholder, so pip finds "versions: none"
+    # (runs 21ffdacd, 786bd6b1); conda-forge is the real distribution.
+    "openff-toolkit",
 })
 
 # Packages that ARE on PyPI but cannot realistically be installed at job start.

@@ -23,6 +23,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useNow } from '@/hooks/useNow';
 import { useRunActivity } from '@/hooks/useRunActivity';
 import { RunActivity } from '@/components/RunActivity';
+import { FailureCard } from '@/components/FailureCard';
 import {
   DurationUnit, durationToHours, formatDurationHours, formatElapsed, splitDurationHours,
 } from '@/utils/duration';
@@ -750,6 +751,11 @@ export const ChatScreen: React.FC = () => {
                   : 'Working…'
             }
           />
+        )}
+        {status === 'error' && activity.failure && (
+          // Where it stopped and why -- instead of "see the run log", which
+          // pointed at a log nothing here shows.
+          <FailureCard failure={activity.failure} />
         )}
       </ScrollView>
 

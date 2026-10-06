@@ -49,12 +49,14 @@ jobs:
         working-directory: app
         run: npx expo lint
 
-      - name: Vulnerability scan — npm audit
+      - name: Vulnerability scan — npm audit (allowlist-aware gate)
         working-directory: app
-        # Production dependencies only: the remaining high findings are in the
-        # eslint/babel dev toolchain (never shipped in the web bundle) and have
-        # no upstream fix available.
-        run: npm audit --audit-level=high --omit=dev
+        # Production dependencies only. Fails on any high/critical advisory not
+        # accepted in app/audit-allowlist.json (each entry has a reason and a
+        # review_by date) and on any entry past its review_by. A bare
+        # `npm audit --audit-level=high` blocked every deploy from Aug 7 to
+        # Oct 6 on advisories with no fixed version in build-only tooling.
+        run: node scripts/audit-gate.mjs
 
       - name: Dependency license check
         working-directory: app

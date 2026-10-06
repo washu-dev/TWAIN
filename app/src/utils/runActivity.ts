@@ -1,4 +1,4 @@
-import type { ActivityEvent, StageProgress } from '@/api/client';
+import type { ActivityEvent, RunFailure, StageProgress } from '@/api/client';
 
 // What the run is doing inside a stage, folded from `stage.progress` and
 // `job.log` run events (see runner job_activity.py for the event shapes).
@@ -33,6 +33,8 @@ export interface RunActivityState {
   logTruncated: boolean;
   /** The last line hasn't seen its newline yet (pages can end mid-line). */
   logOpen: boolean;
+  /** Where the run stopped and why, from its newest `run.error` (null while it runs). */
+  failure: (RunFailure & { at: string }) | null;
   /** Cursor: the newest event id folded in. */
   after: number;
 }
@@ -44,6 +46,7 @@ export const EMPTY_ACTIVITY: RunActivityState = {
   logSkipped: false,
   logTruncated: false,
   logOpen: false,
+  failure: null,
   after: 0,
 };
 
@@ -111,6 +114,9 @@ export function applyActivity(state: RunActivityState, events: ActivityEvent[]):
     if (event.id <= next.after) continue;
     if (event.event_type === 'stage.progress') {
       next = applyStep(next, event.payload, event.created_at);
+    } else if (event.event_type === 'run.error') {
+      const f = event.payload.failure;
+      next = f ? { ...next, failure: { ...f, at: event.created_at } } : next;
     } else if (event.event_type === 'job.log') {
       const p = event.payload;
       next = applyLog(next, p.text ?? '', p.job_id, (p.skipped_bytes ?? 0) > 0, !!p.truncated);

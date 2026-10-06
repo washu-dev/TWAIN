@@ -310,6 +310,20 @@ class _RealEngine:
                 return None
         return None
 
+    def failure_message(self, orch) -> str:
+        """Where the run stopped and why, for the chat and the notification."""
+        failure = getattr(orch, "last_failure", None)
+        if not failure:
+            return "The run stopped unexpectedly. Open the run to see what happened."
+        # Importable on its own -- not only after _load() has wired sys.path,
+        # which a fresh process (CI running one test) hasn't done yet.
+        orchestrator_dir = str(pathlib.Path(__file__).resolve().parent.parent
+                               / "modules" / "07_runtime_orchestrator")
+        if orchestrator_dir not in sys.path:
+            sys.path.insert(0, orchestrator_dir)
+        from error_handler import failure_message
+        return failure_message(failure)
+
     def decline_reason(self, orch) -> str | None:
         """The off-topic decline message when intake refused the request, or None.
 
