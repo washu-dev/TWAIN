@@ -35,6 +35,7 @@ import os
 import threading
 import time
 
+from runner import dispatch
 from runner.artifacts import (
     capture_artifacts,
     rehydrate_artifacts,
@@ -320,8 +321,21 @@ def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
     return "proceed"
 
 
+def _cluster_job_store(db):
+    """The detached-EXECUTE store, under SQS dispatch only (P2, #171).
+
+    Pausing on a Slurm job needs someone to wake the run when it finishes --
+    the worker's cluster monitor. Without SQS dispatch (dev.sh, the login-node
+    runner) there is no monitor, so EXECUTE keeps waiting in-process.
+    """
+    if dispatch.mode() == "sqs" and os.getenv("TWAIN_STAGING", "").strip().lower() == "s3" \
+            and hasattr(db, "record_submitted"):
+        return db
+    return None
+
+
 def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, notifier, cancel,
-                        job_event_wait=None, issue_job_ticket=None):
+                        job_event_wait=None, issue_job_ticket=None, cluster_jobs=None):
     """Wire an orchestrator for this session with the chat/event/store bridges."""
     sink = PgEventSink(db, session_id)
     orch = engine.build_orchestrator(
@@ -337,6 +351,8 @@ def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, not
         job_event_wait=job_event_wait,
         # S3 staging: tickets a Slurm job trades for presigned URLs (#170).
         issue_job_ticket=issue_job_ticket,
+        # Detached EXECUTE: pause on the Slurm job; the monitor wakes the run.
+        cluster_jobs=cluster_jobs,
         # Per-run budget override (falls back to the deployment default in engine).
         max_cost=params.get("max_cost"),
     )
@@ -375,7 +391,8 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     # store; request/researcher_id are only needed to *start* a run.
     orch = _build_orchestrator(engine, db, session_id, params, notifier, cancel,
                                job_event_wait=job_events.wait,
-                               issue_job_ticket=getattr(db, "issue_job_ticket", None))
+                               issue_job_ticket=getattr(db, "issue_job_ticket", None),
+                               cluster_jobs=_cluster_job_store(db))
 
     if kind == "rerun":
         target = params.get("target_state")
@@ -523,7 +540,8 @@ def _handle_job_failure(db: RunnerDB, job: dict, exc: Exception, max_attempts: i
             job["session_id"], f"Run failed after {attempt} attempt(s): {exc}", kind="chat"
         )
     else:
-        db.mark_job(job["id"], "queued")
+        # 'queued', or 'dispatching' (+ re-sent by the relay) under SQS dispatch.
+        db.requeue_job(job["id"])
 
 
 def run_loop(

@@ -149,6 +149,10 @@ class FakeDB:
     def mark_job(self, job_id, status):
         self.jobs_done.append((job_id, status))
 
+    def requeue_job(self, job_id):
+        from runner import dispatch
+        self.jobs_done.append((job_id, dispatch.requeue_status()))
+
     def heartbeat_job(self, job_id):
         pass
 

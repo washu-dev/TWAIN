@@ -83,12 +83,15 @@ class JobActivity:
     LOG_BYTES_PER_TICK = 8 * 1024
     LOG_BYTES_PER_JOB = 256 * 1024
 
-    def __init__(self, publish: Optional[Publish], *, detail=None, read_log=None):
+    def __init__(self, publish: Optional[Publish], *, detail=None, read_log=None,
+                 log_offset: int = 0):
+        """``log_offset``: where a previous follower stopped (the cluster monitor
+        persists it, so a new monitor neither repeats nor skips output)."""
         self._publish = publish
         self._detail = detail or (lambda _job_id: {})
         self._read_log = read_log
         self._seen = None
-        self._log_offset = 0
+        self._log_offset = int(log_offset or 0)
         self._log_sent = 0
         self._log_done = False
         self._ran = False
@@ -151,6 +154,10 @@ class JobActivity:
         else:
             self.step("queue", "failed", f"Left the queue without running: {value.upper()}",
                       job_id=job_id, state=value)
+
+    @property
+    def log_offset(self) -> int:
+        return self._log_offset
 
     # --------------------------------------------------------------------- log
     def follow_log(self, job_id: str) -> None:
