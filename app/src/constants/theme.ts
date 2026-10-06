@@ -246,6 +246,12 @@ export const Spacing = {
 export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
 export const MaxContentWidth = 800;
 
+/**
+ * This build's release version (YYYY.MM.DD.NNN), independent of the API's (#173).
+ * Inlined at build time by the deploy workflow; "dev" for a local build.
+ */
+export const APP_VERSION = process.env.EXPO_PUBLIC_APP_VERSION || 'dev';
+
 export const API_CONFIG = {
   baseURL: process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:8000',
   timeout: 10000,

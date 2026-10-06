@@ -39,3 +39,26 @@ class TestHealthReportsItsCommit:
     def test_the_endpoint_needs_no_credentials(self):
         """The whole point: verifiable from outside, with no token."""
         assert client.get("/api/health").status_code == 200
+
+
+class TestReleaseVersion:
+    """#173: the API reports its own YYYY.MM.DD.NNN release, independent of the app's."""
+
+    def test_the_deploy_baked_version_wins(self, monkeypatch):
+        monkeypatch.setenv("TWAIN_VERSION", "2026.10.06.003")
+        assert client.get("/api/health").json()["version"] == "2026.10.06.003"
+        body = client.get("/api/version").json()
+        assert body == {"service": "twain-api", "version": "2026.10.06.003",
+                        "commit": body["commit"]}
+
+    def test_a_checkout_falls_back_to_the_version_file_then_dev(self, monkeypatch, tmp_path):
+        import version
+        monkeypatch.delenv("TWAIN_VERSION", raising=False)
+        f = tmp_path / "VERSION"
+        f.write_text("2026.10.05.002\n")
+        monkeypatch.setattr(version, "VERSION_FILE", f)
+        assert version.get_version() == "2026.10.05.002"
+        f.write_text("0000.00.00.000\n")          # never released
+        assert version.get_version() == "dev"
+        monkeypatch.setattr(version, "VERSION_FILE", tmp_path / "missing")
+        assert version.get_version() == "dev"

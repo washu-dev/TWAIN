@@ -395,6 +395,12 @@ class APIClient {
     return response.data;
   }
 
+  // The API's own release version and commit (#173); needs no credentials.
+  async getVersion(): Promise<{ service: string; version: string; commit: string }> {
+    const response = await this.client.get('/api/version');
+    return response.data;
+  }
+
   async getConversation(id: string): Promise<Conversation> {
     const response = await this.client.get(`/api/conversations/${id}`);
     return response.data.data;

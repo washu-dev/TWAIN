@@ -72,10 +72,23 @@ jobs:
     runs-on: ubuntu-latest
     needs: quality
     if: github.event_name != 'pull_request'
+    # Push the release commit + tag after a successful deploy (#173).
+    permissions:
+      contents: write
+    concurrency:
+      group: release-app
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the release commit is pushed back to master
+
+      # Computed once: the build inlines it and the tag records it (#173).
+      - name: Next app version
+        id: version
+        run: echo "version=$(scripts/bump-version.sh app/VERSION --dry-run)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -121,6 +134,8 @@ jobs:
         working-directory: app
         env:
           EXPO_PUBLIC_API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          # Shown in the footer beside the API's own version (#173).
+          EXPO_PUBLIC_APP_VERSION: ${{ steps.version.outputs.version }}
           # EXPO_PUBLIC_ENTRA_CLIENT_ID / EXPO_PUBLIC_ENTRA_TENANT_ID come from
           # $GITHUB_ENV (set in the previous step) and are inlined by expo export.
         run: npx expo export --platform web
@@ -153,3 +168,6 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id ${{ env.CLOUDFRONT_DISTRIBUTION_ID }} \
             --paths "/*"
+
+      - name: Record the app release
+        run: scripts/release-commit.sh app "${{ steps.version.outputs.version }}"
