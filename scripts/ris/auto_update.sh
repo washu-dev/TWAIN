@@ -5,8 +5,14 @@
 # deploy dir to it, refresh the pixi env, and restart the runner tmux session.
 # If the runner is mid-job (a claimed/running row in the jobs table, or a Slurm
 # job in the queue) the update is deferred to the next cron cycle -- a run is
-# never interrupted. The repo is public, so fetching needs no credentials; the
-# cluster-only files (.env, runner-ris.log) are untracked and survive resets.
+# never interrupted. The cluster-only files (.env, runner-ris.log) are untracked
+# and survive resets.
+#
+# The repo is PRIVATE (since Aug 2026), so fetching needs a credential: set
+# TWAIN_DEPLOY_KEY in the deploy dir's .env to a read-only GitHub deploy key
+# (chmod 600, outside the shared tree, e.g. ~/.ssh/twain_deploy). Without one the
+# fetch fails -- it did, silently, 7,186 times while production ran Aug 6 code --
+# so a failure now writes auto-update.status and one loud line per run.
 #
 # Install (one time, on the login node):
 #   bash scripts/ris/auto_update.sh --install-cron   # polls every 10 minutes
@@ -15,7 +21,17 @@
 set -euo pipefail
 
 RIS_DIR="${RIS_DIR:-/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend}"
+# Per-deploy overrides (TWAIN_DEPLOY_KEY, REPO_URL, ...) live in the untracked .env.
+if [ -f "$RIS_DIR/.env" ]; then
+  # shellcheck disable=SC1091
+  set -a; . "$RIS_DIR/.env"; set +a
+fi
+if [ -n "${TWAIN_DEPLOY_KEY:-}" ]; then
+  REPO_URL="${REPO_URL:-git@github.com:washu-dev/TWAIN.git}"
+  export GIT_SSH_COMMAND="ssh -i $TWAIN_DEPLOY_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+fi
 REPO_URL="${REPO_URL:-https://github.com/washu-dev/TWAIN.git}"
+STATUS_FILE="$RIS_DIR/auto-update.status"
 BRANCH="${BRANCH:-master}"
 export PATH="$HOME/.pixi/bin:$PATH"
 
@@ -47,7 +63,19 @@ if [ ! -d .git ]; then
   git checkout -q -f -B "$BRANCH" FETCH_HEAD
 fi
 
-git fetch -q origin "$BRANCH"
+# Follow REPO_URL (e.g. https -> ssh once a deploy key is configured).
+git remote set-url origin "$REPO_URL"
+if ! fetch_err="$(git fetch -q origin "$BRANCH" 2>&1)"; then
+  # `|| true`: no status file yet on the first failure, and pipefail + set -e
+  # would otherwise exit here -- before the loud line this block exists for.
+  since="$(sed -n 's/^failing since //p' "$STATUS_FILE" 2>/dev/null | head -1 || true)"
+  { echo "failing since ${since:-$(date '+%F %T')}"; echo "last error: $fetch_err"; } > "$STATUS_FILE"
+  log "ERROR: cannot fetch $REPO_URL (${fetch_err%%$'\n'*}) -- the runner stays on" \
+      "$(git rev-parse --short HEAD). Private repo: set TWAIN_DEPLOY_KEY in $RIS_DIR/.env" \
+      "(read-only deploy key) -- see runner/README.md 'Keeping the RIS runner current'."
+  exit 1
+fi
+rm -f "$STATUS_FILE"
 local_rev="$(git rev-parse HEAD)"
 remote_rev="$(git rev-parse FETCH_HEAD)"
 [ "$local_rev" = "$remote_rev" ] && exit 0
