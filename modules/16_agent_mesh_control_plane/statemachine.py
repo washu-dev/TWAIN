@@ -648,6 +648,10 @@ class StateMachine:
         # RIS webhook seam: ``(job_id, seconds)`` sleep the Slurm adapter uses
         # between polls, returning early when ris-api reports on that job.
         self.job_event_wait = job_event_wait
+        # Activity seam: ``(event_type, payload)`` publisher the orchestrator
+        # sets so stages can report what they're doing (``stage.progress``,
+        # ``job.log``) instead of leaving the UI on "Working…". None => silent.
+        self.publish_progress = None
         # When on, the REPAIR stage may call the LLM to repair the synthesized
         # calculator script and proactively scan it for latent bugs. Off by
         # default so offline/seeded/test runs make no network calls there; the
@@ -2216,6 +2220,10 @@ class StateMachine:
         else:
             smoke_compute = True
         engine = CodegenEngine()
+        tool = (method.get("calculator") or method.get("tool_name")
+                or "the selected tool") if isinstance(method, dict) else "the selected tool"
+        self._progress("BUILD", "codegen", "active",
+                       f"Writing the simulation script for {tool}")
         try:
             bundle = engine.generate(
                 plan, intent=intent,
@@ -2240,6 +2248,10 @@ class StateMachine:
                 # having computed nothing. Planning-only runs keep the fallback --
                 # there the bundle is a deliverable to read, not to run.
                 require_synthesis=(self.execute_locally or self.execute_slurm))
+        except Exception:
+            self._progress("BUILD", "codegen", "failed",
+                           "Could not write a runnable script for this plan")
+            raise
         finally:
             # Recorded either way: on success it says which attempt produced the
             # script, and on failure why each attempt was rejected -- the thing
@@ -2247,8 +2259,14 @@ class StateMachine:
             if engine.last_synthesis is not None:
                 self.context.artifacts["codegen_report"] = self._write_artifact(
                     "codegen_report", engine.last_synthesis)
+        synthesis = engine.last_synthesis or {}
+        tries = synthesis.get("attempt")
+        self._progress("BUILD", "codegen", "done",
+                       "Script written" + (f" (attempt {tries})" if tries and tries > 1 else ""))
         bundle_dir = Path(self.artifacts_dir) / f"run_bundle_{self.run_id}"
         bundle.write(bundle_dir)
+        self._progress("BUILD", "bundle", "done",
+                       f"Run bundle assembled ({len(list(bundle_dir.iterdir()))} files)")
         self.context.artifacts["run_bundle"] = str(bundle_dir)
         self.context.artifacts["script"] = str(bundle_dir / bundle.entrypoint)
         return State.REPAIR
@@ -2330,6 +2348,8 @@ class StateMachine:
             brief=self._repair_brief(plan, method),
             bundle_files=self._bundle_helper_files(),
             sim_python=smoke_python,
+            # The REPAIR checklist: smoke test, fix rounds, review (#162).
+            on_step=lambda step, status, label: self._progress("REPAIR", step, status, label),
         )
 
     def _bundle_config(self, bundle_dir) -> dict:
@@ -2522,9 +2542,18 @@ class StateMachine:
             if result.succeeded or attempt >= attempts:
                 break
             failure = _runtime_traceback(result)
-            if failure is None or not self._heal_runtime_failure(
-                    bundle_dir, failure, attempt):
+            if failure is None:
                 break
+            self._progress("EXECUTE", "heal", "active",
+                           f"The run crashed — repairing the script against its error "
+                           f"(attempt {attempt} of {attempts - 1})")
+            if not self._heal_runtime_failure(bundle_dir, failure, attempt):
+                self._progress("EXECUTE", "heal", "failed",
+                               "Could not repair the crash automatically")
+                break
+            self._progress("EXECUTE", "heal", "done",
+                           f"Repaired — running it again (attempt {attempt + 1} of {attempts})",
+                           attempt=attempt + 1)
         self.context.artifacts["execution_result"] = self._write_artifact(
             "execution_result", result.to_dict()
         )
@@ -2535,6 +2564,22 @@ class StateMachine:
             # guard fail downstream as an opaque "incomplete context".
             raise self._execution_error(result, bundle_dir)
         return State.INTERPRET
+
+    def _publish_progress(self, event_type: str, payload: dict) -> None:
+        """Hand an activity event to the orchestrator's publisher (best effort)."""
+        if self.publish_progress is None:
+            return
+        try:
+            self.publish_progress(event_type, payload)
+        except Exception:  # noqa: BLE001 - reporting must never break a stage
+            pass
+
+    def _progress(self, stage: str, step: str, status: str, label: str, **detail) -> None:
+        """Report one checklist step of ``stage`` (see job_activity.py's shape)."""
+        self._publish_progress("stage.progress", {
+            "stage": stage, "step": step, "status": status,
+            "label": label, "detail": detail,
+        })
 
     def _runtime_repair_budget(self) -> int:
         """How many repair-and-re-execute rounds a failed run may consume.
@@ -2700,6 +2745,8 @@ class StateMachine:
             should_abort=self.should_abort,
             # Webhook wake-up: poll as soon as ris-api reports on the job.
             job_event_wait=self.job_event_wait,
+            # Live EXECUTE checklist + job log for the UI.
+            on_progress=self._publish_progress,
         )
 
     # Extra polling headroom on top of the job's wall time: covers time spent
