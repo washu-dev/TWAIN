@@ -388,6 +388,7 @@ class TestRerunStatusGate:
             {"content": "compute the bandgap of silicon"},       # opening request
             {"params": {"max_cost": 2.0}},                       # original start job
             {**CONVERSATION, "status": "running"},               # the UPDATE ... RETURNING
+            {"id": 77},                                          # INSERT INTO jobs ... RETURNING id
         ]
         conn = MagicMock()
         conn.cursor.return_value = cursor
