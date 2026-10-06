@@ -226,7 +226,7 @@ def _decode_bearer(token: str) -> dict:
     return verify_token(token)
 
 
-async def get_current_user(
+def get_current_user(
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> dict:
     """Resolve the authenticated user, creating/refreshing their ``users`` row."""

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import math
 import os
@@ -123,7 +124,7 @@ async def ris_webhook(request: Request):
 
 
 @app.get("/api/libraries")
-async def list_libraries(user: CurrentUser):
+def list_libraries(user: CurrentUser):
     """What TWAIN knows about, and which of it this cluster can actually run.
 
     Served from the snapshot the runner publishes (``library_availability``): the
@@ -154,7 +155,7 @@ class InterimLogin(BaseModel):
 
 
 @app.post("/api/auth/login")
-async def interim_login(body: InterimLogin):
+def interim_login(body: InterimLogin):
     """Interim email sign-in: validate the email, upsert the user, mint a token.
 
     Available only when ``INTERIM_JWT_SECRET`` is configured. Entra tokens are
@@ -181,7 +182,7 @@ class RoleUpdate(BaseModel):
 
 
 @app.get("/api/me")
-async def get_me(user: CurrentUser):
+def get_me(user: CurrentUser):
     """Return the authenticated user (identity + role + notification prefs)."""
     return {"data": user}
 
@@ -200,7 +201,7 @@ class NotifyPrefs(BaseModel):
 
 
 @app.put("/api/me/notifications")
-async def put_notify_prefs(body: NotifyPrefs, user: CurrentUser):
+def put_notify_prefs(body: NotifyPrefs, user: CurrentUser):
     """Replace the caller's email notification preferences.
 
     The runner consults these before every send: emails off entirely
@@ -220,14 +221,14 @@ async def put_notify_prefs(body: NotifyPrefs, user: CurrentUser):
 
 
 @app.get("/api/admin/users")
-async def admin_list_users(_admin: AdminUser):
+def admin_list_users(_admin: AdminUser):
     """List all users. Admin only."""
     users = list_users()
     return {"data": users, "count": len(users)}
 
 
 @app.patch("/api/admin/users/{user_id}/role")
-async def admin_set_user_role(user_id: str, body: RoleUpdate, _admin: AdminUser):
+def admin_set_user_role(user_id: str, body: RoleUpdate, _admin: AdminUser):
     """Change a user's role. Admin only."""
     updated = set_user_role(user_id, body.role)
     if updated is None:
@@ -242,7 +243,7 @@ class CreateIssue(BaseModel):
 
 
 @app.post("/api/issues", status_code=201)
-async def create_issue(body: CreateIssue, user: CurrentUser):
+def create_issue(body: CreateIssue, user: CurrentUser):
     """Open a GitHub issue on the TWAIN repo for the signed-in user.
 
     Issues are created by a single service PAT, so the caller's email — taken
@@ -321,7 +322,7 @@ def _require_own_conversation(conversation_id: str, user: dict) -> dict:
 
 
 @app.post("/api/conversations")
-async def start_conversation(body: CreateConversation, user: CurrentUser):
+def start_conversation(body: CreateConversation, user: CurrentUser):
     """Start a new run from a natural-language request and enqueue it."""
     if not body.request.strip():
         raise HTTPException(status_code=422, detail="request must not be empty.")
@@ -334,21 +335,21 @@ async def start_conversation(body: CreateConversation, user: CurrentUser):
 
 
 @app.get("/api/conversations")
-async def list_my_conversations(user: CurrentUser):
+def list_my_conversations(user: CurrentUser):
     """List the caller's conversations, newest first."""
     items = convo.list_conversations(user["id"])
     return {"data": items, "count": len(items)}
 
 
 @app.get("/api/conversations/{conversation_id}")
-async def get_conversation_detail(conversation_id: str, user: CurrentUser):
+def get_conversation_detail(conversation_id: str, user: CurrentUser):
     """Return a conversation plus its full transcript."""
     conversation = _require_own_conversation(conversation_id, user)
     return {"data": {**conversation, "messages": convo.list_messages(conversation_id)}}
 
 
 @app.delete("/api/conversations/{conversation_id}")
-async def remove_conversation(conversation_id: str, user: CurrentUser):
+def remove_conversation(conversation_id: str, user: CurrentUser):
     """Delete a conversation and all of its data (owner only)."""
     if not convo.delete_conversation(conversation_id, user["id"]):
         raise HTTPException(status_code=404, detail="Conversation not found.")
@@ -356,7 +357,7 @@ async def remove_conversation(conversation_id: str, user: CurrentUser):
 
 
 @app.post("/api/conversations/{conversation_id}/messages")
-async def post_message(conversation_id: str, body: SendMessage, user: CurrentUser):
+def post_message(conversation_id: str, body: SendMessage, user: CurrentUser):
     """Add a user turn (a chat reply or an answer to a clarification question)."""
     _require_own_conversation(conversation_id, user)
     if not body.content.strip():
@@ -365,7 +366,7 @@ async def post_message(conversation_id: str, body: SendMessage, user: CurrentUse
 
 
 @app.post("/api/conversations/{conversation_id}/approval")
-async def post_approval(conversation_id: str, body: SendApproval, user: CurrentUser):
+def post_approval(conversation_id: str, body: SendApproval, user: CurrentUser):
     """Answer a plan-approval gate ('approve' resumes the run, 'reject' stops it)."""
     _require_own_conversation(conversation_id, user)
     return {
@@ -377,7 +378,7 @@ async def post_approval(conversation_id: str, body: SendApproval, user: CurrentU
 
 
 @app.post("/api/conversations/{conversation_id}/terminate")
-async def post_terminate(conversation_id: str, user: CurrentUser):
+def post_terminate(conversation_id: str, user: CurrentUser):
     """Ask the runner to stop this run at the next opportunity.
 
     Records a 'terminate' control message and flips the conversation to
@@ -391,7 +392,7 @@ async def post_terminate(conversation_id: str, user: CurrentUser):
 
 
 @app.post("/api/conversations/{conversation_id}/rerun")
-async def rerun_conversation(conversation_id: str, body: RerunConversation, user: CurrentUser):
+def rerun_conversation(conversation_id: str, body: RerunConversation, user: CurrentUser):
     """Re-run a conversation from an earlier pipeline stage.
 
     Resets that stage and everything after it and drives the run again; the
@@ -445,22 +446,29 @@ async def rerun_conversation(conversation_id: str, body: RerunConversation, user
     return {"data": conversation}
 
 
-def _sse_event_stream(conversation_id: str):
-    """Yield run_events as Server-Sent Events until the run reaches a terminal state."""
+async def _sse_event_stream(conversation_id: str):
+    """Yield run_events as Server-Sent Events until the run reaches a terminal state.
+
+    Async on purpose: a sync generator here is iterated in the threadpool, and
+    its ``time.sleep`` between ticks would hold a worker thread for the whole
+    life of the stream -- enough open streams and no request could get one.
+    Sleeping on the event loop costs nothing; only the two DB reads per tick
+    borrow a thread.
+    """
     last_id = 0
     deadline = time.monotonic() + SSE_MAX_SECONDS
     while True:
-        for event in convo.get_events(conversation_id, last_id):
+        for event in await run_in_threadpool(convo.get_events, conversation_id, last_id):
             last_id = event["id"]
             yield f"event: {event['event_type']}\ndata: {json.dumps(event, default=str)}\n\n"
-        conversation = convo.get_conversation_status(conversation_id)
+        conversation = await run_in_threadpool(convo.get_conversation_status, conversation_id)
         if conversation is None or conversation in convo.TERMINAL_STATUSES:
             yield f"event: done\ndata: {json.dumps({'status': conversation})}\n\n"
             return
         if time.monotonic() >= deadline:
             yield 'event: done\ndata: {"status": "timeout"}\n\n'
             return
-        time.sleep(SSE_POLL_SECONDS)
+        await asyncio.sleep(SSE_POLL_SECONDS)
 
 
 #: Event types the live activity feed serves (stage checklists + job log).
@@ -489,7 +497,7 @@ async def conversation_activity(conversation_id: str, user: CurrentUser, after: 
 @app.get("/api/conversations/{conversation_id}/stream")
 async def stream_conversation(conversation_id: str, user: CurrentUser):
     """Live Server-Sent Events of pipeline progress for a conversation."""
-    _require_own_conversation(conversation_id, user)
+    await run_in_threadpool(_require_own_conversation, conversation_id, user)
     return StreamingResponse(
         _sse_event_stream(conversation_id), media_type="text/event-stream"
     )
@@ -569,7 +577,7 @@ def _extract_result(execution_result):
 
 
 @app.get("/api/conversations/{conversation_id}/report")
-async def get_report(conversation_id: str, user: CurrentUser):
+def get_report(conversation_id: str, user: CurrentUser):
     """Assemble a run report: headline result, summary, and downloadable artifacts."""
     conversation = _require_own_conversation(conversation_id, user)
     execution_result = _load_json_artifact(conversation_id, "execution_result")
@@ -604,7 +612,7 @@ class SubmitRunIssue(BaseModel):
 
 
 @app.get("/api/conversations/{conversation_id}/issue-context")
-async def get_issue_context(conversation_id: str, user: CurrentUser):
+def get_issue_context(conversation_id: str, user: CurrentUser):
     """Preview exactly what would be attached to an issue filed against this run.
 
     Submitting publishes the run's data to the issue tracker, so the run window
@@ -625,7 +633,7 @@ async def get_issue_context(conversation_id: str, user: CurrentUser):
 
 
 @app.post("/api/conversations/{conversation_id}/issues")
-async def submit_run_issue(conversation_id: str, body: SubmitRunIssue, user: CurrentUser):
+def submit_run_issue(conversation_id: str, body: SubmitRunIssue, user: CurrentUser):
     """File a GitHub issue about this run, with the run's own data attached.
 
     The submission is recorded locally whether or not GitHub could be reached, so
@@ -672,7 +680,7 @@ async def submit_run_issue(conversation_id: str, body: SubmitRunIssue, user: Cur
 
 
 @app.get("/api/conversations/{conversation_id}/issues")
-async def list_run_issues(conversation_id: str, user: CurrentUser):
+def list_run_issues(conversation_id: str, user: CurrentUser):
     """Issues already reported against this run, newest first."""
     _require_own_conversation(conversation_id, user)
     items = run_issues.list_issues(conversation_id)
@@ -680,7 +688,7 @@ async def list_run_issues(conversation_id: str, user: CurrentUser):
 
 
 @app.get("/api/conversations/{conversation_id}/artifacts")
-async def list_artifacts(conversation_id: str, user: CurrentUser):
+def list_artifacts(conversation_id: str, user: CurrentUser):
     """List the artifacts (specs + generated code files) produced by the run."""
     _require_own_conversation(conversation_id, user)
     items = convo.list_artifacts(conversation_id)
@@ -688,7 +696,7 @@ async def list_artifacts(conversation_id: str, user: CurrentUser):
 
 
 @app.get("/api/conversations/{conversation_id}/artifacts/{name:path}")
-async def get_artifact(conversation_id: str, name: str, user: CurrentUser):
+def get_artifact(conversation_id: str, name: str, user: CurrentUser):
     """Return one artifact's full content (name may contain '/', e.g. run_bundle/main.py)."""
     _require_own_conversation(conversation_id, user)
     artifact = convo.get_artifact(conversation_id, name)
