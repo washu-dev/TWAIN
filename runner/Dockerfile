@@ -16,10 +16,15 @@ WORKDIR /app
 COPY pixi.toml pixi.lock ./
 RUN pixi install
 # The calculators (GPAW/DFTB+) live in the isolated 'sim' env, which a plain
-# `pixi install` does NOT materialize. The state machine resolves the sim
-# interpreter by path (.pixi/envs/sim/bin/python), so without this layer EXECUTE
-# silently degrades to skipped_missing_dependency and the runner is planning-only.
-RUN pixi install -e sim
+# `pixi install` does NOT materialize. Only a runner that executes calculations
+# IN the container needs it (TWAIN_EXECUTE_LOCALLY: the state machine resolves
+# .pixi/envs/sim/bin/python, and without it local EXECUTE degrades to
+# skipped_missing_dependency). The event-driven worker (P2, #171) runs every
+# calculation -- and its smoke test -- on RIS through Slurm, so it skips this:
+# the sim env and the DFTB+ data were most of a 4.2 GB image that every Fargate
+# task pulls at start. Build with --build-arg WITH_SIM=1 to restore them.
+ARG WITH_SIM=0
+RUN if [ "$WITH_SIM" = "1" ]; then pixi install -e sim; fi
 
 # Application code (see .dockerignore for what is excluded).
 COPY . .
@@ -32,6 +37,12 @@ COPY . .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && bash runner/fetch_slako.sh
+    && if [ "$WITH_SIM" = "1" ]; then bash runner/fetch_slako.sh; fi
 
-CMD ["pixi", "run", "python", "-m", "runner.runner"]
+# The commit this image was built from (CI passes it): enables the RIS
+# stale-checkout guard on S3-staged jobs (TWAIN_EXPECTED_SHA).
+ARG GIT_SHA=
+ENV TWAIN_GIT_SHA=$GIT_SHA
+
+# The SQS worker (TWAIN_DISPATCH=sqs). The polling runner is `python -m runner.runner`.
+CMD ["pixi", "run", "python", "-m", "runner.worker"]

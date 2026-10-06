@@ -52,6 +52,11 @@ def _resolve_db_password() -> str:
         raise Exception(f"Failed to retrieve DB secret: {e}") from e
 
 
+#: Re-queue status for a job row: 'dispatching' if it was ever sent through SQS,
+#: else this process's default (the %s parameter). See reap_stale_jobs.
+_REQUEUE_STATUS_SQL = "CASE WHEN published_at IS NOT NULL THEN 'dispatching' ELSE %s END"
+
+
 class RunnerDB:
     """Short-lived-connection helpers for everything the runner reads/writes."""
 
@@ -118,9 +123,10 @@ class RunnerDB:
         self._execute("UPDATE jobs SET status = %s WHERE id = %s;", (status, job_id))
 
     def requeue_job(self, job_id: int) -> None:
-        """Back for another attempt: 'queued', or 'dispatching' + re-sent under SQS."""
-        self._execute("UPDATE jobs SET status = %s, published_at = NULL WHERE id = %s;",
-                      (dispatch.requeue_status(), job_id))
+        """Back for another attempt, in the world the job came from (see the reaper)."""
+        self._execute(
+            f"UPDATE jobs SET status = {_REQUEUE_STATUS_SQL}, published_at = NULL WHERE id = %s;",
+            (dispatch.requeue_status(), job_id))
 
     # ---- SQS dispatch (P2, #171) -----------------------------------------------
     def claim_job_by_id(self, job_id: int) -> dict | None:
@@ -285,12 +291,16 @@ class RunnerDB:
                 (lease_seconds, max_attempts),
             )
             dead = cursor.fetchall()
-            # Re-queue the recoverable ones for another attempt. Under SQS
-            # dispatch: back to 'dispatching' with published_at cleared, so the
-            # relay sends a fresh message (and the polling runner can't claim it).
+            # Re-queue the recoverable ones for another attempt -- in the world
+            # each job came from, whichever runner reaps it: a job that went
+            # through SQS (published_at set) goes back to 'dispatching' with
+            # published_at cleared, so the relay re-sends it. Deciding by this
+            # process's mode instead would let a polling runner reap a crashed
+            # worker's job as 'queued' and drive a run paused on a Slurm job --
+            # with no detached mode, it would submit a duplicate attempt.
             cursor.execute(
-                """
-                UPDATE jobs SET status = %s, published_at = NULL
+                f"""
+                UPDATE jobs SET status = {_REQUEUE_STATUS_SQL}, published_at = NULL
                 WHERE status IN ('claimed', 'running')
                   AND COALESCE(heartbeat_at, claimed_at) < now() - make_interval(secs => %s)
                   AND attempts < %s;

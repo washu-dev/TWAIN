@@ -143,8 +143,11 @@ def main() -> None:
     for i in range(max(1, int(os.getenv("TWAIN_WORKER_CONCURRENCY", "2")))):
         threads.append(threading.Thread(target=consume, args=(db, client, queue_url, stop),
                                         name=f"consumer-{i}", daemon=True))
-    # Not publish_capabilities(): it probes cluster env directories that only
-    # exist on RIS storage, and would mark every library unavailable from here.
+    # Not publish(): it probes env directories that exist only on RIS storage
+    # and would mark every library unavailable from here. The env specs say
+    # the same thing declaratively, and ship in the image.
+    from runner.capabilities import publish_from_specs
+    publish_from_specs(db)
     for t in threads:
         t.start()
     log.info("worker up: %d consumers + cluster monitor on %s", len(threads) - 1, queue_url)

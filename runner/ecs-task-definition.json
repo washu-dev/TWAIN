@@ -1,29 +1,96 @@
 {
   "family": "twain-runner",
   "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "2048",
-  "memory": "8192",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "1024",
+  "memory": "4096",
   "executionRoleArn": "arn:aws:iam::730335203321:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::730335203321:role/ecsTaskRole",
+  "taskRoleArn": "arn:aws:iam::730335203321:role/TWAIN-runner-worker",
   "containerDefinitions": [
     {
       "name": "twain-runner",
       "image": "730335203321.dkr.ecr.us-east-1.amazonaws.com/twain-runner-ecr:latest",
       "environment": [
-        { "name": "DB_HOST",   "value": "twain-app-database.cn8saqya88cd.us-east-1.rds.amazonaws.com" },
-        { "name": "DB_PORT",   "value": "5432" },
-        { "name": "DB_NAME",   "value": "twaindb" },
-        { "name": "DB_USER",   "value": "postgres" },
-        { "name": "AWS_REGION","value": "us-east-1" },
-        { "name": "AWS_SECRET_ARN", "value": "arn:aws:secretsmanager:us-east-1:730335203321:secret:DBPASSWORD-xfmLoq" },
-        { "name": "TWAIN_EXECUTE_LOCALLY", "value": "1" }
+        {
+          "name": "DB_HOST",
+          "value": "twain-app-database.cn8saqya88cd.us-east-1.rds.amazonaws.com"
+        },
+        {
+          "name": "DB_PORT",
+          "value": "5432"
+        },
+        {
+          "name": "DB_NAME",
+          "value": "twaindb"
+        },
+        {
+          "name": "DB_USER",
+          "value": "postgres"
+        },
+        {
+          "name": "AWS_REGION",
+          "value": "us-east-1"
+        },
+        {
+          "name": "AWS_SECRET_ARN",
+          "value": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/database/DB_PASSWORD-UN6Mff"
+        },
+        {
+          "name": "TWAIN_DISPATCH",
+          "value": "sqs"
+        },
+        {
+          "name": "TWAIN_JOB_QUEUE_URL",
+          "value": "https://sqs.us-east-1.amazonaws.com/730335203321/twain-jobs.fifo"
+        },
+        {
+          "name": "TWAIN_WORKER_CONCURRENCY",
+          "value": "2"
+        },
+        {
+          "name": "TWAIN_EXECUTE_SLURM",
+          "value": "1"
+        },
+        {
+          "name": "TWAIN_SLURM_CLUSTER",
+          "value": "compute2"
+        },
+        {
+          "name": "TWAIN_SLURM_BACKEND",
+          "value": "api"
+        },
+        {
+          "name": "TWAIN_STAGING",
+          "value": "s3"
+        },
+        {
+          "name": "TWAIN_RUN_BUCKET",
+          "value": "twain-run-data-730335203321"
+        },
+        {
+          "name": "TWAIN_API_PUBLIC_URL",
+          "value": "https://d1z5umg4xc2bl8.cloudfront.net"
+        }
       ],
       "secrets": [
-        { "name": "API_KEY",       "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/API_KEY-JN9yGe" },
-        { "name": "CLIENT_ID",     "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/CLIENT_ID-jxmr85" },
-        { "name": "CLIENT_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/CLIENT_SECRET-0YnYKl" },
-        { "name": "RIS_API_TOKEN", "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/ris_api/TOKEN-ruCRKa" }
+        {
+          "name": "API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/API_KEY-JN9yGe"
+        },
+        {
+          "name": "CLIENT_ID",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/CLIENT_ID-jxmr85"
+        },
+        {
+          "name": "CLIENT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/secure_api/CLIENT_SECRET-0YnYKl"
+        },
+        {
+          "name": "RIS_API_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/ris_api/TOKEN-ruCRKa"
+        }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
@@ -33,7 +100,15 @@
           "awslogs-stream-prefix": "ecs"
         }
       },
-      "essential": true
+      "essential": true,
+      "command": [
+        "pixi",
+        "run",
+        "python",
+        "-m",
+        "runner.worker"
+      ],
+      "stopTimeout": 120
     }
   ]
 }

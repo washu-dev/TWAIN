@@ -267,6 +267,24 @@ class TestRunnerDBSql:
         db.requeue_job(job)
         assert db.job_status(job) == "dispatching"              # the polling runner can't see it
 
+    def test_a_polling_runner_returns_an_sqs_job_to_sqs(self, db, monkeypatch):
+        # The login-node runner (TWAIN_DISPATCH=db) reaping a crashed worker's job
+        # must not take it: back to 'dispatching', for the relay to re-send.
+        job = self._insert(db)
+        db.mark_published([job])
+        db.claim_job_by_id(job)
+        db._execute("UPDATE jobs SET heartbeat_at = now() - interval '1 hour' WHERE id = %s;", (job,))
+        monkeypatch.setenv("TWAIN_DISPATCH", "db")
+        db.reap_stale_jobs(lease_seconds=60, max_attempts=5)
+        assert db.job_status(job) == "dispatching"
+        assert db.unpublished_jobs(0) and db.unpublished_jobs(0)[0][0] == job
+        # ...while its own jobs still go back to 'queued'.
+        own = self._insert(db, status="queued", session="s-own")
+        db.claim_job()
+        db._execute("UPDATE jobs SET heartbeat_at = now() - interval '1 hour' WHERE id = %s;", (own,))
+        db.reap_stale_jobs(lease_seconds=60, max_attempts=5)
+        assert db.job_status(own) == "queued"
+
     def test_cluster_job_store(self, db):
         db.record_submitted("s1", 1, "501", "runs/s1/attempt-1", {"job_name": "twain-s1"})
         db.record_submitted("s1", 2, "502", "runs/s1/attempt-2", {})

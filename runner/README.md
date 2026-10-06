@@ -373,6 +373,56 @@ the requirements. A definite "no matching distribution" verdict fails the run
 immediately with a pointer to the env specs — instead of after staging plus a
 queue wait.
 
+### Event-driven worker (P2) -- `twain-runner` on ECS, no process waits on a job
+
+`runner/worker.py` replaces the always-on polling runner. It is stateless and
+scales horizontally; RDS and S3 hold everything a run needs.
+
+* **Dispatch.** With `TWAIN_DISPATCH=sqs` the API inserts each job as
+  `dispatching` (a transactional outbox: the row is the event) and, after the
+  commit, sends its id to the SQS FIFO queue (`MessageGroupId` = run, so one
+  run's jobs stay ordered while runs proceed in parallel). A failed send is
+  re-sent by the relay. The login-node runner claims only `queued` rows, so it
+  never sees these jobs.
+* **Workers** long-poll the queue, claim the job by id (a duplicate message is a
+  no-op), and drive it with the same `process_job` as before, keeping the
+  message invisible and the job's lease fresh while it runs. Retries and
+  reaped jobs go back to `dispatching` -- decided by the job row, whichever
+  runner reaps it.
+* **Detached EXECUTE.** EXECUTE submits through the RIS API (with S3 staging),
+  records the Slurm job in `cluster_jobs`, and **pauses the run** -- the same
+  pause an approval uses. Nothing holds a process for the job's life.
+* **The cluster monitor** (one active across all workers, via a Postgres
+  advisory lock) polls every open cluster job -- woken at once by ris-api
+  webhooks -- publishes queue -> running -> finished progress and the stdout
+  tail to the chat, and enqueues the run's `resume` when the job finishes. The
+  resume collects the outputs from S3, on whichever worker takes it. It also
+  relays unsent outbox rows and reaps jobs held by dead workers.
+* **Terminate** queues a resume too: a paused run wakes, cancels its Slurm job
+  through the RIS API, and settles.
+
+**Activation (once)** -- safe by default; nothing changes until step 5:
+
+1. `terraform -chdir=terraform apply` -- the job queue + dead-letter queue, the
+   worker's task role, the API's send permission, the log group, and the
+   `twain-runner` ECS service (in the API's subnets/security group).
+2. Set the repo variable `TWAIN_ENV_FILE` to the path of your `twain.sh` on RIS
+   storage (`gh variable set TWAIN_ENV_FILE --body /storage2/.../twain.sh`), and
+   make sure `$TWAIN_DIR` in it is a current checkout (`git -C "$TWAIN_DIR" pull`).
+3. Merge -- `ci-runner.yml` builds the worker image (without the `sim` stack:
+   calculations and smoke tests run on RIS) and deploys it to the service.
+4. Check the worker's log (`/ecs/twain-runner`): `worker up: 2 consumers` and
+   `[monitor] leading: watching cluster jobs`.
+5. `gh variable set TWAIN_DISPATCH --body sqs`, then re-run **API Server - Build &
+   Deploy** (workflow_dispatch). From then on every new job goes to SQS.
+6. Ask RIS to stop the login-node runner (`junbo.y`'s tmux session `twain-runner`
+   on c2-login-001); after step 5 it only ever sees `queued` jobs, of which there
+   are no new ones.
+
+**Rollback:** `gh variable set TWAIN_DISPATCH --body db` and redeploy the API --
+new jobs go back to `queued` for the polling runner. Runs already paused on a
+Slurm job still need the worker to resume them.
+
 ### S3 staging (`TWAIN_STAGING=s3`) -- no SSH, no VPN, nothing on a login node
 
 With `TWAIN_STAGING=s3` (RIS API backend only), a run's files go through the
