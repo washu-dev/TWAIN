@@ -651,7 +651,8 @@ class StateMachine:
                  script_doctor=None, library_available=None, sim_available=None,
                  library_request_tracker=None, auto_approve=False,
                  execute_slurm: bool = False, slurm_cluster: str = None,
-                 should_abort=None, job_event_wait=None, issue_job_ticket=None):
+                 should_abort=None, job_event_wait=None, issue_job_ticket=None,
+                 cluster_jobs=None):
         # Collaborators are injected and optional, so the machine is usable
         # offline and under test. ``agent`` is either a callable prompt->text or
         # an AgentInterface-like object (.call_agent). It is NOT constructed
@@ -702,6 +703,11 @@ class StateMachine:
         # S3 staging seam (TWAIN_STAGING=s3, #170): ``(run_id, attempt, prefix,
         # ttl) -> token`` issuing the ticket a Slurm job trades for presigned URLs.
         self.issue_job_ticket = issue_job_ticket
+        # Detached EXECUTE (P2, #171): the store of Slurm jobs a run is paused
+        # on, plus ``suspend_for(reason)`` -- set by the orchestrator, raising its
+        # pause signal -- so EXECUTE submits and pauses instead of waiting.
+        self.cluster_jobs = cluster_jobs
+        self.suspend_for = None
         # Activity seam: ``(event_type, payload)`` publisher the orchestrator
         # sets so stages can report what they're doing (``stage.progress``,
         # ``job.log``) instead of leaving the UI on "Working…". None => silent.
@@ -2604,8 +2610,14 @@ class StateMachine:
         # seen; this catches the ones we haven't -- the run's own error is the
         # ground truth, whatever the mistake was.
         attempts = 1 + self._runtime_repair_budget()
-        for attempt in range(1, attempts + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             result = adapter.execute(bundle_dir, **run_kwargs)
+            # A detached run (P2) pauses between attempts and re-enters here on
+            # every resume, so a local counter would restart at 1 and the repair
+            # budget would never run out: trust the attempt the job was.
+            attempt = int((getattr(result, "install_log", None) or {}).get("attempt") or attempt)
             if result.succeeded or attempt >= attempts:
                 break
             failure = _runtime_traceback(result)
@@ -2806,6 +2818,9 @@ class StateMachine:
             # Live EXECUTE checklist + job log for the UI.
             on_progress=self._publish_progress,
             issue_job_ticket=self.issue_job_ticket,
+            # Pause on the cluster job instead of waiting (needs both seams).
+            cluster_jobs=self.cluster_jobs if self.suspend_for else None,
+            suspend=self.suspend_for if self.cluster_jobs is not None else None,
         )
 
     # Extra polling headroom on top of the job's wall time: covers time spent

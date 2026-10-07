@@ -10,6 +10,7 @@ import json
 
 from psycopg2.extras import RealDictCursor
 
+import dispatch
 from database import get_connection
 
 # Conversation lifecycle statuses the UI understands.
@@ -72,11 +73,15 @@ def create_conversation(
         if max_cost is not None:
             params["max_cost"] = max_cost
         cursor.execute(
-            "INSERT INTO jobs (session_id, kind, params) VALUES (%s, 'start', %s);",
-            (session_id, json.dumps(params)),
+            "INSERT INTO jobs (session_id, kind, params, status) VALUES (%s, 'start', %s, %s) "
+            "RETURNING id;",
+            (session_id, json.dumps(params), dispatch.initial_status()),
         )
+        job_id = cursor.fetchone()["id"]
         conn.commit()
         cursor.close()
+        # After the commit: a worker must never receive a job it can't see yet.
+        dispatch.publish(conn, [(job_id, session_id, "start")])
         return conversation
     except Exception as e:
         conn.rollback()
@@ -90,7 +95,7 @@ def _default_title(request: str) -> str:
     return request[:60] + ("…" if len(request) > 60 else "")
 
 
-def _enqueue_resume(cursor, session_id: str) -> None:
+def _enqueue_resume(cursor, session_id: str) -> list:
     """Queue a ``resume`` job so a runner continues the paused run.
 
     This is how a user reply / approval *wakes* a run in the async model: the run
@@ -98,19 +103,29 @@ def _enqueue_resume(cursor, session_id: str) -> None:
     reply doesn't pile up duplicate work — at most one queued resume per session
     (the runner also serializes per session, and a duplicate resume is a safe
     no-op). Runs in the caller's transaction; the jobs-insert trigger NOTIFYs the
-    runner (migration 003).
+    runner (migration 003). Returns ``[(job_id, session_id, "resume")]`` for the
+    caller to hand to :func:`dispatch.publish` after it commits (``[]`` if a
+    resume was already waiting).
     """
     cursor.execute(
         """
-        INSERT INTO jobs (session_id, kind, params)
-        SELECT %s, 'resume', '{}'::jsonb
+        INSERT INTO jobs (session_id, kind, params, status)
+        SELECT %s, 'resume', '{}'::jsonb, %s
         WHERE NOT EXISTS (
             SELECT 1 FROM jobs
-            WHERE session_id = %s AND kind = 'resume' AND status = 'queued'
-        );
+            WHERE session_id = %s AND kind = 'resume' AND status = ANY(%s)
+        )
+        RETURNING id;
         """,
-        (session_id, session_id),
+        (session_id, dispatch.initial_status(), session_id, list(dispatch.pending_statuses())),
     )
+    row = cursor.fetchone()
+    return [(_row_id(row), session_id, "resume")] if row else []
+
+
+def _row_id(row):
+    """A RETURNING id from either a dict cursor or a tuple cursor."""
+    return row["id"] if isinstance(row, dict) else row[0]
 
 
 def get_conversation(conversation_id: str, user_id: str) -> dict | None:
@@ -258,9 +273,10 @@ def add_message(conversation_id: str, content: str, *, kind: str = "chat") -> di
             (conversation_id,),
         )
         # Wake the paused run so it consumes this reply (e.g. a clarification answer).
-        _enqueue_resume(cursor, conversation_id)
+        woken = _enqueue_resume(cursor, conversation_id)
         conn.commit()
         cursor.close()
+        dispatch.publish(conn, woken)
         return row
     except Exception as e:
         conn.rollback()
@@ -312,9 +328,10 @@ def add_approval_response(
             (conversation_id,),
         )
         # Wake the run parked at the approval gate to act on the decision.
-        _enqueue_resume(cursor, conversation_id)
+        woken = _enqueue_resume(cursor, conversation_id)
         conn.commit()
         cursor.close()
+        dispatch.publish(conn, woken)
         return row
     except Exception as e:
         conn.rollback()
@@ -329,6 +346,11 @@ def request_termination(conversation_id: str) -> dict:
     Inserts a 'terminate' control message (the runner polls for it between
     stages and blocking waits) and flips the status to 'cancelling' so the UI
     shows immediate feedback. The runner settles the final 'cancelled' status.
+
+    Also queues a ``resume``: a run paused on a Slurm job (P2) or on the
+    researcher has no process to notice the request, so a worker must wake to
+    cancel the cluster job and settle the run. A run that is mid-slice finishes
+    its slice first (jobs are serialized per run) and the resume is a no-op.
     """
     conn = get_connection()
     try:
@@ -346,8 +368,10 @@ def request_termination(conversation_id: str) -> dict:
             "UPDATE conversations SET status = 'cancelling', updated_at = now() WHERE id = %s;",
             (conversation_id,),
         )
+        woken = _enqueue_resume(cursor, conversation_id)
         conn.commit()
         cursor.close()
+        dispatch.publish(conn, woken)
         return row
     except Exception as e:
         conn.rollback()
@@ -509,11 +533,14 @@ def rerun_conversation(
             (conversation_id, marker, target_state),
         )
         cursor.execute(
-            "INSERT INTO jobs (session_id, kind, params) VALUES (%s, 'rerun', %s);",
-            (conversation_id, json.dumps(params)),
+            "INSERT INTO jobs (session_id, kind, params, status) VALUES (%s, 'rerun', %s, %s) "
+            "RETURNING id;",
+            (conversation_id, json.dumps(params), dispatch.initial_status()),
         )
+        job_id = _row_id(cursor.fetchone())
         conn.commit()
         cursor.close()
+        dispatch.publish(conn, [(job_id, conversation_id, "rerun")])
         return conversation
     except ValueError:
         conn.rollback()

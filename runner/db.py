@@ -17,6 +17,8 @@ import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from psycopg2.extras import Json, RealDictCursor
 
+from runner import dispatch
+
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "twaindb")
@@ -48,6 +50,11 @@ def _resolve_db_password() -> str:
             return secret
     except ClientError as e:
         raise Exception(f"Failed to retrieve DB secret: {e}") from e
+
+
+#: Re-queue status for a job row: 'dispatching' if it was ever sent through SQS,
+#: else this process's default (the %s parameter). See reap_stale_jobs.
+_REQUEUE_STATUS_SQL = "CASE WHEN published_at IS NOT NULL THEN 'dispatching' ELSE %s END"
 
 
 class RunnerDB:
@@ -115,6 +122,135 @@ class RunnerDB:
     def mark_job(self, job_id: int, status: str) -> None:
         self._execute("UPDATE jobs SET status = %s WHERE id = %s;", (status, job_id))
 
+    def requeue_job(self, job_id: int) -> None:
+        """Back for another attempt, in the world the job came from (see the reaper)."""
+        self._execute(
+            f"UPDATE jobs SET status = {_REQUEUE_STATUS_SQL}, published_at = NULL WHERE id = %s;",
+            (dispatch.requeue_status(), job_id))
+
+    # ---- SQS dispatch (P2, #171) -----------------------------------------------
+    def claim_job_by_id(self, job_id: int) -> dict | None:
+        """Claim job ``job_id`` from its SQS message, or None if it isn't claimable.
+
+        Idempotent: only a 'dispatching' row is claimed, so a redelivered or
+        duplicate message for a job already claimed, done, or dead-lettered is a
+        no-op (the caller deletes the message). Same per-run guard as
+        :meth:`claim_job`: never while another job of the run is in flight.
+        """
+        conn = self._connect()
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                """
+                UPDATE jobs SET status = 'claimed', claimed_at = now(),
+                                heartbeat_at = now(), attempts = attempts + 1
+                WHERE id = %s AND status = 'dispatching'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jobs active
+                      WHERE active.session_id = jobs.session_id
+                        AND active.status IN ('claimed', 'running'))
+                RETURNING id, session_id, kind, params, attempts;
+                """,
+                (int(job_id),),
+            )
+            job = cursor.fetchone()
+            conn.commit()
+            cursor.close()
+            return job
+        finally:
+            conn.close()
+
+    def job_status(self, job_id: int) -> str | None:
+        row = self._query_one("SELECT status FROM jobs WHERE id = %s;", (int(job_id),))
+        return row["status"] if row else None
+
+    def enqueue_resume(self, session_id: str) -> list:
+        """Queue a resume for ``session_id`` (none if one is already pending).
+
+        Returns ``[(job_id, session_id, "resume")]`` to hand to
+        :func:`runner.dispatch.send`, or ``[]``.
+        """
+        row = self._query_one(
+            """
+            INSERT INTO jobs (session_id, kind, params, status)
+            SELECT %s, 'resume', '{}'::jsonb, %s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM jobs WHERE session_id = %s AND kind = 'resume'
+                  AND status IN ('queued', 'dispatching'))
+            RETURNING id;
+            """,
+            (session_id, dispatch.requeue_status(), session_id),
+            commit=True,
+        )
+        return [(row["id"], session_id, "resume")] if row else []
+
+    def unpublished_jobs(self, grace_seconds: float, limit: int = 50) -> list:
+        """Outbox rows whose SQS send never happened (or was cleared for a re-send)."""
+        rows = self._query_all(
+            """
+            SELECT id, session_id, kind FROM jobs
+            WHERE status = 'dispatching' AND published_at IS NULL
+              AND created_at < now() - make_interval(secs => %s)
+            ORDER BY id LIMIT %s;
+            """,
+            (grace_seconds, limit),
+        )
+        return [(r["id"], r["session_id"], r["kind"]) for r in rows]
+
+    def mark_published(self, job_ids) -> None:
+        if job_ids:
+            self._execute("UPDATE jobs SET published_at = now() WHERE id = ANY(%s);",
+                          (list(job_ids),))
+
+    # ---- cluster jobs: Slurm jobs a run is paused on (P2, #171) ------------------
+    def latest(self, session_id: str) -> dict | None:
+        """The run's newest cluster job (the adapter's detached-mode store API)."""
+        return self._query_one(
+            "SELECT * FROM cluster_jobs WHERE session_id = %s ORDER BY attempt DESC LIMIT 1;",
+            (session_id,))
+
+    def record_submitted(self, session_id: str, attempt: int, ris_job_id: str,
+                         s3_prefix: str, detail: dict) -> None:
+        self._execute(
+            """
+            INSERT INTO cluster_jobs (ris_job_id, session_id, attempt, s3_prefix, detail)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (ris_job_id) DO NOTHING;
+            """,
+            (str(ris_job_id), session_id, int(attempt), s3_prefix, Json(detail or {})))
+
+    def mark(self, ris_job_id: str, status: str) -> None:
+        stamp = {"collected": "collected_at", "finished": "finished_at"}.get(status)
+        self._execute(
+            f"UPDATE cluster_jobs SET status = %s{', ' + stamp + ' = now()' if stamp else ''} "
+            "WHERE ris_job_id = %s;", (status, str(ris_job_id)))
+
+    def open_cluster_jobs(self, min_age_seconds: float, limit: int = 100) -> list:
+        """Submitted jobs not polled in the last ``min_age_seconds`` (oldest first)."""
+        return self._query_all(
+            """
+            SELECT * FROM cluster_jobs
+            WHERE status = 'submitted'
+              AND (last_polled_at IS NULL
+                   OR last_polled_at < now() - make_interval(secs => %s))
+            ORDER BY last_polled_at NULLS FIRST LIMIT %s;
+            """,
+            (min_age_seconds, limit))
+
+    def cluster_job(self, ris_job_id: str) -> dict | None:
+        return self._query_one("SELECT * FROM cluster_jobs WHERE ris_job_id = %s;",
+                               (str(ris_job_id),))
+
+    def update_cluster_poll(self, ris_job_id: str, *, slurm_state: str | None,
+                            node: str | None, reason: str | None, log_offset: int) -> None:
+        self._execute(
+            """
+            UPDATE cluster_jobs SET last_polled_at = now(), slurm_state = %s,
+                   node = %s, reason = %s, log_offset = %s
+            WHERE ris_job_id = %s;
+            """,
+            (slurm_state, node, reason, int(log_offset), str(ris_job_id)))
+
     def heartbeat_job(self, job_id: int) -> None:
         """Refresh a claimed job's lease so the reaper doesn't reclaim a healthy,
         long-running slice (e.g. a multi-hour EXECUTE). A no-op once the job leaves
@@ -155,15 +291,21 @@ class RunnerDB:
                 (lease_seconds, max_attempts),
             )
             dead = cursor.fetchall()
-            # Re-queue the recoverable ones for another attempt.
+            # Re-queue the recoverable ones for another attempt -- in the world
+            # each job came from, whichever runner reaps it: a job that went
+            # through SQS (published_at set) goes back to 'dispatching' with
+            # published_at cleared, so the relay re-sends it. Deciding by this
+            # process's mode instead would let a polling runner reap a crashed
+            # worker's job as 'queued' and drive a run paused on a Slurm job --
+            # with no detached mode, it would submit a duplicate attempt.
             cursor.execute(
-                """
-                UPDATE jobs SET status = 'queued'
+                f"""
+                UPDATE jobs SET status = {_REQUEUE_STATUS_SQL}, published_at = NULL
                 WHERE status IN ('claimed', 'running')
                   AND COALESCE(heartbeat_at, claimed_at) < now() - make_interval(secs => %s)
                   AND attempts < %s;
                 """,
-                (lease_seconds, max_attempts),
+                (dispatch.requeue_status(), lease_seconds, max_attempts),
             )
             conn.commit()
             cursor.close()
@@ -492,12 +634,15 @@ class RunnerDB:
         finally:
             conn.close()
 
-    def _query_one(self, sql: str, params: tuple) -> dict | None:
+    def _query_one(self, sql: str, params: tuple, *, commit: bool = False) -> dict | None:
+        """One row; ``commit=True`` for a write with RETURNING (else it rolls back)."""
         conn = self._connect()
         try:
             cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute(sql, params)
             row = cursor.fetchone()
+            if commit:
+                conn.commit()
             cursor.close()
             return row
         finally:

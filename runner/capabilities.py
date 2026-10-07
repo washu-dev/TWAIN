@@ -288,6 +288,52 @@ def resolve_availability(entries: list[dict] | None = None,
     return rows
 
 
+def resolve_from_specs(entries: list[dict] | None = None) -> list[dict]:
+    """Availability from the declarative env specs, without touching RIS storage.
+
+    For a process that can't see the provisioned envs -- the ECS worker (P2,
+    #171) -- where :func:`resolve_availability`'s import probe would mark
+    everything unavailable. Conservative, to match the probe's meaning: an entry
+    is installed only if ONE env's spec (scripts/ris/envs/<env>.yml) declares
+    every package it needs, i.e. what that env was built to hold. Needs the
+    pipeline modules on sys.path (runner.engine._load()).
+    """
+    from statemachine import _cluster_env_specs, _plan_dependencies
+    entries = registry_entries() if entries is None else entries
+    specs = _cluster_env_specs()
+    rows = []
+    for entry in entries:
+        deps = _plan_dependencies([entry["name"]])
+        # The registry's import path is the truth when the name-based guess
+        # disagrees with it: EMT imports as ase.calculators.emt, so it is ASE's
+        # package, not a package called "emt".
+        top = (entry.get("import_name") or "").split(".")[0]
+        if top and not any(d.import_name.split(".")[0] == top for d in deps):
+            deps = _plan_dependencies([top])
+        wanted = {d.package.lower() for d in deps}
+        env = next((name for name in _search_order({n: n for n in specs}, entry["name"])
+                    if wanted and wanted <= specs.get(name, frozenset())), None)
+        detail = (f"declared by the {env} env spec (scripts/ris/envs/{env}.yml)" if env
+                  else "no single env spec declares its packages" if wanted
+                  else "no import name is known for this entry")
+        rows.append({**entry, "installed": env is not None, "env": env, "detail": detail})
+    return rows
+
+
+def publish_from_specs(db) -> int:
+    """Record spec-based availability (see :func:`resolve_from_specs`). Never raises."""
+    try:
+        rows = resolve_from_specs()
+        if rows:
+            db.replace_library_availability(rows)
+            logger.info("[capabilities] published %s entries from env specs, %s installed",
+                        len(rows), sum(1 for r in rows if r["installed"]))
+        return len(rows)
+    except Exception as exc:  # noqa: BLE001 - a stale list beats a dead worker
+        logger.warning("[capabilities] spec-based publish failed: %s", exc)
+        return 0
+
+
 def publish(db, *, timeout: float = 90.0) -> int:
     """Probe and record availability. Never raises -- this is not worth a run."""
     try:

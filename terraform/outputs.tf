@@ -32,3 +32,13 @@ output "run_bucket_name" {
   description = "S3 bucket for Slurm job file I/O; set as TWAIN_RUN_BUCKET for the API and the runner/worker."
   value       = aws_s3_bucket.run_data.bucket
 }
+
+output "jobs_queue_url" {
+  description = "SQS FIFO job queue; set as TWAIN_JOB_QUEUE_URL for the API and the worker."
+  value       = aws_sqs_queue.jobs.url
+}
+
+output "runner_worker_role_arn" {
+  description = "Task role of the twain-runner worker service."
+  value       = aws_iam_role.runner_worker.arn
+}

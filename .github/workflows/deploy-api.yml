@@ -159,8 +159,13 @@ jobs:
           # to reach production. TWAIN_RUN_BUCKET: the run bucket the job-ticket
           # endpoint signs URLs for (terraform output run_bucket_name, #170);
           # repo variable, falling back to the Terraform default name.
+          # TWAIN_DISPATCH (#171): "db" (default) keeps jobs for the polling
+          # runner; set the repo variable to "sqs" once the twain-runner worker
+          # service is healthy -- that one switch moves every new run to it.
           environment-variables: |
             TWAIN_RUN_BUCKET=${{ vars.TWAIN_RUN_BUCKET || 'twain-run-data-730335203321' }}
+            TWAIN_DISPATCH=${{ vars.TWAIN_DISPATCH || 'db' }}
+            TWAIN_JOB_QUEUE_URL=${{ vars.TWAIN_JOB_QUEUE_URL || 'https://sqs.us-east-1.amazonaws.com/730335203321/twain-jobs.fifo' }}
 
       - name: Deploy to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1

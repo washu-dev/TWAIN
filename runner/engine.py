@@ -100,6 +100,7 @@ class _RealEngine:
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store,
         cancel=None, max_cost=None, job_event_wait=None, issue_job_ticket=None,
+        cluster_jobs=None,
     ):
         # Real execution is env-gated so the SAME image works everywhere: set
         # TWAIN_EXECUTE_LOCALLY=1 (local `docker run -e ...` or the ECS task
@@ -160,6 +161,8 @@ class _RealEngine:
             job_event_wait=job_event_wait,
             # S3 staging (TWAIN_STAGING=s3): per-attempt job tickets (#170).
             issue_job_ticket=issue_job_ticket,
+            # Detached EXECUTE (TWAIN_DISPATCH=sqs worker): pause on the job.
+            cluster_jobs=cluster_jobs,
         )
 
     def current_state_name(self, orch) -> str:

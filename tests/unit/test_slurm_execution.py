@@ -1417,3 +1417,15 @@ class TestScratchStaysOffTheSharedFilesystem:
 def test_elapsed_seconds_reads_both_backends(text, seconds):
     from execution_adapter.slurm_execution_adapter import _elapsed_seconds
     assert _elapsed_seconds(text) == seconds
+
+
+def test_a_failed_ssh_pull_is_reported_not_a_crash(tmp_path):
+    # The message used `exc` after its except block had ended (Python unbinds
+    # it there), so this path raised NameError instead of returning a result.
+    transfer = ScriptedRunner().on(
+        lambda argv: argv[0] == "rsync" and "--exclude=.twain_secrets.env" in argv,
+        CommandResult(23, "", "rsync: connection unexpectedly closed"))
+    adapter = _exec_adapter(tmp_path, _happy_cluster_runner(), transfer)
+    result = adapter.execute(str(_bundle(tmp_path)), run_id="s")
+    assert result.status == ExecutionStatus.FAILED
+    assert "fetching outputs failed" in result.message and "connection unexpectedly closed" in result.message

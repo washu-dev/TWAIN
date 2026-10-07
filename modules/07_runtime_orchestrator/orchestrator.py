@@ -151,6 +151,7 @@ class Orchestrator:
         cancel_check=None,
         job_event_wait=None,
         issue_job_ticket=None,
+        cluster_jobs=None,
     ):
         self.session_id = session_id or uuid.uuid4().hex
         self.event_bus = event_bus              # None => events disabled (no-op)
@@ -252,12 +253,18 @@ class Orchestrator:
             job_event_wait=job_event_wait,
             # S3 staging seam: per-attempt job tickets (#170).
             issue_job_ticket=issue_job_ticket,
+            # Detached EXECUTE store (P2, #171).
+            cluster_jobs=cluster_jobs,
         )
 
         # Let stages report what they're doing between stage events (the UI's
         # live checklist and job log). Set on injected machines too; one that
         # predates the seam just gains an unused attribute.
         self.sm.publish_progress = self._publish_activity
+        # Lets EXECUTE pause on a Slurm job the way an ask pauses on the
+        # researcher -- only when this orchestrator can pause at all.
+        if self._suspend_exc is not None:
+            self.sm.suspend_for = self._suspend_for
 
         if resuming:
             # The session is the orchestrator's record of truth; align the SM to it.
@@ -296,6 +303,10 @@ class Orchestrator:
         self.session.checkpoint()
         if self.store is not None:
             self.store.save_session(self.run_session.to_dict())
+
+    def _suspend_for(self, reason: str):
+        """Raise this run's pause signal (e.g. ``"cluster"``: waiting on Slurm)."""
+        raise self._suspend_exc(reason=reason)
 
     #: Event types a stage may publish through ``StateMachine.publish_progress``.
     _ACTIVITY_EVENTS = ("stage.progress", "job.log")

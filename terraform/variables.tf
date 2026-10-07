@@ -96,3 +96,27 @@ variable "run_data_retention_days" {
   type        = number
   default     = 90
 }
+
+variable "ecs_cluster_name" {
+  description = "ECS cluster the twain-runner worker service runs in."
+  type        = string
+  default     = "twain-cluster"
+}
+
+variable "runner_desired_count" {
+  description = "Worker tasks (each runs TWAIN_WORKER_CONCURRENCY consumers; one cluster monitor leads across all)."
+  type        = number
+  default     = 1
+}
+
+variable "runner_subnet_ids" {
+  description = "Private subnets for the worker -- the same WashU-connected VPC subnets as the API service (twain-washu)."
+  type        = list(string)
+  default     = ["subnet-0739baa680d6ea9c4", "subnet-00383cc5295916607"]
+}
+
+variable "runner_security_group_ids" {
+  description = "Security groups for the worker (the API service's: RDS + outbound HTTPS)."
+  type        = list(string)
+  default     = ["sg-051db36b0ef488dd6"]
+}

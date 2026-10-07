@@ -240,6 +240,8 @@ class SlurmExecutionAdapter:
         api_public_url: Optional[str] = None,
         env_file: Optional[str] = None,
         expected_sha: Optional[str] = None,
+        cluster_jobs=None,
+        suspend=None,
     ):
         """``cluster_runner`` executes commands on the login node -- sbatch/
         squeue/sacct on the ``"ssh"`` backend, or just the preflight probe on
@@ -344,6 +346,20 @@ class SlurmExecutionAdapter:
                                  "twain.sh on RIS storage (see scripts/ris/twain.sh.example)")
             self.expected_sha = expected_sha or os.environ.get("TWAIN_GIT_SHA") or None
 
+        # Detached EXECUTE (P2, #171): submit, record the job in ``cluster_jobs``
+        # and PAUSE the run via ``suspend(reason)`` (which raises) instead of
+        # holding a process for the job's whole life. The cluster monitor
+        # enqueues the run's resume when the job finishes; the resumed execute()
+        # then collects it. Needs S3 staging -- a resumed run may land on a
+        # different worker, which shares nothing with the first but S3.
+        self.cluster_jobs = cluster_jobs
+        self.suspend = suspend
+        if cluster_jobs is not None:
+            if self.s3 is None:
+                raise ValueError("detached execution needs staging='s3'")
+            if suspend is None:
+                raise ValueError("detached execution needs a suspend callable")
+
     # ---------------------------------------------------------------- execute
     def execute(
         self,
@@ -383,10 +399,21 @@ class SlurmExecutionAdapter:
         tool_name = getattr(bundle, "tool_name", None)
         via_s3 = self.s3 is not None
         attempt = None
+        detached = self.cluster_jobs is not None
+        pending = self.cluster_jobs.latest(run_id) if detached else None
+        if pending and pending.get("status") in ("submitted", "finished"):
+            # A resume of a run paused on its Slurm job: collect it if it has
+            # finished, else (a spurious wake-up) pause again.
+            return self._resume_detached(
+                pending, run_id=run_id, local_dir=local_dir, job_name=job_name,
+                tool_name=tool_name, keep_artifacts=keep_artifacts)
         if via_s3:
             # Each execute() of a run is its own attempt with its own S3 prefix
             # and ticket -- a self-heal re-run never reads the last one's files.
-            attempt = self._attempts.get(run_id, 0) + 1
+            # Detached: numbered from the store, so the count survives pauses
+            # and workers (a process-local counter would restart at 1).
+            attempt = ((pending["attempt"] + 1 if pending else 1) if detached
+                       else self._attempts.get(run_id, 0) + 1)
             self._attempts[run_id] = attempt
             remote_dir = f"s3://{self.s3.bucket}/{attempt_prefix(run_id, attempt)}"
         else:
@@ -525,6 +552,13 @@ class SlurmExecutionAdapter:
                       time_limit_minutes=round(float(self.request.max_time)),
                       gpus=self.request.gpu_count or None,
                       portal_url=self._portal_url())
+        if detached:
+            # Record, then release the process: the run pauses here and the
+            # cluster monitor wakes it when the job finishes.
+            self.cluster_jobs.record_submitted(
+                run_id, attempt, job_id, attempt_prefix(run_id, attempt),
+                {"job_name": job_name, "partition": partition})
+            self.suspend("cluster")
         try:
             wait_kwargs = dict(poll_interval=self.poll_interval, max_wait=max_wait,
                                sleep=_abortable_sleep,
@@ -571,6 +605,57 @@ class SlurmExecutionAdapter:
             )
 
         # 4) fetch results + accounting ------------------------------------------
+        return self._collect(
+            job_id=job_id, state=state, run_id=run_id, attempt=attempt,
+            local_dir=local_dir, job_name=job_name, remote_dir=remote_dir,
+            tool_name=tool_name, keep_artifacts=keep_artifacts, activity=activity)
+
+    def _resume_detached(self, pending: dict, *, run_id, local_dir, job_name,
+                         tool_name, keep_artifacts) -> ExecutionResult:
+        """Continue a run paused on Slurm job ``pending`` (a cluster_jobs row)."""
+        job_id, attempt = pending["ris_job_id"], int(pending["attempt"])
+        remote_dir = f"s3://{self.s3.bucket}/{attempt_prefix(run_id, attempt)}"
+        activity = JobActivity(
+            self.on_progress,
+            detail=lambda jid: getattr(self.slurm, "last_detail", {}).get(jid, {}),
+            read_log=self.slurm.stdout_page)
+        if self.should_abort is not None and self.should_abort():
+            try:
+                self.slurm.cancel(job_id)
+                note = f"Slurm job {job_id} was cancelled via the RIS API"
+            except SlurmError as exc:
+                note = (f"cancelling Slurm job {job_id} failed ({exc}) -- cancel it in "
+                        f"the RIS API web app or with `scancel {job_id}` on a login node")
+            self.cluster_jobs.mark(job_id, "cancelled")
+            activity.step("run", "failed", "Stopped at your request", job_id=job_id, note=note)
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED,
+                message=f"run terminated by the researcher; {note}",
+                tool_name=tool_name, command=self._submit_command(remote_dir),
+                artifacts_dir=local_dir if keep_artifacts else None)
+        try:
+            state = self.slurm.poll(job_id)
+        except SlurmError:
+            state = None  # RIS API unreachable: stay paused; the monitor retries
+        if state is None or not state.is_terminal:
+            self.suspend("cluster")
+        activity.finished(job_id, state)
+        result = self._collect(
+            job_id=job_id, state=state, run_id=run_id, attempt=attempt,
+            local_dir=local_dir, job_name=job_name, remote_dir=remote_dir,
+            tool_name=tool_name, keep_artifacts=keep_artifacts, activity=activity)
+        self.cluster_jobs.mark(job_id, "collected")
+        return result
+
+    def _collect(self, *, job_id, state, run_id, attempt, local_dir, job_name,
+                 remote_dir, tool_name, keep_artifacts, activity) -> ExecutionResult:
+        """Fetch a finished job's outputs, logs and accounting, and classify it.
+
+        Shared by the blocking path (right after the wait) and the detached
+        path (when a paused run resumes because its job finished).
+        """
+        via_s3 = self.s3 is not None
+        cluster = self.profile.name
         activity.step("fetch", "active",
                       "Fetching results from S3" if via_s3 else f"Fetching results from {cluster}")
         pull_error = None
@@ -588,7 +673,7 @@ class SlurmExecutionAdapter:
         if pull_error and not via_s3:
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
-                message=f"job finished ({state.value}) but fetching outputs failed: {exc}",
+                message=f"job finished ({state.value}) but fetching outputs failed: {pull_error}",
                 tool_name=tool_name,
                 artifacts_dir=local_dir if keep_artifacts else None,
             )
@@ -626,7 +711,7 @@ class SlurmExecutionAdapter:
             message=message,
             # Job identity + accounting for provenance / the budget tracker.
             install_log={"job_id": job_id, "cluster": self.profile.name,
-                         "remote_dir": remote_dir, **accounting},
+                         "remote_dir": remote_dir, "attempt": attempt, **accounting},
         )
 
     # ---------------------------------------------------------------- helpers

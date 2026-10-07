@@ -4,11 +4,27 @@ on:
   push:
     branches: [master]
     paths:
+      # Everything the worker image contains (runner/Dockerfile COPYs the repo):
+      # with the worker on ECS (#171) a pipeline fix in modules/ must redeploy it.
       - 'runner/**'
+      - 'modules/**'
+      - 'configs/**'
+      - 'schemas/**'
+      - 'twain_paths.py'
+      - 'pixi.toml'
+      - 'pixi.lock'
+      - '.github/workflows/ci-runner.yml'
   pull_request:
     branches: [master]
     paths:
       - 'runner/**'
+      - 'modules/**'
+      - 'configs/**'
+      - 'schemas/**'
+      - 'twain_paths.py'
+      - 'pixi.toml'
+      - 'pixi.lock'
+      - '.github/workflows/ci-runner.yml'
   workflow_dispatch:
 
 env:
@@ -67,10 +83,29 @@ jobs:
   #    `twain-runner` on `twain-cluster`, the Secrets Manager entries referenced
   #    by runner/ecs-task-definition.json, and the AWS_ACCESS_KEY_ID /
   #    AWS_SECRET_ACCESS_KEY repo secrets.
+  # tests/unit covers modules/ -- the pipeline the worker image runs (planning,
+  # the state machine, the Slurm adapter, S3 staging, detached EXECUTE). No
+  # workflow ran it before P2; it needs the real pixi env, not a bare pip one.
+  pipeline-tests:
+    name: Pipeline unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pixi (default environment)
+        uses: prefix-dev/setup-pixi@v0.10.1
+        with:
+          cache: true
+          locked: true
+
+      - name: tests/unit
+        run: pixi run pytest tests/unit -q -p no:cacheprovider
+
   deploy:
     name: Deploy Runner → ECS
     runs-on: ubuntu-latest
-    needs: quality
+    needs: [quality, pipeline-tests]
     if: github.event_name != 'pull_request'
 
     steps:
@@ -120,6 +155,7 @@ jobs:
           # Build context is the repo ROOT (the Dockerfile COPYs modules/, configs/,
           # schemas/, twain_paths.py, …); the Dockerfile lives under runner/.
           docker build -f runner/Dockerfile \
+            --build-arg GIT_SHA=${{ github.sha }} \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
             .
@@ -151,6 +187,12 @@ jobs:
           task-definition: runner/ecs-task-definition.json
           container-name: twain-runner
           image: ${{ steps.build-image.outputs.image }}
+          # twain.sh on RIS storage (owner-managed; scripts/ris/twain.sh.example)
+          # -- set the repo variable TWAIN_ENV_FILE to its path. TWAIN_GIT_SHA lets
+          # jobs check the RIS checkout contains the commit that submitted them.
+          environment-variables: |
+            TWAIN_ENV_FILE=${{ vars.TWAIN_ENV_FILE }}
+            TWAIN_GIT_SHA=${{ github.sha }}
 
       - name: Deploy to ECS
         if: steps.svc.outputs.exists == 'true'

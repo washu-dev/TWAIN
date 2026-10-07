@@ -149,6 +149,10 @@ class FakeDB:
     def mark_job(self, job_id, status):
         self.jobs_done.append((job_id, status))
 
+    def requeue_job(self, job_id):
+        from runner import dispatch
+        self.jobs_done.append((job_id, dispatch.requeue_status()))
+
     def heartbeat_job(self, job_id):
         pass
 
@@ -262,6 +266,7 @@ class FakeEngine:
     def build_orchestrator(
         self, *, session_id, researcher_id, request, ask, sink, store,
         cancel=None, max_cost=None, job_event_wait=None, issue_job_ticket=None,
+        cluster_jobs=None,
     ):
         self.built_with = {
             "session_id": session_id, "researcher_id": researcher_id,
