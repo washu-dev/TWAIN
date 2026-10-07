@@ -47,7 +47,7 @@ data "aws_iam_policy_document" "api_dispatch" {
   }
 }
 
-resource "aws_iam_role_policy" "api_dispatch" {
+resource "aws_iam_role_policy" "api_task_dispatch" {
   name   = "${var.name_prefix}-api-dispatch"
   role   = var.api_task_role_name
   policy = data.aws_iam_policy_document.api_dispatch.json
