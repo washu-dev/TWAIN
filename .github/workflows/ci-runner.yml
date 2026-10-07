@@ -179,6 +179,15 @@ jobs:
             echo "::notice::ECS service '$ECS_SERVICE' not found on '$ECS_CLUSTER' -- image pushed to ECR, service deploy skipped. One-time provisioning: scripts/aws/setup_secrets.sh --apply, then scripts/aws/provision.sh --apply (see runner/README.md)."
           fi
 
+      # The SendGrid key is injected only once email is switched on: a task
+      # definition naming a secret that doesn't exist yet fails every launch.
+      - name: Add the SendGrid secret when email notifications are on
+        if: steps.svc.outputs.exists == 'true' && vars.TWAIN_NOTIFY_BACKEND == 'sendgrid'
+        run: |
+          jq '.containerDefinitions[0].secrets += [{"name": "TWAIN_SENDGRID_API_KEY",
+                "valueFrom": "TWAIN/sendgrid/API_KEY"}]' \
+            runner/ecs-task-definition.json > runner/td.tmp && mv runner/td.tmp runner/ecs-task-definition.json
+
       - name: Render task definition with the new image
         if: steps.svc.outputs.exists == 'true'
         id: task-def
@@ -190,9 +199,15 @@ jobs:
           # twain.sh on RIS storage (owner-managed; scripts/ris/twain.sh.example)
           # -- set the repo variable TWAIN_ENV_FILE to its path. TWAIN_GIT_SHA lets
           # jobs check the RIS checkout contains the commit that submitted them.
+          # Email: TWAIN_NOTIFY_BACKEND (log|sendgrid) + TWAIN_NOTIFY_FROM (a
+          # SendGrid-verified sender); TWAIN_ENV_APPROVERS (comma-separated) may
+          # approve changes to shared RIS environments. All repo variables.
           environment-variables: |
             TWAIN_ENV_FILE=${{ vars.TWAIN_ENV_FILE }}
             TWAIN_GIT_SHA=${{ github.sha }}
+            TWAIN_NOTIFY_BACKEND=${{ vars.TWAIN_NOTIFY_BACKEND || 'log' }}
+            TWAIN_NOTIFY_FROM=${{ vars.TWAIN_NOTIFY_FROM }}
+            TWAIN_ENV_APPROVERS=${{ vars.TWAIN_ENV_APPROVERS || 'arifs@wustl.edu' }}
 
       - name: Deploy to ECS
         if: steps.svc.outputs.exists == 'true'

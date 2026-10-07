@@ -88,6 +88,8 @@ variable "runner_secrets" {
     CLIENT_ID     = "secure_api/CLIENT_ID"
     CLIENT_SECRET = "secure_api/CLIENT_SECRET"
     RIS_API_TOKEN = "ris_api/TOKEN"
+    # Email notifications + shared-environment approvals (TWAIN_NOTIFY_BACKEND=sendgrid).
+    TWAIN_SENDGRID_API_KEY = "sendgrid/API_KEY"
   }
 }
 
