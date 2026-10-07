@@ -68,6 +68,12 @@ variable "tags" {
   default     = {}
 }
 
+variable "api_task_role_name" {
+  description = "The API's ECS task role (the live twain-api task definition's taskRoleArn). Granted SQS send (job dispatch) and the run bucket (signing job URLs)."
+  type        = string
+  default     = "twain-api-ecs-task-role"
+}
+
 variable "ecs_execution_role_name" {
   description = "Existing ECS task execution role that injects the runner's `secrets` (runner/ecs-task-definition.json executionRoleArn). Granted read on var.runner_secrets only. Empty string = don't grant."
   type        = string
