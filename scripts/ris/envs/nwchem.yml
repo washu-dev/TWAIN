@@ -39,6 +39,11 @@ dependencies:
   - spglib
   - rdkit
   - openff-toolkit
+  # openmm: TWAIN plans OpenMM + OpenFF (+ RDKit) for molecular properties, and
+  # this is the one env holding openff-toolkit -- without openmm here every such
+  # job pip-layered it at run time. The pre-2026-10 env had it only by a manual
+  # install (drift); approved by arifs 2026-10-07.
+  - openmm
   - numpy
   - pandas
   - pyyaml
