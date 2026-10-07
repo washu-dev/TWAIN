@@ -54,7 +54,7 @@ def _profile():
         login_nodes=["c2-login-001.ris.wustl.edu"],
         account="compute2-mdan",
         modules=["ris", "slurm"],
-        storage_root="/storage2/fs1/mdan/Active/dtrc2026-workshop",
+        storage_root="/storage2/fs1/mdan/Active/common/projects/twain",
         default_partition="general-cpu",
         partitions=[{"name": "general-cpu", "max_minutes": 21600, "gpus": False}],
     )
@@ -193,7 +193,7 @@ def test_push_creates_remote_dir_and_rsyncs(tmp_path):
     bundle = _bundle(tmp_path)
 
     remote = stager.push(bundle, run_id="sess1")
-    assert remote == ("/storage2/fs1/mdan/Active/dtrc2026-workshop/"
+    assert remote == ("/storage2/fs1/mdan/Active/common/projects/twain/"
                       "twain-runs/sess1")
     mkdir, rsync = runner.calls
     assert mkdir[:2] == ["ssh", "timmy@c2-login-001.ris.wustl.edu"]
@@ -600,7 +600,7 @@ def test_execute_happy_path_stages_submits_and_fetches(tmp_path):
     assert "#SBATCH --cpus-per-task=8" in script
     assert "#SBATCH --mem=16000M" in script
     assert "twain-runs/sess1" in script          # workdir + log land in the run dir
-    remote_script = "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-runs/sess1/job.slurm"
+    remote_script = "/storage2/fs1/mdan/Active/common/projects/twain/twain-runs/sess1/job.slurm"
     assert ["sbatch", remote_script] in cluster.calls
     # staged before submit; pulled after completion
     assert transfer.calls[0][0] in ("ssh", "mkdir")
@@ -634,7 +634,7 @@ def test_mp_api_key_reaches_the_job_via_a_staged_0600_file(tmp_path, monkeypatch
     script = (bundle / "job.slurm").read_text()
     assert "test-mp-key-123" not in script
     assert seen == {"mode": 0o600, "text": "export MP_API_KEY=test-mp-key-123\n"}
-    remote = "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-runs/sess-mp/.twain_secrets.env"
+    remote = "/storage2/fs1/mdan/Active/common/projects/twain/twain-runs/sess-mp/.twain_secrets.env"
     assert f"TWAIN_SECRETS_FILE={remote}" in script
     assert """trap 'rm -f "$TWAIN_SECRETS_FILE"' EXIT""" in script
     assert not (bundle / ".twain_secrets.env").exists()   # local copy removed
@@ -1023,7 +1023,7 @@ def test_build_slurm_adapter_wires_env_candidates_from_profile(machine, tmp_path
     machine.context.artifacts["execution_plan"] = str(path)
 
     adapter = machine._build_slurm_adapter()
-    root = "/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs"
+    root = "/storage2/fs1/mdan/Active/common/projects/twain/twain-envs"
     # default is not offered: it lacks conda-only gpaw, so a pip venv layered
     # on it could never run this plan -- only an env that can is tried (#169).
     assert adapter.env_pythons == [f"{root}/gpaw/bin/python"]

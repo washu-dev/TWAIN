@@ -308,7 +308,7 @@ dependency fails in seconds instead of after a long queue wait.
 **Compiled calculators (GPAW, xtb, DFTB+) can't be pip-installed by the job**
 — GPAW needs libxc headers, xtb-python isn't on PyPI at all. For those,
 shared environments live under the profile's `envs_root`
-(`/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs` on compute2); the
+(`/storage2/fs1/mdan/Active/common/projects/twain/twain-envs` on compute2); the
 job automatically prefers `<envs_root>/<calculator>/bin/python` (then
 `<envs_root>/<tool>/`, then `<envs_root>/default/`) over building a venv —
 selecting the first env that passes the bundle's smoke test, so an env that
@@ -323,7 +323,7 @@ script installs it if missing:
 
 ```bash
 ssh <wustl-key>@c2-login-001.ris.wustl.edu
-cd /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend
+cd /storage2/fs1/mdan/Active/common/projects/twain/TWAIN
 bash scripts/ris/provision_envs.sh           # all specs
 bash scripts/ris/provision_envs.sh default   # just one env
 ```
@@ -359,7 +359,7 @@ ABSOLUTE path, a relative mpirun path breaks OpenMPI's prefix
 auto-detection):
 
 ```bash
-ROOT=/storage2/fs1/mdan/Active/dtrc2026-workshop
+ROOT=/storage2/fs1/mdan/Active/common/projects/twain
 "$ROOT/twain-envs/gpaw/bin/python" \
   -c "import gpaw, ase, pymatgen, spglib; print(gpaw.__version__)"
 OPAL_PREFIX="$ROOT/twain-envs/gpaw" \
@@ -460,7 +460,7 @@ account that owns the runner** (its tmux session, cron, and deploy dir):
 ```bash
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/twain_deploy -C "twain-ris-runner"   # private key stays in ~/.ssh
 # GitHub -> washu-dev/TWAIN -> Settings -> Deploy keys -> Add: paste ~/.ssh/twain_deploy.pub, read-only
-cd /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend
+cd /storage2/fs1/mdan/Active/common/projects/twain/TWAIN
 echo "TWAIN_DEPLOY_KEY=$HOME/.ssh/twain_deploy" >> .env                    # .env is untracked
 bash scripts/ris/auto_update.sh && git log -1 --format='%h %s'             # now on current master
 cat auto-update.status 2>/dev/null || echo "auto-update healthy"
@@ -508,7 +508,7 @@ Then start the runner in a tmux session on the login node:
 ```bash
 ssh <your-wustl-key>@c2-login-001.ris.wustl.edu
 tmux new -s twain-runner
-bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/start_runner.sh
+bash /storage2/fs1/mdan/Active/common/projects/twain/TWAIN/scripts/ris/start_runner.sh
 ```
 
 Detach with `Ctrl-B d`; the runner keeps running and auto-restarts on crashes.
@@ -526,7 +526,7 @@ queue drains. Make it automatic with a one-time cron install on the login
 node:
 
 ```bash
-bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/scale_runners.sh --install-cron
+bash /storage2/fs1/mdan/Active/common/projects/twain/TWAIN/scripts/ris/scale_runners.sh --install-cron
 ```
 
 Cron fires it every minute: an idle check costs ~2 seconds and logs nothing;
@@ -555,7 +555,7 @@ and retried on the next cycle, so a run is never interrupted.
 One-time install on the login node:
 
 ```bash
-bash /storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend/scripts/ris/auto_update.sh --install-cron
+bash /storage2/fs1/mdan/Active/common/projects/twain/TWAIN/scripts/ris/auto_update.sh --install-cron
 ```
 
 On its first real run the script converts the rsync-deployed dir into a git

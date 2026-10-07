@@ -14,7 +14,7 @@
 set -euo pipefail
 
 RIS_HOST="${RIS_HOST:-c2-login-001.ris.wustl.edu}"
-RIS_DIR="${RIS_DIR:-/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend}"
+RIS_DIR="${RIS_DIR:-${CODE_DIR:-/storage2/fs1/mdan/Active/common/projects/twain/TWAIN}}"
 TARGET="${RIS_USER:+$RIS_USER@}$RIS_HOST"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

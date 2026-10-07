@@ -20,7 +20,7 @@
 # Logs to auto-update.log next to the deploy dir's runner-ris.log.
 set -euo pipefail
 
-RIS_DIR="${RIS_DIR:-/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend}"
+RIS_DIR="${RIS_DIR:-${CODE_DIR:-/storage2/fs1/mdan/Active/common/projects/twain/TWAIN}}"
 # Per-deploy overrides (TWAIN_DEPLOY_KEY, REPO_URL, ...) live in the untracked .env.
 if [ -f "$RIS_DIR/.env" ]; then
   # shellcheck disable=SC1091

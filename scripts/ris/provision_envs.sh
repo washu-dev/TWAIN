@@ -15,8 +15,8 @@
 #   TWAIN_TEAM_ROOT  team storage root (default: the compute2 profile's root)
 set -euo pipefail
 
-TEAM_ROOT="${TWAIN_TEAM_ROOT:-/storage2/fs1/mdan/Active/dtrc2026-workshop}"
-ENVS_ROOT="$TEAM_ROOT/twain-envs"
+TEAM_ROOT="${TWAIN_TEAM_ROOT:-${TWAIN_HOME:-/storage2/fs1/mdan/Active/common/projects/twain}}"
+ENVS_ROOT="${TWAIN_ENVS_ROOT:-$TEAM_ROOT/twain-envs}"
 DATA_ROOT="${TWAIN_DATA_ROOT:-$TEAM_ROOT/twain-data}"
 MAMBA="$TEAM_ROOT/bin/micromamba"
 SPECS_DIR="$(cd "$(dirname "$0")/envs" && pwd)"
