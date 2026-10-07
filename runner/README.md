@@ -335,6 +335,54 @@ queueing), **edit the spec, commit, and rerun the script**. Never
 `twain-envs/default` silently lost rdkit, and hand edits also race against
 teammates' running jobs.
 
+#### Rebuilding a shared env: build beside, verify, promote
+
+Every simulation uses these envs, so a rebuild never touches the live one.
+`scripts/ris/rebuild_envs.sh` builds a new **version** beside it, verifies it,
+and then re-points the env's name at it:
+
+```
+$TWAIN_ENVS_ROOT/
+  .versions/<version>/<env>        real conda prefixes (built at their final path)
+  <env> -> .versions/<version>/<env>   what jobs run ($TWAIN_ENVS_ROOT/<env>/bin/python)
+  .retired-<stamp>/<env>           what <env> was before the promote
+```
+
+```bash
+. /storage2/fs1/mdan/Active/common/projects/twain/TWAIN/twain.sh
+S="$CODE_DIR/scripts/ris/rebuild_envs.sh"
+bash "$S" build   2026-10-07 nwchem   # one env per Slurm job on general-short (30 min cap)
+bash "$S" verify  2026-10-07 nwchem   # imports, engine binary, no foreign prefixes, ACLs
+bash "$S" promote 2026-10-07 nwchem   # verify again, then nwchem -> .versions/2026-10-07/nwchem
+bash "$S" rollback nwchem 2026-09-01  # re-point at an older version
+bash "$S" status
+```
+
+- **Versions are built at their final path.** Conda environments hard-code
+  their location: shebangs, `activate.d` hooks, `conda-meta`. A copied or
+  moved env keeps running code from wherever it came from. That's why
+  versions live under `.versions/` and only the symlink moves. **Never `cp`
+  an env into place.** The 2026-10-07 copy from the old `dtrc2026-workshop`
+  tree left 31–68 files per env pointing back at it.
+- **Verification** checks that the expected imports and engine binary
+  work, that no file in `bin/` or `etc/` names another env's prefix, that
+  `conda-meta/history` starts with the version's own build, and the ACLs.
+- **storage2 is NFSv4: mode bits lie and `umask` is ignored.** New files
+  show as `rwxrwxrwx`, and what decides access is the ACL (`nfs4_getfacl`).
+  The script runs `chmod -R go-w` on each build and fails verification if
+  any entry lets `EVERYONE@` or `domain users` (gid 1000070) write. The
+  mdan lab's storage groups (`storage2-mdan-common-rw`, `storage2-mdan-rw`)
+  keep write access through inheritance; that's the trust boundary.
+- **Running it through the RIS API, as TWAIN did on 2026-10-07:** submit one
+  job per env (`general-short`, `compute2-mdan`, 4 CPUs, 16 GB, 30 min)
+  whose script sources `twain.sh` and runs `rebuild_envs.sh build <version>
+  <env>`, followed by one short job for `promote`. Builds take 4–16 minutes
+  each. The package cache (`$TWAIN_HOME/.micromamba`, about 6.5 GB) makes
+  later builds faster.
+- A shared-env change is an **approved** change: edit the spec, get
+  sign-off from `TWAIN_ENV_APPROVERS`, commit, and then rebuild. #187
+  automates the proposal and approval.
+
 **The specs also gate planning.** Under `TWAIN_EXECUTE_SLURM`, discovery
 only plans around a library whose packages the cluster can actually get:
 declared by a spec in `scripts/ris/envs/`, or genuinely installable from
