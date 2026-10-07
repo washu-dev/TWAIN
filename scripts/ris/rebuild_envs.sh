@@ -78,6 +78,9 @@ build() {
     MAMBA_ROOT_PREFIX="$root" MAMBA_PKGS_DIRS="$root/pkgs" CONDA_PKGS_DIRS="$root/pkgs" \
       TWAIN_ENVS_ROOT="$E/.versions/$version" bash "$HERE/provision_envs.sh" "$name" || return 1
     chmod -R go-w "$p"
+    # The directories above a version matter as much as the version: whoever can
+    # write .versions/ can swap a version out from under its symlink.
+    chmod go-w "$E" "$E/.versions" "$E/.versions/$version"
   done
 }
 
@@ -108,7 +111,8 @@ verify_one() {  # <version> <env>; prints [verify] lines, returns non-zero on an
   # storage2 is NFSv4: mode bits lie, the ACL decides. Nothing may let EVERYONE@
   # or domain users (gid 1000070) write.
   if command -v nfs4_getfacl >/dev/null; then
-    broad=$(for f in "$p" "$p/bin" "$p/bin/python" $(find "$p" -type f | shuf -n 300); do
+    broad=$(for f in "$E" "$E/.versions" "$E/.versions/$version" "$p" "$p/bin" "$p/bin/python" \
+                     $(find "$p" -type f | shuf -n 300); do
       nfs4_getfacl "$f" 2>/dev/null | grep -qE '^A:[a-zA-Z]*:(EVERYONE@|1000070):[^:]*[waD][^:]*$' && echo "$f"
     done | head -3)
     [ -z "$broad" ] && echo "[verify] $name no broad write ACEs" || { echo "[verify] $name broad write: $broad"; fail=1; }
