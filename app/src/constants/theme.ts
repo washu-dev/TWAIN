@@ -119,7 +119,10 @@ export const Fonts = Platform.select({
     sans: 'var(--font-display)',
     serif: 'var(--font-serif)',
     rounded: 'var(--font-rounded)',
-    mono: 'var(--font-mono)',
+    // A literal stack, not var(--font-mono): global.css (which defines the
+    // variables) is not imported, so the var resolved to nothing and every job
+    // log / stderr block rendered in the browser's default serif.
+    mono: "ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace",
   },
 });
 

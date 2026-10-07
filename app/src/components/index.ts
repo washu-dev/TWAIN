@@ -6,7 +6,7 @@ export { AmbientBackdrop } from './AmbientBackdrop';
 export { PressableScale, Reveal } from './Motion';
 export { PrimaryButton } from './PrimaryButton';
 export { PlanCard, parsePlanSummary } from './PlanCard';
-export { PIPELINE_STATES, StateStepper } from './StateStepper';
+export { LOOP_STATE_ANCHOR, PIPELINE_STATES, RunTracker, TRACKER_PHASES } from './RunTracker';
 export { MIN_WALL_HOURS, WallTimeField, wallTimeLabel } from './WallTimeField';
 export { WashUShield } from './WashUShield';
 export { MessageModal } from './MessageModal';

@@ -17,11 +17,12 @@ import {
 } from '@/components/PlanCard';
 import { PrimaryButton } from '@/components/PrimaryButton';
 import { ReportIssueModal } from '@/components/ReportIssueModal';
-import { PIPELINE_STATES, StateStepper } from '@/components/StateStepper';
+import { LOOP_STATE_ANCHOR, PIPELINE_STATES, RunTracker } from '@/components/RunTracker';
 import { MIN_WALL_HOURS, WallTimeField, wallTimeLabel } from '@/components/WallTimeField';
 import { useAuth } from '@/hooks/useAuth';
 import { useNow } from '@/hooks/useNow';
 import { useRunActivity } from '@/hooks/useRunActivity';
+import { activeStep } from '@/utils/runActivity';
 import { RunActivity } from '@/components/RunActivity';
 import { FailureCard } from '@/components/FailureCard';
 import {
@@ -38,15 +39,6 @@ const C = Colors.light;
 // modules/16_agent_mesh_control_plane/statemachine.py — keep in sync). The
 // approval card keys off it to offer a one-tap GitHub provisioning request.
 const ENGINE_UNAVAILABLE_PREFIX = 'ENGINE UNAVAILABLE ON THIS DEPLOYMENT: ';
-
-// Where the off-spine loop states sit on the happy path. Without this, a run
-// that ended while looping (e.g. current_state REPAIR) resolved to index -1 and
-// every row of the "Re-run from…" picker was disabled.
-const LOOP_STATE_ANCHOR: Record<string, string> = {
-  REPAIR: 'BUILD',
-  CORRECT: 'VALIDATE',
-  REPLAN: 'VALIDATE',
-};
 
 // Stages a finished run can be restarted from, with plain-language descriptions
 // of what re-running each one redoes. A re-run resets the chosen stage and every
@@ -714,7 +706,14 @@ export const ChatScreen: React.FC = () => {
         </View>
       )}
 
-      {conversation && <StateStepper current={conversation.current_state} status={status} />}
+      {conversation && (
+        <RunTracker
+          state={conversation.current_state}
+          status={status}
+          activity={activeStep(activity, conversation.current_state)?.label}
+          failure={activity.failure?.headline}
+        />
+      )}
 
       <ScrollView ref={scrollRef} style={styles.scroll} contentContainerStyle={styles.scrollContent}>
         {!conversation && (
