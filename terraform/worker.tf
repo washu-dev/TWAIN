@@ -116,6 +116,12 @@ resource "aws_cloudwatch_log_group" "runner" {
   tags              = local.common_tags
 }
 
+# Looked up, not assembled: the role sits under a path, and an ARN without it
+# names no role -- ECS then fails every launch with "unable to assume the role".
+data "aws_iam_role" "ecs_execution" {
+  name = var.ecs_execution_role_name
+}
+
 # Bootstrap revision only: CI (ci-runner.yml) registers every later revision from
 # runner/ecs-task-definition.json, so the service ignores task_definition drift.
 resource "aws_ecs_task_definition" "runner_bootstrap" {
@@ -124,7 +130,7 @@ resource "aws_ecs_task_definition" "runner_bootstrap" {
   network_mode             = "awsvpc"
   cpu                      = jsondecode(file("${path.module}/../runner/ecs-task-definition.json")).cpu
   memory                   = jsondecode(file("${path.module}/../runner/ecs-task-definition.json")).memory
-  execution_role_arn       = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/${var.ecs_execution_role_name}"
+  execution_role_arn       = data.aws_iam_role.ecs_execution.arn # carries the role's path (service-role/)
   task_role_arn            = aws_iam_role.runner_worker.arn
   container_definitions    = jsonencode(jsondecode(file("${path.module}/../runner/ecs-task-definition.json")).containerDefinitions)
   tags                     = local.common_tags
