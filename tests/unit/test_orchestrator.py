@@ -852,6 +852,40 @@ class TestFailureIsDescribed:
         assert line.startswith("The run stopped while running on the cluster (EXECUTE)")
         assert "see the run log" not in line
 
+    def test_a_setup_failure_carries_the_job_stderr_and_a_real_next_step(self):
+        # The live run of 2026-10-07: the node got 403s fetching its bundle.
+        stderr = ("[twain-job] run a7c2 attempt 2 on c2-node-009 in /tmp/twain-a7c2\n"
+                  + "curl: (22) The requested URL returned error: 403\n" * 5
+                  + "[twain-job] TWAIN_BUNDLE_FETCH_FAILED: could not download/unpack the bundle\n")
+        f = error_handler.describe_failure(
+            self._classified(
+                "Stage EXECUTE failed — ConfigError: the generated run did not succeed "
+                "(setup_failed): Slurm job 3351710 could not download its run bundle from S3",
+                hint="Inspect the script and dependencies at /app/logs/sessions/x"),
+            "EXECUTE",
+            {"status": "setup_failed", "stderr": stderr, "install_log": {"job_id": "3351710"}})
+        assert f["job_stderr"].endswith("TWAIN_BUNDLE_FETCH_FAILED: could not download/unpack the bundle")
+        assert "returned error: 403" in f["job_stderr"]
+        assert "/app/logs" not in f["next_step"] and "TWAIN-side access problem" in f["next_step"]
+        assert f["headline"] == "The job could not get set up on the cluster"
+
+    def test_a_stale_checkout_points_at_git_pull(self):
+        f = error_handler.describe_failure(
+            self._classified("Stage EXECUTE failed — ConfigError: the generated run did not "
+                             "succeed (setup_failed): the RIS checkout is older than the code"),
+            "EXECUTE", {"status": "setup_failed", "stderr": "TWAIN_STALE_CHECKOUT: ..."})
+        assert "git pull" in f["next_step"]
+
+    def test_job_stderr_is_a_bounded_tail_and_absent_when_empty(self):
+        lines = "\n".join(f"line {i}" for i in range(500))
+        f = error_handler.describe_failure(
+            self._classified("boom"), "EXECUTE", {"status": "failed", "stderr": lines})
+        assert f["job_stderr"].splitlines()[-1] == "line 499"
+        assert len(f["job_stderr"].splitlines()) == error_handler.JOB_STDERR_LINES
+        assert error_handler.describe_failure(
+            self._classified("boom"), "EXECUTE", {"status": "failed", "stderr": "  "})["job_stderr"] is None
+        assert error_handler.describe_failure(self._classified("boom"), "PLAN")["job_stderr"] is None
+
     def test_a_non_execute_failure_leads_with_its_own_cause(self):
         f = error_handler.describe_failure(
             self._classified("Stage DISCOVER failed — RuntimeError: registry unreachable"),

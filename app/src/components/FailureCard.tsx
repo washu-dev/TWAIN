@@ -6,6 +6,9 @@ import { Colors, Fonts, Radius, Spacing } from '@/constants/theme';
 
 const C = Colors.light;
 
+// Lines of the job's stderr shown before "Show all".
+const STDERR_PREVIEW_LINES = 8;
+
 // The RIS API Portal has a jobs page but no per-job route.
 const RIS_PORTAL_JOBS = 'https://d3n2m687w2hvtj.cloudfront.net/jobs';
 
@@ -20,9 +23,16 @@ interface Props {
  * failure the runner already classified (a `run.error` event's `failure`):
  * the stage, a one-line headline, the cause, the next step, and the full error
  * behind "Show details". Modelled on RETICLE's ETL "Why it stopped" panel.
+ *
+ * A Slurm job's own stderr is shown as it is, open by default: on a cluster
+ * setup failure it is the only thing that says what actually broke (a 403, a
+ * stale checkout), and making the submitter dig for it is the black box again.
  */
 export function FailureCard({ failure }: Props) {
   const [open, setOpen] = useState(false);
+  const [stderrOpen, setStderrOpen] = useState(false);
+  const stderrLines = failure.job_stderr ? failure.job_stderr.split('\n') : [];
+  const stderrHidden = stderrOpen ? 0 : Math.max(0, stderrLines.length - STDERR_PREVIEW_LINES);
   return (
     <View style={styles.card} accessibilityRole="alert">
       <Text style={styles.kicker}>
@@ -35,6 +45,28 @@ export function FailureCard({ failure }: Props) {
         <View style={styles.next}>
           <Text style={styles.nextLabel}>What to do next</Text>
           <Text style={styles.nextText}>{failure.next_step}</Text>
+        </View>
+      ) : null}
+
+      {stderrLines.length ? (
+        <View style={styles.next}>
+          <Text style={styles.nextLabel}>
+            {failure.job_id ? `Job output (stderr) · Slurm job ${failure.job_id}` : 'Job output (stderr)'}
+          </Text>
+          <Text style={styles.detail} selectable accessibilityLabel="The job's error output">
+            {stderrLines.slice(stderrHidden).join('\n')}
+          </Text>
+          {stderrLines.length > STDERR_PREVIEW_LINES ? (
+            <Pressable
+              onPress={() => setStderrOpen((o) => !o)}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: stderrOpen }}
+            >
+              <Text style={styles.link}>
+                {stderrOpen ? 'Show the last lines only' : `Show all ${stderrLines.length} lines`}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
 

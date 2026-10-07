@@ -268,7 +268,7 @@ def notify_researcher(
 #: Plain-language headline per EXECUTE outcome (ExecutionStatus values).
 _EXECUTION_HEADLINES = {
     "dependency_error": "The cluster has no environment that can run this plan",
-    "setup_failed": "The job could not be staged or submitted to the cluster",
+    "setup_failed": "The job could not get set up on the cluster",
     "timeout": "The job ran out of time",
     "failed": "The calculation crashed on the cluster",
 }
@@ -284,6 +284,26 @@ STAGE_LABELS = {
 
 #: Detail kept for the failure card (the tail: errors print last).
 FAILURE_DETAIL_CHARS = 4000
+#: The tail of a failed Slurm job's stderr carried on the failure card.
+JOB_STDERR_LINES = 40
+JOB_STDERR_CHARS = 4000
+
+#: What to do about a setup failure, by a marker in its message. The job's own
+#: stderr (on the card) says exactly what broke; these say whose move it is.
+_SETUP_NEXT_STEPS = (
+    ("RIS checkout is older",
+     ("Update TWAIN's checkout on RIS -- the job's stderr below has the exact "
+      "`git pull` command -- then re-run from EXECUTE.")),
+    ("RIS configuration",
+     ("Fix twain.sh on RIS as the job's stderr below describes (it must be "
+      "readable by the job's account and export CODE_DIR), then re-run from EXECUTE.")),
+    ("could not download its run bundle",
+     ("The compute node could not fetch this run's files from TWAIN's storage. "
+      "That is a TWAIN-side access problem, not your script: use Report to flag "
+      "it, and re-run from EXECUTE once it is fixed.")),
+)
+_SETUP_NEXT_STEP_DEFAULT = ("This is a cluster setup problem, not your script -- "
+                            "the job's stderr below says what failed.")
 
 _PREFIX = re.compile(r"^Stage \w+ failed\s*[—-]\s*(?:\w+Error|\w+Exception|\w+):\s*")
 _RUN_PREFIX = re.compile(r"^the generated run did not succeed \((\w+)\):\s*")
@@ -316,18 +336,34 @@ def describe_failure(classified: "ClassifiedError", state: str,
         or "The run stopped unexpectedly"
     install_log = (execution_result or {}).get("install_log") or {}
     detail = body if len(body) <= FAILURE_DETAIL_CHARS else "…" + body[-FAILURE_DETAIL_CHARS:]
+    next_step = classified.hint or classified.fallback
+    if outcome == "setup_failed":
+        # The generic EXECUTE hint ("inspect the script at <container path>")
+        # is wrong here: the script never ran.
+        next_step = next((step for marker, step in _SETUP_NEXT_STEPS if marker in body),
+                         _SETUP_NEXT_STEP_DEFAULT)
     return {
         "stage": state,
         "stage_label": STAGE_LABELS.get(state, state.title()),
         "headline": headline,
         "cause": cause if cause and cause.lower() != headline.lower() else None,
         "detail": detail,
-        "next_step": classified.hint or classified.fallback,
+        "next_step": next_step,
         "category": classified.category.value,
         "recoverable": classified.recoverable,
         "outcome": outcome,
         "job_id": install_log.get("job_id"),
+        "job_stderr": _stderr_tail((execution_result or {}).get("stderr")),
     }
+
+
+def _stderr_tail(stderr) -> Optional[str]:
+    """The last lines of a job's stderr -- where the wrapper and tracebacks say why."""
+    text = (stderr or "").strip() if isinstance(stderr, str) else ""
+    if not text:
+        return None
+    tail = "\n".join(text.splitlines()[-JOB_STDERR_LINES:])
+    return tail if len(tail) <= JOB_STDERR_CHARS else "…" + tail[-JOB_STDERR_CHARS:]
 
 
 def failure_message(failure: dict) -> str:

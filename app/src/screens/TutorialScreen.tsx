@@ -12,7 +12,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import {
-  AmbientBackdrop, Footer, Header, PlanCard, PressableScale, Reveal, StateStepper,
+  AmbientBackdrop, Footer, Header, PlanCard, PressableScale, Reveal, RunTracker,
   WallTimeField, wallTimeLabel,
 } from '@/components';
 import { APP_STRINGS, Colors, Elevation, Gradients, Radius, Spacing } from '@/constants/theme';
@@ -97,8 +97,9 @@ export const TutorialScreen: React.FC = () => {
         'You describe a calculation in plain English. TWAIN turns that into a '
         + 'plan, writes the code, runs it on the WashU RIS cluster, reads the '
         + 'output back, and checks the answer against the literature. Every run '
-        + 'walks the same eleven stages, and the strip below shows which one it '
-        + 'is in.',
+        + 'walks the same eleven stages. The tracker at the top of a run groups '
+        + 'them into five phases (Plan, Build, Run on RIS, Check, Results) and '
+        + 'says in one line what is happening right now.',
         'INTAKE reads your request. CLARIFY asks you about anything ambiguous. '
         + 'DECOMPOSE breaks the goal into steps. DISCOVER picks candidate tools. '
         + 'PLAN commits to a method, a system and a resource request — and stops '
@@ -107,13 +108,14 @@ export const TutorialScreen: React.FC = () => {
         + 'compares them to references. ACCEPT and TERMINATE close the run.',
         'Three more stages exist off this line: REPAIR fixes a generated script '
         + 'before it runs, and CORRECT and REPLAN handle a result that did not '
-        + 'validate. They are loops, not steps, which is why the strip does not '
-        + 'show them.',
+        + 'validate. They are loops, not steps: the tracker keeps showing the '
+        + 'phase they belong to (REPAIR is part of Build), and the exact stage '
+        + 'name sits at the end of its status line.',
       ],
-      visual: <StateStepper current="EXECUTE" />,
+      visual: <RunTracker state="EXECUTE" activity="Running on c2-node-009" />,
       visualCaption:
-        'The stage strip, showing a run part-way through EXECUTE: finished stages '
-        + 'green, the current one red.',
+        'The run tracker, part-way through EXECUTE: finished phases green, the '
+        + 'current one pulsing red.',
     },
     {
       id: 'starting',
@@ -230,7 +232,7 @@ export const TutorialScreen: React.FC = () => {
       ],
       visual: (
         <View style={styles.demoBox}>
-          <StateStepper current="EXECUTE" />
+          <RunTracker state="EXECUTE" activity="Running on c2-node-009" />
           <View style={styles.workingRow}>
             <ActivityIndicator color={C.washuRed} />
             <Text style={styles.workingText}>Working…</Text>

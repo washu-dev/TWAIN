@@ -69,6 +69,8 @@ export interface RunFailure {
   recoverable?: boolean;
   outcome?: string | null;
   job_id?: string | null;
+  /** The tail of the Slurm job's stderr, where the job says why it stopped. */
+  job_stderr?: string | null;
 }
 
 export type ActivityEvent =
