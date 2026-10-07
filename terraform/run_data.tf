@@ -96,7 +96,7 @@ data "aws_iam_policy_document" "api_run_data" {
   }
 }
 
-resource "aws_iam_role_policy" "api_run_data" {
+resource "aws_iam_role_policy" "api_task_run_data" {
   name   = "${var.name_prefix}-api-run-data"
   role   = var.api_task_role_name
   policy = data.aws_iam_policy_document.api_run_data.json
