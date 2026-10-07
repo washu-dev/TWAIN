@@ -10,17 +10,17 @@
 # whoever can edit it can run code as you and read what it exports.
 #
 # How a job uses it (modules/08_execution_adapter/slurm_execution_adapter.py,
-# _s3_job_script): source this file -> check $TWAIN_DIR contains the commit that
-# submitted the job (else exit 4, "git -C $TWAIN_DIR pull") -> exec
-# $TWAIN_DIR/scripts/ris/job_wrapper.sh, which fetches the bundle from S3 with
+# _s3_job_script): source this file -> check $CODE_DIR contains the commit that
+# submitted the job (else exit 4, "git -C $CODE_DIR pull") -> exec
+# $CODE_DIR/scripts/ris/job_wrapper.sh, which fetches the bundle from S3 with
 # the job's ticket, runs it in $TWAIN_SCRATCH, and uploads the outputs.
 
 # ── Required ──────────────────────────────────────────────────────────────────
 # Your TWAIN area on RIS storage.
 export TWAIN_HOME="/storage2/fs1/mdan/Active/dtrc2026-workshop/twain"
 # A checkout of github.com/washu-dev/TWAIN (master). Jobs run
-# scripts/ris/job_wrapper.sh from here, so keep it current: `git -C "$TWAIN_DIR" pull`.
-export TWAIN_DIR="$TWAIN_HOME/TWAIN"
+# scripts/ris/job_wrapper.sh from here, so keep it current: `git -C "$CODE_DIR" pull`.
+export CODE_DIR="$TWAIN_HOME/TWAIN"
 
 # ── Optional ──────────────────────────────────────────────────────────────────
 # Pre-provisioned cluster envs (scripts/ris/provision_envs.sh builds them from
