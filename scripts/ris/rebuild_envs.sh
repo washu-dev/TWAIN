@@ -29,7 +29,13 @@ umask 022
 : "${TWAIN_HOME:?source twain.sh first}"
 : "${TWAIN_ENVS_ROOT:?source twain.sh first}"
 export TWAIN_TEAM_ROOT="$TWAIN_HOME"
-export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$TWAIN_HOME/.micromamba}"  # cache off the home quota
+export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$TWAIN_HOME/.micromamba}"  # off the home quota
+# Copy, never hard-link, package files into a shared env. conda hard-links env
+# files to its package cache by default, so ANY later write into an env (a
+# `cp -a` over it, a stray pip) silently rewrites the cache -- and every env
+# built from it afterwards. That poisoned the cache on 2026-10-07: fresh builds
+# came out with files from the old dtrc2026-workshop tree.
+export MAMBA_ALWAYS_COPY=true
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPECS_DIR="$HERE/envs"
 E="$TWAIN_ENVS_ROOT"
@@ -63,8 +69,14 @@ build() {
     local p="$E/.versions/$version/$name"
     if [ -e "$p" ]; then echo "[build] $p exists -- versions are never overwritten"; return 5; fi
     mkdir -p "$E/.versions/$version"
-    echo "[build] $name -> $p"
-    TWAIN_ENVS_ROOT="$E/.versions/$version" bash "$HERE/provision_envs.sh" "$name" || return 1
+    # One package cache per build: parallel builds (one Slurm job per env)
+    # never share -- or corrupt -- each other's cache. Disposable afterwards.
+    # A per-build root prefix makes micromamba's default cache ($root/pkgs) fresh
+    # whichever cache variable it honours.
+    local root="$MAMBA_ROOT_PREFIX/builds/$version-$name"
+    echo "[build] $name -> $p (package cache $root/pkgs)"
+    MAMBA_ROOT_PREFIX="$root" MAMBA_PKGS_DIRS="$root/pkgs" CONDA_PKGS_DIRS="$root/pkgs" \
+      TWAIN_ENVS_ROOT="$E/.versions/$version" bash "$HERE/provision_envs.sh" "$name" || return 1
     chmod -R go-w "$p"
   done
 }
@@ -73,16 +85,23 @@ verify_one() {  # <version> <env>; prints [verify] lines, returns non-zero on an
   local version="$1" name="$2" p="$E/.versions/$1/$2" fail=0 m b n first broad
   [ -x "$p/bin/python" ] || { echo "[verify] $name: no python at $p"; return 1; }
   for m in $(imports_for "$name"); do
-    "$p/bin/python" -c "import $m" >/dev/null 2>&1 \
-      && echo "[verify] $name import $m OK" || { echo "[verify] $name import $m MISSING"; fail=1; }
+    if err=$("$p/bin/python" -c "import $m" 2>&1); then echo "[verify] $name import $m OK"
+    else echo "[verify] $name import $m FAILED: $(echo "$err" | tail -1)"; fail=1; fi
   done
   for b in $(binaries_for "$name"); do
     [ -x "$p/bin/$b" ] && echo "[verify] $name binary $b OK" || { echo "[verify] $name binary $b MISSING"; fail=1; }
   done
-  # A file naming another prefix (a copied env, an old team root) runs code from there.
+  # A file naming another prefix (a copied env, an old team root) runs code from
+  # there -- or came from a poisoned package cache. Neither may ship.
   n=$(grep -rIl -e "/twain-envs/" "$p/bin" "$p/etc" 2>/dev/null | xargs -r grep -L "$p" 2>/dev/null | wc -l)
   [ "$n" -eq 0 ] && echo "[verify] $name no foreign prefixes" \
     || { echo "[verify] $name $n file(s) name another env prefix"; fail=1; }
+  n=$(grep -rIl "dtrc2026-workshop" "$p" 2>/dev/null | wc -l)
+  [ "$n" -eq 0 ] && echo "[verify] $name no dtrc2026-workshop content" \
+    || { echo "[verify] $name $n file(s) carry dtrc2026-workshop, e.g. $(grep -rIl dtrc2026-workshop "$p" | head -1)"; fail=1; }
+  n=$(find "$p" -type f -links +1 2>/dev/null | head -50 | wc -l)
+  [ "$n" -eq 0 ] && echo "[verify] $name no hard-linked files" \
+    || { echo "[verify] $name has hard-linked files (shared with a cache or another env)"; fail=1; }
   first=$(grep -m1 '# cmd' "$p/conda-meta/history" 2>/dev/null)
   echo "$first" | grep -q -- "$p" && echo "[verify] $name history starts with its own build" \
     || { echo "[verify] $name history starts elsewhere: $first"; fail=1; }

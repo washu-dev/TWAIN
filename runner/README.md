@@ -364,9 +364,14 @@ bash "$S" status
   versions live under `.versions/` and only the symlink moves. **Never `cp`
   an env into place.** The 2026-10-07 copy from the old `dtrc2026-workshop`
   tree left 31–68 files per env pointing back at it.
+- **Builds copy, never hard-link** (`MAMBA_ALWAYS_COPY=true`), each into its
+  own package cache. conda hard-links env files to its cache by default, so a
+  later write into an env rewrites the cache and every future build. That
+  happened on 2026-10-07, when a copy over fresh envs poisoned the cache.
 - **Verification** checks that the expected imports and engine binary
   work, that no file in `bin/` or `etc/` names another env's prefix, that
-  `conda-meta/history` starts with the version's own build, and the ACLs.
+  `conda-meta/history` starts with the version's own build, that no file is
+  hard-linked or carries `dtrc2026-workshop`, and the ACLs.
 - **storage2 is NFSv4: mode bits lie and `umask` is ignored.** New files
   show as `rwxrwxrwx`, and what decides access is the ACL (`nfs4_getfacl`).
   The script runs `chmod -R go-w` on each build and fails verification if
