@@ -72,6 +72,10 @@
         {
           "name": "TWAIN_API_PUBLIC_URL",
           "value": "https://d1z5umg4xc2bl8.cloudfront.net"
+        },
+        {
+          "name": "TWAIN_APP_URL",
+          "value": "https://d1z5umg4xc2bl8.cloudfront.net"
         }
       ],
       "secrets": [
