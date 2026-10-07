@@ -84,8 +84,9 @@ resource "aws_s3_bucket_policy" "run_data" {
   depends_on = [aws_s3_bucket_public_access_block.run_data]
 }
 
-# The API signs a job's URLs with its task role (TWAIN-secrets-reader, see
-# api/ecs-task-definition.json), so that role needs the objects themselves.
+# The API signs a job's URLs with its task role (var.api_task_role_name; the
+# live task definition, not api/ecs-task-definition.json, is the source of
+# truth), so that role needs the objects themselves -- else every URL is a 403.
 data "aws_iam_policy_document" "api_run_data" {
   statement {
     sid       = "SignJobUrls"
@@ -97,6 +98,6 @@ data "aws_iam_policy_document" "api_run_data" {
 
 resource "aws_iam_role_policy" "api_run_data" {
   name   = "${var.name_prefix}-api-run-data"
-  role   = aws_iam_role.twain_secrets.id
+  role   = var.api_task_role_name
   policy = data.aws_iam_policy_document.api_run_data.json
 }

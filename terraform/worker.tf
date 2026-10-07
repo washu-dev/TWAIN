@@ -37,6 +37,7 @@ resource "aws_sqs_queue" "jobs" {
 }
 
 # The API sends job messages (api/dispatch.py) with its task role.
+# (Without this the send is denied and every job waits for the relay.)
 data "aws_iam_policy_document" "api_dispatch" {
   statement {
     sid       = "SendJobs"
@@ -48,7 +49,7 @@ data "aws_iam_policy_document" "api_dispatch" {
 
 resource "aws_iam_role_policy" "api_dispatch" {
   name   = "${var.name_prefix}-api-dispatch"
-  role   = aws_iam_role.twain_secrets.id
+  role   = var.api_task_role_name
   policy = data.aws_iam_policy_document.api_dispatch.json
 }
 
