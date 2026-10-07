@@ -139,26 +139,37 @@ def _s3_job_script() -> str:
     """The job's command for S3 staging: twain.sh -> stale-checkout guard -> wrapper.
 
     Modelled on RETICLE's jobs.py prologue. The wrapper and the env specs come
-    from the RIS checkout at $TWAIN_DIR, so a checkout older than the code that
+    from the RIS checkout at $CODE_DIR, so a checkout older than the code that
     submitted the job fails here, loudly, with the fix (exit 4) -- not halfway
     through the run.
     """
     return "\n".join([
-        'if [ -n "${TWAIN_ENV_FILE:-}" ] && [ -f "$TWAIN_ENV_FILE" ]; then',
+        'if [ -n "${TWAIN_ENV_FILE:-}" ]; then',
+        '  if [ ! -r "$TWAIN_ENV_FILE" ]; then',
+        ('    echo "TWAIN_ENV_FILE: $TWAIN_ENV_FILE is missing or not readable by '
+         '$(id -un) on $(hostname) -- check the path and that every directory '
+         'above it is searchable (namei -l)" >&2'),
+        "    exit 3",
+        "  fi",
         '  . "$TWAIN_ENV_FILE"',
         "fi",
-        ': "${TWAIN_DIR:?TWAIN_DIR is not set -- define it in $TWAIN_ENV_FILE (twain.sh)}"',
+        'if [ -z "${CODE_DIR:-}" ] || [ ! -f "$CODE_DIR/scripts/ris/job_wrapper.sh" ]; then',
+        ('  echo "TWAIN_ENV_FILE: CODE_DIR=${CODE_DIR:-<unset>} is not a TWAIN checkout -- '
+         'export CODE_DIR=<your clone of github.com/washu-dev/TWAIN> in '
+         '${TWAIN_ENV_FILE:-twain.sh}" >&2'),
+        "  exit 3",
+        "fi",
         'if [ -n "${TWAIN_EXPECTED_SHA:-}" ] && command -v git >/dev/null 2>&1; then',
-        '  if ! git -c safe.directory="*" -C "$TWAIN_DIR" merge-base --is-ancestor '
+        '  if ! git -c safe.directory="*" -C "$CODE_DIR" merge-base --is-ancestor '
         '"$TWAIN_EXPECTED_SHA" HEAD 2>/dev/null; then',
-        '    echo "TWAIN_STALE_CHECKOUT: $TWAIN_DIR is at $(git -c safe.directory="*" '
-        '-C "$TWAIN_DIR" rev-parse --short HEAD 2>/dev/null) and does not contain '
+        '    echo "TWAIN_STALE_CHECKOUT: $CODE_DIR is at $(git -c safe.directory="*" '
+        '-C "$CODE_DIR" rev-parse --short HEAD 2>/dev/null) and does not contain '
         '$TWAIN_EXPECTED_SHA (the code that submitted this job). '
-        'Run: git -C $TWAIN_DIR pull" >&2',
+        'Run: git -C $CODE_DIR pull" >&2',
         "    exit 4",
         "  fi",
         "fi",
-        'exec bash "$TWAIN_DIR/scripts/ris/job_wrapper.sh"',
+        'exec bash "$CODE_DIR/scripts/ris/job_wrapper.sh"',
     ])
 
 
@@ -339,7 +350,7 @@ class SlurmExecutionAdapter:
                 raise ValueError("staging='s3' needs an issue_job_ticket callable")
             self.issue_job_ticket = issue_job_ticket
             self.s3 = s3_transport or S3Transport()
-            # twain.sh on cluster storage (owner-managed): TWAIN_HOME, TWAIN_DIR, ...
+            # twain.sh on cluster storage (owner-managed): TWAIN_HOME, CODE_DIR, ...
             self.env_file = env_file or os.environ.get("TWAIN_ENV_FILE")
             if not self.env_file:
                 raise ValueError("staging='s3' needs TWAIN_ENV_FILE: the path of "
@@ -1200,6 +1211,10 @@ class SlurmExecutionAdapter:
             return (ExecutionStatus.SETUP_FAILED,
                     f"the RIS checkout is older than the code that submitted Slurm job "
                     f"{job_id} -- {line.split('TWAIN_STALE_CHECKOUT:', 1)[-1].strip()}")
+        if exit_code == 3:
+            return (ExecutionStatus.SETUP_FAILED,
+                    f"Slurm job {job_id} could not load TWAIN's RIS configuration "
+                    f"(twain.sh: the file, or CODE_DIR in it) -- see the job's stderr")
         if exit_code == 6:
             return (ExecutionStatus.SETUP_FAILED,
                     f"Slurm job {job_id} could not download its run bundle from S3 "

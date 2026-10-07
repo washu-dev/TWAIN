@@ -408,7 +408,7 @@ scales horizontally; RDS and S3 hold everything a run needs.
    `twain-runner` ECS service (in the API's subnets/security group).
 2. Set the repo variable `TWAIN_ENV_FILE` to the path of your `twain.sh` on RIS
    storage (`gh variable set TWAIN_ENV_FILE --body /storage2/.../twain.sh`), and
-   make sure `$TWAIN_DIR` in it is a current checkout (`git -C "$TWAIN_DIR" pull`).
+   make sure `$CODE_DIR` in it is a current checkout (`git -C "$CODE_DIR" pull`).
 3. Merge -- `ci-runner.yml` builds the worker image (without the `sim` stack:
    calculations and smoke tests run on RIS) and deploys it to the service.
 4. Check the worker's log (`/ecs/twain-runner`): `worker up: 2 consumers` and
@@ -433,9 +433,9 @@ run bucket (`terraform output run_bucket_name`) instead of rsync:
    attempt (random, only its hash is stored, expires after the wait budget plus
    the wall time), and submits a tiny script through the RIS API;
 2. **the job** sources `$TWAIN_ENV_FILE` (`twain.sh`, owner-managed, mode 640 --
-   template: `scripts/ris/twain.sh.example`), checks that `$TWAIN_DIR` contains
+   template: `scripts/ris/twain.sh.example`), checks that `$CODE_DIR` contains
    the commit that submitted it (exit 4 with `git pull` otherwise), and runs
-   `$TWAIN_DIR/scripts/ris/job_wrapper.sh`: it trades the ticket at
+   `$CODE_DIR/scripts/ris/job_wrapper.sh`: it trades the ticket at
    `POST /api/job-tickets/urls` for presigned URLs (GET `input/`, PUT `output/`
    only), unpacks the bundle in node scratch, picks an env and **smoke-tests it in
    the job** (exit 2 = missing dependency), runs `main.py`, and uploads
