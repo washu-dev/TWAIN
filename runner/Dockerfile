@@ -44,5 +44,9 @@ RUN apt-get update \
 ARG GIT_SHA=
 ENV TWAIN_GIT_SHA=$GIT_SHA
 
+# Without a TTY, print() is block-buffered: the pipeline's and the cluster
+# monitor's progress lines would reach CloudWatch late, or never.
+ENV PYTHONUNBUFFERED=1
+
 # The SQS worker (TWAIN_DISPATCH=sqs). The polling runner is `python -m runner.runner`.
 CMD ["pixi", "run", "python", "-m", "runner.worker"]
