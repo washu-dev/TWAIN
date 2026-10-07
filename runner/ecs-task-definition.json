@@ -6,7 +6,7 @@
   ],
   "cpu": "1024",
   "memory": "4096",
-  "executionRoleArn": "arn:aws:iam::730335203321:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::730335203321:role/service-role/ecsTaskExecutionRole",
   "taskRoleArn": "arn:aws:iam::730335203321:role/TWAIN-runner-worker",
   "containerDefinitions": [
     {
