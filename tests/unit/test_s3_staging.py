@@ -94,8 +94,8 @@ def _profile():
         name="compute2", login_nodes=["c2-login-001.ris.wustl.edu"],
         account="compute2-mdan", accounts=["compute2-mdan"], modules=["ris", "slurm"],
         default_partition="general-cpu", short_partition="general-short",
-        storage_root="/storage2/fs1/mdan/Active/dtrc2026-workshop",
-        envs_root="/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs",
+        storage_root="/storage2/fs1/mdan/Active/common/projects/twain",
+        envs_root="/storage2/fs1/mdan/Active/common/projects/twain/twain-envs",
         partitions=[{"name": "general-cpu", "max_minutes": 21600, "gpus": False},
                     {"name": "general-short", "max_minutes": 30, "gpus": True}],
     )
@@ -144,7 +144,7 @@ def _adapter(tmp_path, ris, s3, tickets, **kw):
         staging="s3", s3_transport=S3Transport("twain-run-data", client=s3),
         issue_job_ticket=lambda *a: tickets.append(a) or "tkt-" + str(len(tickets)),
         api_public_url="https://d1z5umg4xc2bl8.cloudfront.net",
-        env_file="/storage2/fs1/mdan/Active/dtrc2026-workshop/twain/twain.sh",
+        env_file="/storage2/fs1/mdan/Active/common/projects/twain/TWAIN/twain.sh",
         expected_sha="abc1234", transfer_runner=no_transfer, cluster_runner=no_transfer,
         poll_interval=0.0, sleep=lambda _s: None, **kw)
 
@@ -240,12 +240,12 @@ def test_job_script_runs_the_wrapper_from_code_dir(tmp_path):
 def test_env_paths_honour_twain_envs_root_on_the_node(tmp_path):
     ris, s3 = FakeRis(), FakeS3()
     adapter = _adapter(tmp_path, ris, s3, [],
-                       env_pythons=["/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs/psi4/bin/python"])
+                       env_pythons=["/storage2/fs1/mdan/Active/common/projects/twain/twain-envs/psi4/bin/python"])
     adapter.execute(str(_bundle(tmp_path)), run_id="s")
     blob = s3.objects[("twain-run-data", f"runs/s/attempt-1/{BUNDLE_KEY}")]
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
         payload = tar.extractfile("twain_payload.sh").read().decode()
-    assert '"${TWAIN_ENVS_ROOT:-/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs}/psi4/bin/python"' in payload
+    assert '"${TWAIN_ENVS_ROOT:-/storage2/fs1/mdan/Active/common/projects/twain/twain-envs}/psi4/bin/python"' in payload
 
 
 @pytest.mark.parametrize("kw, match", [

@@ -4,7 +4,7 @@ Moves a RunBundle to the cluster and its outputs back:
 
   * ``push()``  -- rsync the local bundle dir into a per-run directory under the
     cluster's writable storage allocation (``ClusterProfile.storage_root``, e.g.
-    ``/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-runs/<run_id>/``).
+    ``/storage2/fs1/mdan/Active/common/projects/twain/twain-runs/<run_id>/``).
     Home/storage auto-mounts on Compute2 compute nodes, so the submitted job
     reads and writes the same directory.
   * ``pull()``  -- rsync the run directory (outputs, ``results.csv``, job logs)

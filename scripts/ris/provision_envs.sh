@@ -15,8 +15,8 @@
 #   TWAIN_TEAM_ROOT  team storage root (default: the compute2 profile's root)
 set -euo pipefail
 
-TEAM_ROOT="${TWAIN_TEAM_ROOT:-/storage2/fs1/mdan/Active/dtrc2026-workshop}"
-ENVS_ROOT="$TEAM_ROOT/twain-envs"
+TEAM_ROOT="${TWAIN_TEAM_ROOT:-${TWAIN_HOME:-/storage2/fs1/mdan/Active/common/projects/twain}}"
+ENVS_ROOT="${TWAIN_ENVS_ROOT:-$TEAM_ROOT/twain-envs}"
 DATA_ROOT="${TWAIN_DATA_ROOT:-$TEAM_ROOT/twain-data}"
 MAMBA="$TEAM_ROOT/bin/micromamba"
 SPECS_DIR="$(cd "$(dirname "$0")/envs" && pwd)"
@@ -108,6 +108,14 @@ for spec in "${specs[@]}"; do
   [ -f "$spec" ] || { echo "ERROR: no spec at $spec" >&2; exit 1; }
   name="$(basename "$spec" .yml)"
   prefix="$ENVS_ROOT/$name"
+  # A directory that isn't an env (no conda-meta: an interrupted create, or a
+  # placeholder) can't be synced -- micromamba dies probing its missing python.
+  # Move it aside (never delete) and build fresh.
+  if [ -d "$prefix" ] && [ ! -d "$prefix/conda-meta" ]; then
+    aside="$prefix.not-an-env.$(date +%Y%m%d%H%M%S)"
+    echo "==> $prefix is not an env; moving it to $aside"
+    mv "$prefix" "$aside"
+  fi
   if [ -d "$prefix" ]; then
     echo "==> Syncing $name from $(basename "$spec")"
     "$MAMBA" install -y -p "$prefix" -f "$spec"

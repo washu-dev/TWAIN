@@ -994,9 +994,11 @@ class TestSlurmClusterGrounding:
         assert "xtb-python" in pkgs
         assert "gpaw" in pkgs
         assert "psi4" in pkgs
-        # Only what a spec actually declares: openmm is in pixi's sim env but no
+        # nwchem.yml declares openmm alongside openff-toolkit (2026-10-07).
+        assert "openmm" in pkgs and "openff-toolkit" in pkgs
+        # Only what a spec actually declares: pyscf is in pixi's sim env but no
         # cluster spec carries it, so it must not appear here.
-        assert "openmm" not in pkgs
+        assert "pyscf" not in pkgs
 
     def test_every_conda_only_engine_has_an_env_spec(self):
         """No conda-only engine may be left without a spec.

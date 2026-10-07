@@ -17,7 +17,7 @@
 
 # ── Required ──────────────────────────────────────────────────────────────────
 # Your TWAIN area on RIS storage.
-export TWAIN_HOME="/storage2/fs1/mdan/Active/dtrc2026-workshop/twain"
+export TWAIN_HOME="/storage2/fs1/mdan/Active/common/projects/twain"
 # A checkout of github.com/washu-dev/TWAIN (master). Jobs run
 # scripts/ris/job_wrapper.sh from here, so keep it current: `git -C "$CODE_DIR" pull`.
 export CODE_DIR="$TWAIN_HOME/TWAIN"
@@ -25,7 +25,7 @@ export CODE_DIR="$TWAIN_HOME/TWAIN"
 # ── Optional ──────────────────────────────────────────────────────────────────
 # Pre-provisioned cluster envs (scripts/ris/provision_envs.sh builds them from
 # scripts/ris/envs/*.yml). Defaults to the cluster profile's envs_root.
-# export TWAIN_ENVS_ROOT="/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-envs"
+# export TWAIN_ENVS_ROOT="$TWAIN_HOME/twain-envs"
 
 # Where a job unpacks and runs its bundle. Defaults to $TMPDIR (node-local
 # scratch), then /tmp. Outputs are uploaded to S3, so nothing here must persist.

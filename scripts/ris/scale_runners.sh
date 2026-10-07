@@ -25,7 +25,7 @@
 set -euo pipefail
 
 if [ "${1:-}" = "--install-cron" ]; then
-  RIS_DIR="${RIS_DIR:-/storage2/fs1/mdan/Active/dtrc2026-workshop/twain-backend}"
+  RIS_DIR="${RIS_DIR:-${CODE_DIR:-/storage2/fs1/mdan/Active/common/projects/twain/TWAIN}}"
   line="* * * * * bash $RIS_DIR/scripts/ris/scale_runners.sh --cron >> $RIS_DIR/scale-runners.log 2>&1"
   # `|| true`: grep exits 1 on an empty crontab, which set -e would turn into
   # an abort before the new line is appended.

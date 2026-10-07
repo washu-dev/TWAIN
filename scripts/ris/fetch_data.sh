@@ -25,7 +25,7 @@
 # Idempotent: a set whose representative file is already present is skipped.
 set -euo pipefail
 
-TEAM_ROOT="${TWAIN_TEAM_ROOT:-/storage2/fs1/mdan/Active/dtrc2026-workshop}"
+TEAM_ROOT="${TWAIN_TEAM_ROOT:-${TWAIN_HOME:-/storage2/fs1/mdan/Active/common/projects/twain}}"
 DATA_ROOT="${TWAIN_DATA_ROOT:-$TEAM_ROOT/twain-data}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
