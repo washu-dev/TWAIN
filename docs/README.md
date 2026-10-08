@@ -48,6 +48,7 @@ original design: read those as history.
 |---|---|
 | [`architecture/07_deployment_dependencies.drawio`](architecture/07_deployment_dependencies.drawio) | Static view: web app, API, worker, AWS, GitHub, RIS (storage2 folders, environments, compute nodes), the repository's modules, registries and templates, and every external dependency, with when each is fetched |
 | [`architecture/08_run_lifecycle.drawio`](architecture/08_run_lifecycle.drawio) | Dynamic view: one run from submission to results, covering the approval gate, the pizza tracker, subtasks, emails, the detached Slurm job, the failure path and the planned observer |
+| [`DEVELOPER_SETUP.md`](DEVELOPER_SETUP.md) | **Start here if you're new:** a fresh laptop to a running stack, with tools, DBeaver and Claude Code |
 | [`../README.md`](../README.md) | Overview, local development, deploying |
 | [`../app/README.md`](../app/README.md) · [`../api/README.md`](../api/README.md) · [`../runner/README.md`](../runner/README.md) | The three services |
 | [`../modules/README.md`](../modules/README.md) | The pipeline modules and which state each serves |
