@@ -237,6 +237,7 @@ and the API validates the tokens (`ENTRA_TENANT_ID`, `ENTRA_API_AUDIENCE`).
 
 ## More documentation
 
+- **New here? [`docs/DEVELOPER_SETUP.md`](docs/DEVELOPER_SETUP.md)**: a fresh laptop to a running stack, with Claude Code set up the way the team uses it
 - [`docs/README.md`](docs/README.md): the documentation index (architecture, decisions, backlog)
 - [`docs/architecture/DIAGRAMS_INDEX.md`](docs/architecture/DIAGRAMS_INDEX.md): every diagram, including 07 and 08
 - Component READMEs: [app](app/README.md) · [api](api/README.md) ·
