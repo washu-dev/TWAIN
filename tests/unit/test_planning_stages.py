@@ -518,8 +518,8 @@ def test_the_deterministic_pick_prefers_a_proven_method(machine, tmp_path, histo
         pytest.skip("no second installed candidate in this environment")
     assert any(n.startswith(f"Track record: {other} has completed 4") for n in plan["safety_notes"])
     # The seed asks for solubility, which has no canonical property: the run is
-    # filed under its acceptance metric.
-    assert asked[-1] == "logs_mae"
+    # filed under its acceptance metric's family.
+    assert asked[-1] == "aqueous_solubility"
 
 
 def test_planning_goes_on_without_history(machine, tmp_path, history):
@@ -531,7 +531,7 @@ def test_planning_goes_on_without_history(machine, tmp_path, history):
 
 def test_history_keys_are_normalized():
     assert SM.history_key("Band gap") == SM.history_key("band_gap") == "band_gap"
-    assert SM.history_key(None, [{"metric_name": "logS_MAE"}]) == "logs_mae"
+    assert SM.history_key(None, [{"metric_name": "logS_MAE"}]) == "aqueous_solubility"
     assert SM.history_key(None) == ""
 
 
@@ -543,6 +543,10 @@ def test_the_runner_keys_methods_the_way_planning_does():
                  {"requested_property": "logS (25 C)", "selected_method": {"libraries": ["RDKit"]}},
                  {"selected_method": {"tool_name": "Psi4"},
                   "acceptance_metrics": [{"metric_name": "logS MAE"}]},
+                 {"selected_method": {"libraries": ["xtb"]},
+                  "acceptance_metrics": [{"metric_name": "aqueous_solubility_at_25C"}]},
+                 {"selected_method": {"libraries": ["Psi4"]},
+                  "acceptance_metrics": [{"metric_name": "standard_heat_of_formation_kJ_per_mol"}]},
                  {"selected_method": {"tool_name": "Psi4"}}):
         assert MH.method_key(plan) == SM.StateMachine._method_key(plan)
         assert MH.history_key(plan) == SM.history_key(plan.get("requested_property"),
@@ -599,3 +603,24 @@ def test_an_unrunnable_core_falls_back_to_the_ranking(machine, tmp_path, monkeyp
 def test_the_refusal_names_each_tool_once():
     gap = SM._cluster_env_gap(["xtb", "OpenMM", "OpenFF Toolkit", "OpenMM"])
     assert gap.count("OpenMM") == 1
+
+
+# The metric names production actually filed runs under (#216's measurement).
+@pytest.mark.parametrize("names, family", [
+    (["aqueous_solubility_at_25C", "aqueous_solubility_log_mol_per_L", "aqueous_solubility_25C",
+      "logS", "logS_MAE"], "aqueous_solubility"),
+    (["standard_heat_of_formation_kJ_per_mol", "standard_enthalpy_of_formation_kJ_per_mol",
+      "standard_heat_of_formation", "formation_energy_per_atom"], "formation_enthalpy"),
+    (["band_gap", "Band gap (eV)", "bandgap"], "band_gap"),
+])
+def test_one_quantity_is_one_history_key(names, family):
+    assert {SM.history_key(None, [{"metric_name": n}]) for n in names} == {family}
+
+
+def test_a_name_no_family_knows_is_kept():
+    assert SM.history_key(None, [{"metric_name": "Glass transition (K)"}]) == "glass_transition_k"
+    assert SM.history_key("lattice_constant") == "lattice_constant"
+
+
+def test_logs_doesnt_swallow_other_words():
+    assert SM.history_key(None, [{"metric_name": "logistics_score"}]) == "logistics_score"

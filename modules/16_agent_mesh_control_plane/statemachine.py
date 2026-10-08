@@ -133,15 +133,38 @@ def property_key(requested_property) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(requested_property or "").lower()).strip("_")
 
 
+_PROPERTY_FAMILIES: Optional[list] = None
+
+
+def _property_families() -> list:
+    """``[(key, compiled pattern)]`` from configs/property_families.json (cached)."""
+    global _PROPERTY_FAMILIES
+    if _PROPERTY_FAMILIES is None:
+        try:
+            data = json.loads((twain_paths.REPO_ROOT / "configs" / "property_families.json")
+                              .read_text(encoding="utf-8"))
+            _PROPERTY_FAMILIES = [(f["key"], re.compile(f["pattern"]))
+                                  for f in data.get("families") or []]
+        except (OSError, ValueError, KeyError, re.error) as exc:
+            logger.warning("[plan] property families unavailable: %s", exc)
+            _PROPERTY_FAMILIES = []
+    return _PROPERTY_FAMILIES
+
+
 def history_key(requested_property, acceptance_metrics=None) -> str:
     """What the method history files a run under: its canonical property, else its
-    first acceptance metric (a solubility request has no canonical property)."""
+    first acceptance metric (a solubility request has no canonical property),
+    folded into its family so the LLM's varying metric names file together."""
+    key = ""
     if requested_property:
-        return property_key(requested_property)
-    for metric in acceptance_metrics or []:
-        if isinstance(metric, dict) and metric.get("metric_name"):
-            return property_key(metric["metric_name"])
-    return ""
+        key = property_key(requested_property)
+    else:
+        for metric in acceptance_metrics or []:
+            if isinstance(metric, dict) and metric.get("metric_name"):
+                key = property_key(metric["metric_name"])
+                break
+    return next((family for family, pattern in _property_families() if pattern.search(key)),
+                key) if key else ""
 
 
 def _proven_methods(key: str) -> list:
