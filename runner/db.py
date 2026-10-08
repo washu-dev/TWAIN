@@ -509,6 +509,49 @@ class RunnerDB:
         finally:
             conn.close()
 
+    # ---- method outcomes (#188) ------------------------------------------------
+    def record_method_outcomes(self, rows: list) -> None:
+        """Upsert ``[{session_id, requested_property, method, calculator, libraries,
+        succeeded, verdict}]`` -- one row per run per method; a re-run overwrites."""
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            for r in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO method_outcomes (session_id, requested_property, method,
+                                                 calculator, libraries, succeeded, verdict)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+                    ON CONFLICT (session_id, method) DO UPDATE SET
+                        requested_property = EXCLUDED.requested_property,
+                        calculator = EXCLUDED.calculator, libraries = EXCLUDED.libraries,
+                        succeeded = EXCLUDED.succeeded, verdict = EXCLUDED.verdict,
+                        created_at = now();
+                    """,
+                    (r["session_id"], r["requested_property"], r["method"], r.get("calculator"),
+                     json.dumps(r.get("libraries") or []), bool(r["succeeded"]),
+                     r.get("verdict")))
+            conn.commit()
+            cursor.close()
+        finally:
+            conn.close()
+
+    def method_history(self, requested_property: str, days: int = 365) -> list:
+        """Methods that have completed for this property here, best record first."""
+        return self._query_all(
+            """
+            SELECT method, max(calculator) AS calculator,
+                   (array_agg(libraries ORDER BY created_at DESC))[1] AS libraries,
+                   count(*) FILTER (WHERE succeeded) AS completed,
+                   count(*) FILTER (WHERE verdict = 'accepted') AS accepted,
+                   count(*) FILTER (WHERE NOT succeeded) AS failed
+            FROM method_outcomes
+            WHERE requested_property = %s AND created_at > now() - make_interval(days => %s)
+            GROUP BY method
+            HAVING count(*) FILTER (WHERE succeeded) > 0
+            ORDER BY accepted DESC, completed DESC, failed ASC, method;
+            """, (requested_property, int(days)))
+
     def opening_request(self, session_id: str) -> str | None:
         """The researcher's opening request (resume jobs don't carry it); the same
         message ``rerun_conversation`` reuses."""

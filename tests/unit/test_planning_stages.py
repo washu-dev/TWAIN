@@ -474,3 +474,76 @@ def test_the_deterministic_pick_says_why(machine, tmp_path):
     machine.plan()
     notes = machine._load_artifact("execution_plan")["safety_notes"]
     assert any(n.startswith("Chosen by the discovery ranking:") for n in notes)
+
+
+# -- prefer what has worked here (#188) -----------------------------------------
+
+def test_the_llm_is_told_what_has_worked_here():
+    from method_discovery import llm_discovery as LD
+    kw = dict(objective="solubility", material="caffeine", domain=None,
+              requested_property="logS", platform="linux-64", libraries=[], calculators=[])
+    assert "WHAT HAS WORKED HERE" not in LD.build_prompt(**kw)
+    prompt = LD.build_prompt(**kw, proven=[{"method": "rdkit", "calculator": None,
+                                            "libraries": ["RDKit"], "completed": 3,
+                                            "accepted": 2, "failed": 0}])
+    assert "WHAT HAS WORKED HERE" in prompt and "rdkit: completed 3, accepted 2" in prompt
+
+
+@pytest.fixture
+def history():
+    yield SM.use_method_history
+    SM.use_method_history(None)
+
+
+def test_the_deterministic_pick_prefers_a_proven_method(machine, tmp_path, history):
+    _seed_intent(machine, tmp_path)
+    machine.decompose()
+    machine.discover()
+    machine.plan()
+    first = SM.StateMachine._method_key(machine._load_artifact("execution_plan"))
+    asked = []
+    # Any other candidate that is installed here can be the proven one.
+    for cand in machine._load_artifact("discovery")["candidates"]:
+        other = cand["name"].lower()
+        if other == first:
+            continue
+        history(lambda prop, other=other: asked.append(prop) or [
+            {"method": other, "calculator": None, "libraries": [cand["name"]],
+             "completed": 4, "accepted": 3, "failed": 0}])
+        machine.plan()
+        plan = machine._load_artifact("execution_plan")
+        if SM.StateMachine._method_key(plan) == other:
+            break
+    else:
+        pytest.skip("no second installed candidate in this environment")
+    assert any(n.startswith(f"Track record: {other} has completed 4") for n in plan["safety_notes"])
+    # The seed asks for solubility, which has no canonical property: the run is
+    # filed under its acceptance metric.
+    assert asked[-1] == "logs_mae"
+
+
+def test_planning_goes_on_without_history(machine, tmp_path, history):
+    _seed_intent(machine, tmp_path)
+    machine.decompose()
+    history(lambda prop: 1 / 0)
+    assert machine.plan() == State.BUILD
+
+
+def test_history_keys_are_normalized():
+    assert SM.history_key("Band gap") == SM.history_key("band_gap") == "band_gap"
+    assert SM.history_key(None, [{"metric_name": "logS_MAE"}]) == "logs_mae"
+    assert SM.history_key(None) == ""
+
+
+def test_the_runner_keys_methods_the_way_planning_does():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from runner import method_history as MH
+    for plan in ({"requested_property": "Band gap", "selected_method": {"calculator": "GPAW",
+                                                                        "libraries": ["ASE"]}},
+                 {"requested_property": "logS (25 C)", "selected_method": {"libraries": ["RDKit"]}},
+                 {"selected_method": {"tool_name": "Psi4"},
+                  "acceptance_metrics": [{"metric_name": "logS MAE"}]},
+                 {"selected_method": {"tool_name": "Psi4"}}):
+        assert MH.method_key(plan) == SM.StateMachine._method_key(plan)
+        assert MH.history_key(plan) == SM.history_key(plan.get("requested_property"),
+                                                      plan.get("acceptance_metrics"))

@@ -117,6 +117,44 @@ def use_cluster_inventory(envs: Optional[dict], taken_at: Optional[str] = None) 
     _CLUSTER_INVENTORY_TAKEN = taken_at
 
 
+# What each method has done on this deployment's cluster (#188): a callable
+# ``requested_property -> [{method, calculator, libraries, completed, accepted,
+# failed}]`` the runner installs (runner/method_history.py). None offline.
+_METHOD_HISTORY: Optional[Callable[[str], list]] = None
+
+
+def use_method_history(fn: Optional[Callable[[str], list]]) -> None:
+    global _METHOD_HISTORY
+    _METHOD_HISTORY = fn
+
+
+def property_key(requested_property) -> str:
+    """A property name as the method history keys it ("Band gap" -> "band_gap")."""
+    return re.sub(r"[^a-z0-9]+", "_", str(requested_property or "").lower()).strip("_")
+
+
+def history_key(requested_property, acceptance_metrics=None) -> str:
+    """What the method history files a run under: its canonical property, else its
+    first acceptance metric (a solubility request has no canonical property)."""
+    if requested_property:
+        return property_key(requested_property)
+    for metric in acceptance_metrics or []:
+        if isinstance(metric, dict) and metric.get("metric_name"):
+            return property_key(metric["metric_name"])
+    return ""
+
+
+def _proven_methods(key: str) -> list:
+    """Methods that have completed for this history key here, best record first."""
+    if _METHOD_HISTORY is None or not key:
+        return []
+    try:
+        return list(_METHOD_HISTORY(key) or [])
+    except Exception as exc:  # noqa: BLE001 - planning goes on without history
+        logger.warning("[plan] method history unavailable: %s", exc)
+        return []
+
+
 def cluster_env_source() -> str:
     """Where planning's view of the cluster envs comes from, for notes and logs."""
     if _CLUSTER_INVENTORY is not None:
@@ -1892,8 +1930,19 @@ class StateMachine:
             for name in preempted_uninstalled
         ]
 
+        proven = [p for p in _proven_methods(history_key(
+                      requested_property, intent.get("acceptance_metrics")))
+                  if str(p.get("method") or "").lower() not in avoid]
+        if proven and not honoured_requests:
+            # The deterministic pick prefers a proven library-only method too (the
+            # researcher's own named software, when there is some, still comes first).
+            proven_libs = [str(p["method"]).lower() for p in proven if not p.get("calculator")]
+            ranked = sorted(ranked, key=lambda c: (
+                proven_libs.index(c.entry.name.lower()) if c.entry.name.lower() in proven_libs
+                else len(proven_libs)))
         recommendation = self._llm_recommend(intent, ranked, requested_property, domain,
-                                             platform, requested_libraries=honoured_requests)
+                                             platform, requested_libraries=honoured_requests,
+                                             proven=proven)
         if recommendation is not None and avoid:
             rec_calc = find_calculator(recommendation.calculator)
             rec_key = (rec_calc.name if rec_calc else recommendation.calculator
@@ -1950,7 +1999,9 @@ class StateMachine:
         else:
             libraries, calc_entry, calculator_library, blocked_calcs = (
                 self._select_toolset(
-                    ranked, requested_property, domain, platform=platform, avoid=avoid))
+                    ranked, requested_property, domain, platform=platform, avoid=avoid,
+                    prefer=[str(p.get("calculator")).lower() for p in proven
+                            if p.get("calculator")]))
             cluster_blocked.extend(blocked_calcs)
             primary = ranked[0]
             # Say why, as the LLM path does: the same request should be able to
@@ -2235,8 +2286,23 @@ class StateMachine:
                     f"with nothing behind it.")
         execution_plan.summary = self._compose_plan_summary(
             intent, requested_property, libraries, calc_entry, recommendation)
+        # Say whether this method has a track record here (#188).
+        chosen_key = self._method_key(asdict(execution_plan))
+        record = next((p for p in proven if str(p.get("method") or "").lower() == chosen_key),
+                      None)
+        if record:
+            execution_plan.safety_notes.append(
+                f"Track record: {record.get('calculator') or chosen_key} has completed "
+                f"{record.get('completed')} run(s) like this one on this cluster "
+                f"({record.get('accepted')} accepted by validation).")
+        elif proven:
+            best = proven[0]
+            execution_plan.safety_notes.append(
+                f"Not the proven method: {best.get('calculator') or best.get('method')} has "
+                f"completed {best.get('completed')} run(s) like this one here, "
+                f"but this plan uses {chosen_key} (the selection note says why).")
         if failed_methods:
-            new_key = self._method_key(asdict(execution_plan))
+            new_key = chosen_key
             if new_key in avoid:
                 raise self._no_method_left(failed_methods)
             gave_up = failed_methods[-1]
@@ -2302,7 +2368,7 @@ class StateMachine:
         return None
 
     def _llm_recommend(self, intent, ranked, requested_property, domain, platform,
-                       requested_libraries=None):
+                       requested_libraries=None, proven=None):
         """Ask the LLM to pick a toolset, grounded by platform availability.
 
         Returns a ToolRecommendation, or None (no agent wired, or the pick
@@ -2333,13 +2399,14 @@ class StateMachine:
                 objective=intent.get("objective", ""), material=material, domain=domain,
                 requested_property=requested_property, platform=platform,
                 libraries=library_candidates, calculators=calc_candidates,
-                requested_libraries=requested_libraries,
+                requested_libraries=requested_libraries, proven=proven,
                 agent=self._agent_text,
             )
         except Exception:  # noqa: BLE001 - any failure -> deterministic fallback
             return None
 
-    def _select_toolset(self, ranked, requested_property, domain, platform=None, avoid=()):
+    def _select_toolset(self, ranked, requested_property, domain, platform=None, avoid=(),
+                        prefer=()):
         """Assemble a compatible toolset from the discovery ranking.
 
         Returns ``(libraries, calculator_entry_or_None,
@@ -2369,6 +2436,10 @@ class StateMachine:
         covering = calculators_for_property(requested_property, domain=domain, platform=platform)
         # A calculator this run already gave up on (#188 fallback) isn't offered again.
         covering = [c for c in covering if c.name.lower() not in avoid]
+        # ... and one that has completed for this property here comes first (#188).
+        prefer = list(prefer)
+        covering.sort(key=lambda c: prefer.index(c.name.lower()) if c.name.lower() in prefer
+                      else len(prefer))
         blocked = []
         if self.execute_slurm:
             # Report only calculators that outrank the best runnable one (they

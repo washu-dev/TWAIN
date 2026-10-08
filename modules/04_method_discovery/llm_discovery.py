@@ -63,7 +63,7 @@ TASK
   domain:    {domain}
   property:  {property}
   platform:  {platform}
-{requested}
+{requested}{proven}
 CANDIDATE LIBRARIES (the framework that builds the system / drives a calculator):
 {libraries}
 
@@ -95,6 +95,29 @@ name a requested tool you were not offered as a candidate.
 """
 
 
+_PROVEN_BLOCK = """
+WHAT HAS WORKED HERE (methods that ran to completion for this property on this \
+deployment's cluster, best record first):
+{lines}
+  Prefer one of these: the same request should get the same, proven method run \
+after run. Choose a different one only when it is clearly better for THIS task, \
+and then say in the reasoning why you did not use the proven one. The researcher's \
+own named software (if any) still comes first.
+"""
+
+
+def _fmt_proven(proven: Optional[List[dict]]) -> str:
+    """The track-record block, or "" when nothing has completed for this property."""
+    lines = []
+    for p in proven or []:
+        name = p.get("calculator") or p.get("method")
+        libs = " + ".join(p.get("libraries") or [])
+        lines.append(f"  - {name}" + (f" (via {libs})" if libs and p.get("calculator") else "")
+                     + f": completed {p.get('completed', 0)}, accepted {p.get('accepted', 0)}, "
+                       f"failed {p.get('failed', 0)}")
+    return _PROVEN_BLOCK.format(lines="\n".join(lines)) if lines else ""
+
+
 def _fmt_requested(requested: Optional[List[str]]) -> str:
     """The user-preference block, or "" when the researcher named no software."""
     names = [str(r).strip() for r in (requested or []) if str(r or "").strip()]
@@ -111,8 +134,10 @@ def _fmt_candidates(items: List[dict], keys: List[str]) -> str:
 
 def build_prompt(*, objective, material, domain, requested_property, platform,
                  libraries: List[dict], calculators: List[dict],
-                 requested_libraries: Optional[List[str]] = None) -> str:
+                 requested_libraries: Optional[List[str]] = None,
+                 proven: Optional[List[dict]] = None) -> str:
     return _PROMPT.format(
+        proven=_fmt_proven(proven),
         objective=objective or "(unspecified)",
         material=material or "(unspecified)",
         domain=domain or "(unspecified)",
@@ -192,6 +217,7 @@ def recommend_toolset(
     calculators: List[dict],
     agent: Callable[[str], str],
     requested_libraries: Optional[List[str]] = None,
+    proven: Optional[List[dict]] = None,
     available: Optional[Callable[[str, str], Optional[bool]]] = None,
     max_repair: int = 1,
 ) -> Optional[ToolRecommendation]:
@@ -211,7 +237,7 @@ def recommend_toolset(
         objective=objective, material=material, domain=domain,
         requested_property=requested_property, platform=platform,
         libraries=libraries, calculators=calculators,
-        requested_libraries=requested_libraries,
+        requested_libraries=requested_libraries, proven=proven,
     )
     warnings: List[str] = []
     for attempt in range(max_repair + 1):
