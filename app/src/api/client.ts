@@ -80,6 +80,17 @@ export interface RunFailure {
   env?: string | null;
   /** twain.sh on RIS (the deployment's TWAIN_ENV_FILE). */
   env_file?: string | null;
+  /** What the self-heal loop tried, attempt by attempt (#186). */
+  self_heal?: SelfHealStep[] | null;
+}
+
+export interface SelfHealStep {
+  attempt: number;
+  /** operator | script | environment | resources | unknown */
+  class: string;
+  action: string;
+  reason: string;
+  result: string;
 }
 
 /** Short-lived download links to a cluster attempt's files (null = not uploaded). */

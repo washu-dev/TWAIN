@@ -945,3 +945,20 @@ class TestFailureIsDescribed:
         assert payload["failure"]["stage"] == "DISCOVER"
         assert payload["failure"]["headline"] == "Registry unreachable"
         assert o.last_failure == payload["failure"]
+
+
+class TestFailureCardCarriesTheSelfHealHistory:
+    def test_history_and_a_human_next_step(self):
+        cls = error_handler.ClassifiedError(error_handler.ErrorCategory.CONFIG,
+                                            "Stage EXECUTE failed -- dependency_error", "hint",
+                                            "fallback", False, "ConfigError()")
+        history = [{"attempt": 1, "class": "script", "action": "patch_script",
+                    "reason": "the script crashed", "result": "fixed; running again", "signature": "a"},
+                   {"attempt": 2, "class": "environment", "action": "stop",
+                    "reason": "'openff.toolkit' is missing and pip can't install it on the cluster: "
+                              "a shared environment needs it (an approved change)",
+                    "result": "stopped: needs a shared-environment change", "signature": "b"}]
+        f = error_handler.describe_failure(cls, "EXECUTE", {
+            "status": "dependency_error", "self_heal": history, "install_log": {"job_id": "1"}})
+        assert [h["attempt"] for h in f["self_heal"]] == [1, 2] and "signature" not in f["self_heal"][0]
+        assert f["next_step"].startswith("'openff.toolkit' is missing") and "decision from you" in f["next_step"]

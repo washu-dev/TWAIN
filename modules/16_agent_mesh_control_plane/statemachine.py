@@ -33,6 +33,7 @@ from cross_validation.baseline_validator import (
 from cross_validation import mp_reference, plausibility
 
 import observer
+import triage
 from cross_validation.mp_reference import MaterialsProjectBaselines
 from self_correction.failure_classifier import RunEvidence
 from self_correction.reflection import reflect
@@ -659,7 +660,7 @@ _STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
     State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report",
                                     "codegen_report"],
                       "flags": ["plan_approved", "approved_plan"]},
-    State.EXECUTE:   {"artifacts": ["execution_result"],
+    State.EXECUTE:   {"artifacts": ["execution_result", "self_heal"],
                       "flags": ["execution_status", "heavy_confirmed"]},
     State.INTERPRET: {"artifacts": ["normalized_result"], "flags": []},
     State.VALIDATE:  {"artifacts": ["validation_report", "correction_plan"],
@@ -2775,6 +2776,10 @@ class StateMachine:
         # ground truth, whatever the mistake was.
         attempts = 1 + self._runtime_repair_budget()
         attempt = 0
+        # What each attempt was diagnosed as and what was tried (#186). An
+        # artifact, so a detached run -- re-entering here on every resume, maybe
+        # on another worker -- keeps its history and its repeat detection.
+        history = list(self._load_artifact("self_heal") or [])
         while True:
             attempt += 1
             result = adapter.execute(bundle_dir, **run_kwargs)
@@ -2784,21 +2789,13 @@ class StateMachine:
             attempt = int((getattr(result, "install_log", None) or {}).get("attempt") or attempt)
             if result.succeeded or attempt >= attempts:
                 break
-            failure = _runtime_traceback(result)
-            if failure is None:
+            if not self._self_heal_step(bundle_dir, result, attempt, attempts, history):
                 break
-            self._progress("EXECUTE", "heal", "active",
-                           f"The run crashed — repairing the script against its error "
-                           f"(attempt {attempt} of {attempts - 1})")
-            if not self._heal_runtime_failure(bundle_dir, failure, attempt):
-                self._progress("EXECUTE", "heal", "failed",
-                               "Could not repair the crash automatically")
-                break
-            self._progress("EXECUTE", "heal", "done",
-                           f"Repaired — running it again (attempt {attempt + 1} of {attempts})",
-                           attempt=attempt + 1)
+        result_doc = result.to_dict()
+        if history:
+            result_doc["self_heal"] = history
         self.context.artifacts["execution_result"] = self._write_artifact(
-            "execution_result", result.to_dict()
+            "execution_result", result_doc
         )
         self.context.execution_status = bool(result.succeeded)
         if not result.succeeded:
@@ -2825,16 +2822,88 @@ class StateMachine:
         })
 
     def _runtime_repair_budget(self) -> int:
-        """How many repair-and-re-execute rounds a failed run may consume.
+        """How many fix-and-re-execute rounds a failed run may consume (default 3).
 
-        Each round costs a full execution (on Slurm: staging + a queue wait),
-        so the default is small; ``TWAIN_RUNTIME_REPAIR_ATTEMPTS=0`` disables
-        the loop entirely.
+        ``TWAIN_SELF_HEAL_ATTEMPTS`` (#186), or the older
+        ``TWAIN_RUNTIME_REPAIR_ATTEMPTS``; 0 disables the loop. Each round costs
+        a full execution (on Slurm: staging + a queue wait), and triage stops
+        early anyway when a fix can't help (setup problems, shared-env needs,
+        resources beyond the approval, the same failure twice).
         """
+        raw = os.getenv("TWAIN_SELF_HEAL_ATTEMPTS") or os.getenv("TWAIN_RUNTIME_REPAIR_ATTEMPTS") or "3"
         try:
-            return max(0, int(os.getenv("TWAIN_RUNTIME_REPAIR_ATTEMPTS", "2")))
+            return max(0, int(raw))
         except ValueError:
-            return 2
+            return 3
+
+    @staticmethod
+    def _bundle_digest(bundle_dir) -> str:
+        """What a fix must change: the script and its requirements."""
+        h = hashlib.sha256()
+        for name in ("main.py", "requirements.txt"):
+            path = Path(bundle_dir) / name
+            h.update(path.read_bytes() if path.is_file() else b"")
+        return h.hexdigest()
+
+    @staticmethod
+    def _pip_gettable_module(module: str) -> bool:
+        deps = _plan_dependencies([module])
+        return bool(deps) and all(_pip_gettable(d) for d in deps)
+
+    @staticmethod
+    def _add_requirement(bundle_dir, module: str) -> bool:
+        """Add ``module``'s package to this run's requirements (its pip layer)."""
+        deps = _plan_dependencies([module])
+        if not deps:
+            return False
+        path = Path(bundle_dir) / "requirements.txt"
+        lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+        have = {re.split(r"[=<>!~\[;\s]", ln.strip(), maxsplit=1)[0].lower() for ln in lines if ln.strip()}
+        added = False
+        for dep in deps:
+            if dep.package.lower() in have:
+                continue
+            lines.append(f"{dep.package}=={dep.version}" if dep.version else dep.package)
+            added = True
+        if added:
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return added
+
+    def _self_heal_step(self, bundle_dir, result, attempt: int, attempts: int,
+                        history: list) -> bool:
+        """Triage one failed attempt and apply its fix; True to run again (#186)."""
+        ev = triage.evidence(result)
+        diag = triage.diagnose(ev, pip_gettable=self._pip_gettable_module,
+                               agent=(lambda p: self._agent_text(p, max_tokens=400))
+                               if getattr(self, "agent", None) is not None else None)
+        entry = {"attempt": attempt, "class": diag.cls, "action": diag.action,
+                 "reason": diag.reason, "signature": diag.signature}
+        history.append(entry)
+        if any(h is not entry and h.get("signature") == diag.signature
+               and h.get("action") != triage.STOP for h in history):
+            entry["result"] = "stopped: the same failure came back after a fix"
+        elif diag.action == triage.STOP:
+            entry["result"] = "stopped: " + {
+                triage.OPERATOR: "needs a TWAIN/RIS fix", triage.ENVIRONMENT: "needs a shared-environment change",
+                triage.RESOURCES: "needs your approval", triage.UNKNOWN: "nothing safe to try",
+            }.get(diag.cls, "no automatic fix")
+        else:
+            self._progress("EXECUTE", "heal", "active",
+                           f"Attempt {attempt} of {attempts - 1}: {diag.cls} -- {diag.reason}; fixing")
+            before = self._bundle_digest(bundle_dir)
+            applied = (self._heal_runtime_failure(bundle_dir, diag.detail, attempt)
+                       if diag.action == triage.PATCH
+                       else self._add_requirement(bundle_dir, diag.detail))
+            if applied and self._bundle_digest(bundle_dir) != before:
+                entry["result"] = "fixed; running again"
+            else:
+                entry["result"] = "stopped: no fix could be produced"
+        self.context.artifacts["self_heal"] = self._write_artifact("self_heal", history)
+        again = entry["result"].startswith("fixed")
+        self._progress("EXECUTE", "heal", "done" if again else "failed",
+                       f"{diag.cls.capitalize()}: {diag.reason} -- {entry['result']}"
+                       + (f" (attempt {attempt + 1} of {attempts})" if again else ""))
+        return again
 
     def _heal_runtime_failure(self, bundle_dir, failure: str, attempt: int) -> bool:
         """Repair ``main.py`` against the real run's traceback; True if rewritten.

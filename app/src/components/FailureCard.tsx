@@ -166,6 +166,19 @@ export function FailureCard({ failure, conversationId, onRerun }: Props) {
         ) : files ? <Text style={styles.cause}>This attempt has no run bundle in storage.</Text> : null
       ) : null}
 
+      {failure.self_heal?.length ? (
+        // Each attempt's diagnosis and what came of it, so "it failed" also says
+        // what was already tried and why TWAIN stopped where it did.
+        <View style={styles.next}>
+          <Text style={styles.nextLabel}>What TWAIN tried</Text>
+          {failure.self_heal.map((step) => (
+            <Text key={`${step.attempt}-${step.class}`} style={styles.healStep}>
+              {`Attempt ${step.attempt} · ${step.class}: ${step.reason} → ${step.result}`}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+
       {failure.job_stdout ? (
         <JobOutput label={failure.job_id ? `Job output (stdout) · Slurm job ${failure.job_id}` : 'Job output (stdout)'}
           text={failure.job_stdout} />
@@ -224,6 +237,7 @@ const styles = StyleSheet.create({
   next: { marginTop: Spacing.one, gap: 2 },
   nextLabel: { color: C.textSecondary, fontSize: 12, fontWeight: '600' },
   nextText: { color: C.textStrong, fontSize: 13 },
+  healStep: { color: C.textStrong, fontSize: 12, lineHeight: 17 },
   buttons: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two, marginTop: Spacing.two },
   button: {
     paddingVertical: Spacing.one + 2,
