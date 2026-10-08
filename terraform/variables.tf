@@ -90,6 +90,9 @@ variable "runner_secrets" {
     RIS_API_TOKEN = "ris_api/TOKEN"
     # Email notifications + shared-environment approvals (TWAIN_NOTIFY_BACKEND=sendgrid).
     TWAIN_SENDGRID_API_KEY = "sendgrid/API_KEY"
+    # Materials Project (mp-api): PBE reference values for VALIDATE and reference
+    # crystal structures for BUILD (modules/11_cross_validation/mp_reference.py).
+    MP_API_KEY = "materials_project/API_KEY"
   }
 }
 
