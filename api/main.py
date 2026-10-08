@@ -515,6 +515,27 @@ async def conversation_activity(conversation_id: str, user: CurrentUser, after: 
     return {"data": events, "next_after": events[-1]["id"] if events else max(0, after)}
 
 
+@app.get("/api/conversations/{conversation_id}/run-files")
+def conversation_run_files(conversation_id: str, user: CurrentUser, attempt: int | None = None):
+    """Short-lived download links to a cluster attempt's bundle and outputs.
+
+    Owner-only. The failure card uses these to reproduce a cluster failure: the
+    files live in S3 (the node's scratch is gone, the worker's path was never
+    reachable). ``attempt`` defaults to the newest. 404 when the run never
+    reached the cluster.
+    """
+    if not convo.owns_conversation(conversation_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    found = convo.cluster_attempt(conversation_id, attempt)
+    if not found or not found.get("s3_prefix"):
+        raise HTTPException(status_code=404, detail="This run has no cluster files.")
+    try:
+        files = job_tickets.run_file_urls(found["s3_prefix"])
+    except job_tickets.TicketError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return {"job_id": found["job_id"], "attempt": found["attempt"], **files}
+
+
 @app.get("/api/conversations/{conversation_id}/stream")
 async def stream_conversation(conversation_id: str, user: CurrentUser):
     """Live Server-Sent Events of pipeline progress for a conversation."""

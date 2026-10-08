@@ -71,6 +71,23 @@ export interface RunFailure {
   job_id?: string | null;
   /** The tail of the Slurm job's stderr, where the job says why it stopped. */
   job_stderr?: string | null;
+  /** The tail of its stdout: the smoke test and Python tracebacks land here. */
+  job_stdout?: string | null;
+  /** The exception line that ended the job's last traceback. */
+  exception?: string | null;
+  /** Which Slurm attempt this was, and the cluster env it ran in. */
+  attempt?: number | null;
+  env?: string | null;
+  /** twain.sh on RIS (the deployment's TWAIN_ENV_FILE). */
+  env_file?: string | null;
+}
+
+/** Short-lived download links to a cluster attempt's files (null = not uploaded). */
+export interface RunFiles {
+  job_id: string;
+  attempt: number;
+  urls: { bundle: string | null; outputs: string | null };
+  expires_in: number;
 }
 
 export type ActivityEvent =
@@ -393,6 +410,13 @@ class APIClient {
   async getActivity(id: string, after: number): Promise<ActivityPage> {
     const response = await this.client.get(`/api/conversations/${id}/activity`, {
       params: { after },
+    });
+    return response.data;
+  }
+
+  async getRunFiles(id: string, attempt?: number | null): Promise<RunFiles> {
+    const response = await this.client.get(`/api/conversations/${id}/run-files`, {
+      params: attempt ? { attempt } : {},
     });
     return response.data;
   }

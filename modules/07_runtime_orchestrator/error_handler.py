@@ -302,6 +302,25 @@ _SETUP_NEXT_STEPS = (
       "That is a TWAIN-side access problem, not your script: use Report to flag "
       "it, and re-run from EXECUTE once it is fixed.")),
 )
+#: What to do about a job that ran on the cluster and failed, by outcome. The
+#: old hints named the worker container's bundle path, which a researcher
+#: can't reach; the card now offers the bundle from S3 and a RIS command.
+_CLUSTER_NEXT_STEPS = {
+    "failed": ("The script crashed on the cluster{exc}. Re-run from BUILD to have TWAIN "
+               "rewrite it with this error in hand, or download the run bundle below "
+               "and reproduce it on RIS with the command shown."),
+    "dependency_error": ("The cluster environment is missing something this plan needs{exc}. "
+                         "Adding it to a shared environment needs approval from the "
+                         "environment approver; re-running from PLAN can choose a method "
+                         "the environments already support."),
+    "timeout": ("The job ran out of time{exc}. Raise the wall time on the approval card "
+                "and re-run from PLAN, or download the outputs below to see how far it got."),
+}
+_WORKER_PATH = re.compile(r"/app/|run_bundle_")
+_TRACEBACK = "Traceback (most recent call last):"
+_ENV_IN_PATH = re.compile(r"/twain-envs/(?:\.versions/[^/\s]+/)?([A-Za-z0-9_-]+)/")
+_ENV_LINE = re.compile(r"^\[env\] (?:using|layering on) \S*/twain-envs/(?:\.versions/[^/\s]+/)?([A-Za-z0-9_-]+)/", re.M)
+
 _SETUP_NEXT_STEP_DEFAULT = ("This is a cluster setup problem, not your script -- "
                             "the job's stderr below says what failed.")
 
@@ -337,6 +356,13 @@ def describe_failure(classified: "ClassifiedError", state: str,
     install_log = (execution_result or {}).get("install_log") or {}
     detail = body if len(body) <= FAILURE_DETAIL_CHARS else "…" + body[-FAILURE_DETAIL_CHARS:]
     next_step = classified.hint or classified.fallback
+    result = execution_result or {}
+    output = "\n".join(x for x in (result.get("stdout"), result.get("stderr")) if isinstance(x, str))
+    exception = _final_exception(output)
+    if install_log.get("job_id") and outcome in _CLUSTER_NEXT_STEPS and (
+            not next_step or _WORKER_PATH.search(next_step)):
+        next_step = _CLUSTER_NEXT_STEPS[outcome].format(
+            exc=f" ({exception[:200]})" if exception else "")
     if outcome == "setup_failed":
         # The generic EXECUTE hint ("inspect the script at <container path>")
         # is wrong here: the script never ran.
@@ -354,7 +380,32 @@ def describe_failure(classified: "ClassifiedError", state: str,
         "outcome": outcome,
         "job_id": install_log.get("job_id"),
         "job_stderr": _stderr_tail((execution_result or {}).get("stderr")),
+        # stdout carries the smoke test and Python tracebacks; stderr often
+        # holds only the wrapper's "payload exited N" (run cb1a625e).
+        "job_stdout": _stderr_tail(result.get("stdout")),
+        # The final exception, for the card to lead with ("ValueError: ...").
+        "exception": exception,
+        "attempt": install_log.get("attempt"),
+        # The cluster env the job actually ran in (for the reproduce command).
+        "env": _job_env(output),
+        # twain.sh on RIS, so the reproduce command sources the same setup.
+        "env_file": os.getenv("TWAIN_ENV_FILE") or None,
     }
+
+
+def _final_exception(output: str) -> Optional[str]:
+    """The exception line that ended the last Python traceback in ``output``."""
+    if _TRACEBACK not in (output or ""):
+        return None
+    block = output.rsplit(_TRACEBACK, 1)[1].splitlines()
+    tail = [ln for ln in block if ln.strip() and not ln.startswith((" ", "\t"))]
+    return tail[0].strip()[:500] if tail else None
+
+
+def _job_env(output: str) -> Optional[str]:
+    """Which cluster env ran the job: the payload's [env] line, else a traceback path."""
+    match = _ENV_LINE.search(output or "") or _ENV_IN_PATH.search(output or "")
+    return match.group(1) if match else None
 
 
 def _stderr_tail(stderr) -> Optional[str]:

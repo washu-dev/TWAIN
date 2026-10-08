@@ -916,6 +916,11 @@ class SlurmExecutionAdapter:
             lines.append('    true ) && { PY="$CAND"; break; }')
         lines += [
             "done",
+            # Say which env ran the job (the failure card's reproduce command
+            # reads this line) -- or that none qualified, which used to be silent.
+            'if [ -n "$PY" ]; then echo "[env] using $PY"; '
+            'elif [ -z "$BASE" ]; then echo "[env] no provisioned env found '
+            'under ${TWAIN_ENVS_ROOT:-the profile envs_root}"; fi',
             'if [ -z "$PY" ]; then',
         ]
         if install_deps and (bundle / "requirements.txt").is_file():
@@ -956,6 +961,7 @@ class SlurmExecutionAdapter:
                 "    except Exception:",
                 "        print(line)",
                 "TWAIN_MISSING",
+                '    echo "[env] layering on $BASE (no env passed the smoke test alone)"',
                 '    if [ -s .twain-missing.txt ]; then',
                 '      echo "[env] layering on $BASE; pip adding: '
                 '$(tr \'\\n\' \' \' < .twain-missing.txt)"',

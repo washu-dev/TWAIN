@@ -119,3 +119,33 @@ def handle(token: str, body: dict) -> dict:
     if not isinstance(body, dict):
         raise TicketError(400, "body must be a JSON object")
     return presign(redeem(token), body.get("objects"))
+
+
+#: A run's files, as the S3 transport lays them out (s3_transport.py).
+RUN_FILES = {"bundle": "input/bundle.tar.gz", "outputs": "output/outputs.tar.gz"}
+
+
+def run_file_urls(s3_prefix: str, *, client=None) -> dict:
+    """Read-only links to a finished attempt's bundle and outputs, for its owner.
+
+    The failure card's "Download run bundle" / "Download outputs": the files a
+    researcher needs to reproduce a cluster failure live in S3, not at the
+    worker-container path the old hint named. Only objects that exist get a
+    link (a job that died before uploading has no outputs).
+    """
+    from botocore.exceptions import ClientError
+
+    bucket = _bucket()
+    client = client or _s3()
+    urls = {}
+    for label, name in RUN_FILES.items():
+        key = f"{s3_prefix.rstrip('/')}/{name}"
+        try:
+            client.head_object(Bucket=bucket, Key=key)
+        except ClientError:
+            urls[label] = None
+            continue
+        urls[label] = client.generate_presigned_url(
+            "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=URL_TTL_SECONDS)
+    return {"urls": urls, "expires_in": URL_TTL_SECONDS}
+

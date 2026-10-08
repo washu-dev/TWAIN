@@ -477,3 +477,29 @@ class TestActivityFeed:
     def test_someone_elses_run_is_404(self, _owns, mock_activity):
         assert client.get("/api/conversations/conv-1/activity").status_code == 404
         mock_activity.assert_not_called()
+
+
+class TestRunFiles:
+    @patch("job_tickets.run_file_urls", return_value={"urls": {"bundle": "https://b", "outputs": None}, "expires_in": 3600})
+    @patch("conversations.cluster_attempt", return_value={"job_id": "3365219", "attempt": 1, "s3_prefix": "runs/c/attempt-1", "status": "collected"})
+    @patch("conversations.owns_conversation", return_value=True)
+    def test_owner_gets_links_for_the_newest_attempt(self, owns, attempt, urls):
+        r = client.get("/api/conversations/conv-1/run-files")
+        assert r.status_code == 200
+        assert r.json() == {"job_id": "3365219", "attempt": 1,
+                            "urls": {"bundle": "https://b", "outputs": None}, "expires_in": 3600}
+        owns.assert_called_once_with("conv-1", "user-1")
+        attempt.assert_called_once_with("conv-1", None)
+        urls.assert_called_once_with("runs/c/attempt-1")
+
+    @patch("job_tickets.run_file_urls")
+    @patch("conversations.owns_conversation", return_value=False)
+    def test_someone_elses_run_is_404(self, _owns, urls):
+        assert client.get("/api/conversations/conv-1/run-files").status_code == 404
+        urls.assert_not_called()
+
+    @patch("conversations.cluster_attempt", return_value=None)
+    @patch("conversations.owns_conversation", return_value=True)
+    def test_a_run_that_never_reached_the_cluster_is_404(self, _owns, _attempt):
+        assert client.get("/api/conversations/conv-1/run-files?attempt=2").status_code == 404
+
