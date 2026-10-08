@@ -10,11 +10,12 @@ from typing import Annotated, Literal
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 import auth
 import conversations as convo
+import email_actions
 import github_issues
 import job_tickets
 import migrate
@@ -396,6 +397,31 @@ def post_approval(conversation_id: str, body: SendApproval, user: CurrentUser):
             acceptance_metrics=body.acceptance_metrics,
         )
     }
+
+
+@app.get("/api/actions/{token}", response_class=HTMLResponse)
+def email_action_page(token: str):
+    """A gate button from an email: a confirmation page (never acts on GET).
+
+    No sign-in -- the token is the authority (see email_actions.py). GET only
+    shows what the button will do, because mail scanners open every link.
+    """
+    action = email_actions.peek(token)
+    status = 200 if action.state == "ok" else (404 if action.state == "unknown" else 410)
+    return HTMLResponse(email_actions.confirm_page(action), status_code=status,
+                        headers=email_actions.HEADERS)
+
+
+@app.post("/api/actions/{token}", response_class=HTMLResponse)
+def email_action_confirm(token: str):
+    """The confirmation page's POST: spend the token and answer the gate."""
+    action = email_actions.consume(token)
+    if action.state != "ok":
+        status = 404 if action.state == "unknown" else 410
+        return HTMLResponse(email_actions.result_page(action), status_code=status,
+                            headers=email_actions.HEADERS)
+    return HTMLResponse(email_actions.result_page(action, done=True),
+                        headers=email_actions.HEADERS)
 
 
 @app.post("/api/conversations/{conversation_id}/terminate")

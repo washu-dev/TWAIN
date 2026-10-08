@@ -503,3 +503,43 @@ class TestRunFiles:
     def test_a_run_that_never_reached_the_cluster_is_404(self, _owns, _attempt):
         assert client.get("/api/conversations/conv-1/run-files?attempt=2").status_code == 404
 
+
+
+class TestEmailActionRoutes:
+    """GET never acts (mail scanners open every link); POST answers once."""
+
+    def _action(self, state):
+        import email_actions
+        return email_actions.Action(state, "conv-1", 7, "approval_request", "approve",
+                                    "Approve plan", "silicon band gap")
+
+    @patch("email_actions.consume")
+    @patch("email_actions.peek")
+    def test_get_shows_a_confirmation_and_does_not_act(self, peek, consume):
+        peek.return_value = self._action("ok")
+        r = client.get("/api/actions/tok")
+        assert r.status_code == 200 and "<form method='post'>" in r.text
+        assert "approve the plan" in r.text and "silicon band gap" in r.text
+        assert r.headers["cache-control"] == "no-store" and r.headers["x-frame-options"] == "DENY"
+        consume.assert_not_called()
+
+    @patch("email_actions.consume")
+    def test_post_answers(self, consume):
+        consume.return_value = self._action("ok")
+        r = client.post("/api/actions/tok")
+        assert r.status_code == 200 and "the run continues" in r.text
+        consume.assert_called_once_with("tok")
+
+    @patch("email_actions.consume")
+    @patch("email_actions.peek")
+    def test_spent_and_unknown_buttons(self, peek, consume):
+        consume.return_value = self._action("used")
+        assert client.post("/api/actions/tok").status_code == 410
+        peek.return_value = type(self._action("ok"))("unknown")
+        assert client.get("/api/actions/nope").status_code == 404
+
+    def test_no_sign_in_needed(self):
+        # The token is the authority: the route must not demand a bearer token.
+        from main import app as the_app
+        routes = [r for r in the_app.routes if getattr(r, "path", "") == "/api/actions/{token}"]
+        assert routes and all("CurrentUser" not in str(r.dependant.dependencies) for r in routes)
