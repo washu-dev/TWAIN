@@ -435,3 +435,42 @@ class TestARequestedCompositionIsSanityChecked:
         from cross_validation import mp_reference as mp
         for bad in (None, 42, "", "   "):
             assert mp.formula_is_known(bad, api_key="k") is None
+
+
+# -- method fallback (#188) ---------------------------------------------------
+
+def test_a_replan_after_a_failed_method_picks_another_and_says_so(machine, tmp_path):
+    _seed_intent(machine, tmp_path)
+    machine.decompose()
+    machine.plan()
+    first = machine._load_artifact("execution_plan")
+    key = SM.StateMachine._method_key(first)
+    machine.context.plan_approved = True
+    machine.context.approved_plan = machine._plan_fingerprint()
+    machine.context.failed_methods = [{"method": key, "calculator": None,
+                                       "reason": "the script kept crashing", "last_attempt": 4}]
+    assert machine.plan() == State.BUILD
+    second = machine._load_artifact("execution_plan")
+    _validator("execution_plan.schema.json").validate(second)
+    assert SM.StateMachine._method_key(second) != key
+    assert second["safety_notes"][0].startswith("Method changed:")
+    assert "the script kept crashing" in second["safety_notes"][0]
+    assert machine.context.plan_approved is False       # a new method needs a new approval
+
+
+def test_no_method_left_stops_with_the_reason(machine, tmp_path):
+    _seed_intent(machine, tmp_path)
+    machine.decompose()
+    from method_discovery.registry_loader import RegistryLoader
+    machine.context.failed_methods = [{"method": e.name.lower(), "reason": "broken",
+                                       "last_attempt": 1} for e in RegistryLoader().entries()]
+    with pytest.raises(Exception, match="no other method fits"):
+        machine.plan()
+
+
+def test_the_deterministic_pick_says_why(machine, tmp_path):
+    _seed_intent(machine, tmp_path)
+    machine.decompose()
+    machine.plan()
+    notes = machine._load_artifact("execution_plan")["safety_notes"]
+    assert any(n.startswith("Chosen by the discovery ranking:") for n in notes)
