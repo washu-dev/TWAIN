@@ -41,6 +41,7 @@ reach a backend (see :func:`_throttle`), because "best-effort, never fails the
 run" must not also mean "will mail the same thing a thousand times if something
 upstream loops".
 """
+import email.utils
 import hashlib
 import json
 import logging
@@ -446,6 +447,18 @@ def _notify_sendgrid(
     )
 
 
+def _sendgrid_sender(from_addr: str) -> dict:
+    """``TWAIN_NOTIFY_FROM`` as SendGrid's sender object.
+
+    Accepts a bare address or a display form -- "DI2 Accelerator
+    <di2accelerator@wustl.edu>" -- which SendGrid rejects in its ``email`` field.
+    """
+    name, address = email.utils.parseaddr(from_addr)
+    if not address or "@" not in address:
+        raise RuntimeError(f"TWAIN_NOTIFY_FROM is not an email address: {from_addr!r}")
+    return {"email": address, "name": name} if name else {"email": address}
+
+
 def _sendgrid_post(api_key: str, from_addr: str, to_addr: str, subject: str, body: str) -> None:
     """POST one plain-text mail to the SendGrid v3 API (stdlib only).
 
@@ -458,7 +471,7 @@ def _sendgrid_post(api_key: str, from_addr: str, to_addr: str, subject: str, bod
     payload = json.dumps(
         {
             "personalizations": [{"to": [{"email": to_addr}]}],
-            "from": {"email": from_addr},
+            "from": _sendgrid_sender(from_addr),
             "subject": subject,
             "content": [{"type": "text/plain", "value": body}],
         }

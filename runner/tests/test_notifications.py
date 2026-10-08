@@ -384,6 +384,19 @@ class TestSendGridBackend:
         assert captured["body"]["from"]["email"] == "twain@twain.dev"
         assert "waiting for your approval" in captured["body"]["subject"]
 
+    @pytest.mark.parametrize("configured, sender", [
+        ("DI2 Accelerator <di2accelerator@wustl.edu>",
+         {"email": "di2accelerator@wustl.edu", "name": "DI2 Accelerator"}),
+        ("di2accelerator@wustl.edu", {"email": "di2accelerator@wustl.edu"}),
+    ])
+    def test_sender_display_name_is_split_for_sendgrid(self, configured, sender):
+        # SendGrid rejects "Name <addr>" in from.email; the deployment sets that form.
+        assert notifications._sendgrid_sender(configured) == sender
+
+    def test_a_sender_that_is_not_an_address_is_refused(self):
+        with pytest.raises(RuntimeError):
+            notifications._sendgrid_sender("DI2 Accelerator")
+
     def test_owner_without_an_address_is_not_redirected(self, monkeypatch, caplog):
         # The flood landed in the wrong inbox because a blank users.email fell
         # back to the operator address. Nothing is sent now, whatever is

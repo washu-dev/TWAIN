@@ -105,10 +105,20 @@ def test_select_partition_prefers_gpu_for_gpu_jobs():
     assert adapter.select_partition(req).name == "general-gpu"
 
 
-def test_select_partition_uses_short_when_it_fits():
+def test_a_calculation_never_defaults_to_the_short_partition():
+    # Job 3368485: a 30-minute calculation went to general-short, the
+    # smoke-test partition. Calculations use the default partition; short is
+    # for smoke and maintenance jobs that ask for it by name.
+    adapter = SlurmAdapter(_profile())
+    for minutes in (5, 20, 30):
+        req = SlurmRequest(cpu_count=1, gpu_count=0, max_time=minutes, ram=2000)
+        assert adapter.select_partition(req).name == "general-cpu"
+
+
+def test_the_short_partition_is_used_when_asked_for():
     adapter = SlurmAdapter(_profile())
     req = SlurmRequest(cpu_count=1, gpu_count=0, max_time=20, ram=2000)
-    assert adapter.select_partition(req).name == "general-short"
+    assert adapter.select_partition(req, override="general-short").name == "general-short"
 
 
 def test_select_partition_falls_back_to_default_when_over_short_limit():

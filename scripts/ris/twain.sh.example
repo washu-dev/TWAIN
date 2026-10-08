@@ -10,16 +10,15 @@
 # whoever can edit it can run code as you and read what it exports.
 #
 # How a job uses it (modules/08_execution_adapter/slurm_execution_adapter.py,
-# _s3_job_script): source this file -> check $CODE_DIR contains the commit that
-# submitted the job (else exit 4, "git -C $CODE_DIR pull") -> exec
-# $CODE_DIR/scripts/ris/job_wrapper.sh, which fetches the bundle from S3 with
-# the job's ticket, runs it in $TWAIN_SCRATCH, and uploads the outputs.
+# _s3_job_script): source this file -> run the job wrapper, which travels INSIDE
+# the job script (no checkout is read), fetches the bundle from S3 with the
+# job's ticket, runs it in $TWAIN_SCRATCH, and uploads the outputs.
 
 # ── Required ──────────────────────────────────────────────────────────────────
 # Your TWAIN area on RIS storage.
 export TWAIN_HOME="/storage2/fs1/mdan/Active/common/projects/twain"
-# A checkout of github.com/washu-dev/TWAIN (master). Jobs run
-# scripts/ris/job_wrapper.sh from here, so keep it current: `git -C "$CODE_DIR" pull`.
+# A checkout of github.com/washu-dev/TWAIN. Used for maintenance by hand (rebuild_envs.sh, inventory.sh); jobs don't read it,
+# so it needn't track master.
 export CODE_DIR="$TWAIN_HOME/TWAIN"
 
 # ── Optional ──────────────────────────────────────────────────────────────────

@@ -234,10 +234,16 @@ def select_partition(
     Preference order, all constrained by GPU need and wall-clock limit:
       1. an explicit override (validated against the request),
       2. the dedicated GPU partition when GPUs are requested,
-      3. the short partition when the job fits its limit (faster scheduling),
-      4. the default partition,
-      5. any partition that admits the job.
+      3. the default partition (general-cpu on compute2),
+      4. any other partition that admits the job -- except the short one.
     Raises :class:`SlurmError` if nothing admits the request.
+
+    The short partition (general-short, 30 min) is for smoke tests and
+    maintenance jobs, which ask for it by name (``override``, or the inventory
+    job's own spec). A calculation never lands there by default: it used to be
+    preferred whenever the approved wall time fitted its limit, so a real run
+    went to the smoke-test partition (job 3368485) and a longer one would have
+    been killed at 30 minutes the moment its estimate was low.
 
     Module-level (not a method) so both :class:`SlurmAdapter` (SSH/sbatch) and
     the RIS-API-backed adapter share one selection policy instead of
@@ -259,11 +265,9 @@ def select_partition(
     candidates: List[str] = []
     if needs_gpu and profile.gpu_partition:
         candidates.append(profile.gpu_partition)
-    if not needs_gpu and profile.short_partition:
-        candidates.append(profile.short_partition)
     if profile.default_partition:
         candidates.append(profile.default_partition)
-    candidates += [p.name for p in profile.partitions]
+    candidates += [p.name for p in profile.partitions if p.name != profile.short_partition]
 
     for name in candidates:
         part = profile.partition(name)
