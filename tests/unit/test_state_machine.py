@@ -1267,15 +1267,55 @@ class TestExecuteSelfHeals:
         assert len(m._execution_adapter.calls) == 1
         assert m._script_doctor.failures == []
 
+    def _failed_with(self, name):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+        return ExecutionResult(status=ExecutionStatus.FAILED, exit_code=42,
+                               stdout=self.CRASH.replace("KeyError: 'W'", f"KeyError: '{name}'"))
+
     def test_repair_budget_is_bounded(self, tmp_path):
-        # Every attempt fails and every repair "succeeds": the loop must stop
-        # at the budget (default 2 repairs -> 3 executions), then surface the
-        # failure.
-        m, _ = self._machine(tmp_path, [self._failed()])
+        # Every attempt fails DIFFERENTLY and every repair changes the script:
+        # the loop stops at the budget (default 3 repairs -> 4 executions, #186).
+        m, _ = self._machine(tmp_path, [self._failed_with(n) for n in "ABCDEF"])
+        fixes = iter(f"print('fix {i}')\n" for i in range(10))
+        m._script_doctor.repair_runtime = lambda src, failure: (
+            m._script_doctor.failures.append(failure) or next(fixes))
         with pytest.raises(Exception):
             m.execute()
-        assert len(m._execution_adapter.calls) == 3
-        assert len(m._script_doctor.failures) == 2
+        assert len(m._execution_adapter.calls) == 4
+        assert len(m._script_doctor.failures) == 3
+
+    def test_the_same_failure_twice_stops_early(self, tmp_path):
+        # A fix that didn't change the outcome won't on a third try either.
+        m, _ = self._machine(tmp_path, [self._failed()])
+        fixes = iter(f"print('fix {i}')\n" for i in range(10))
+        m._script_doctor.repair_runtime = lambda src, failure: (
+            m._script_doctor.failures.append(failure) or next(fixes))
+        with pytest.raises(Exception):
+            m.execute()
+        assert len(m._execution_adapter.calls) == 2
+        history = m._load_artifact("self_heal")
+        assert history[-1]["result"] == "stopped: the same failure came back after a fix"
+
+    def test_a_pip_installable_missing_module_is_added_for_this_run(self, tmp_path, monkeypatch):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+        missing = ExecutionResult(status=ExecutionStatus.DEPENDENCY_ERROR, exit_code=2,
+                                  stdout="[smoke] MISSING DEPENDENCY: MDAnalysis\n")
+        m, bundle_dir = self._machine(tmp_path, [missing, self._ok()])
+        (bundle_dir / "requirements.txt").write_text("numpy==1.26.4\n", encoding="utf-8")
+        monkeypatch.setattr(SM.StateMachine, "_pip_gettable_module", staticmethod(lambda mod: True))
+        assert m.execute() == State.INTERPRET
+        assert "mdanalysis" in (bundle_dir / "requirements.txt").read_text().lower()
+        assert m._load_artifact("self_heal")[0]["action"] == "add_requirement"
+
+    def test_a_setup_failure_spends_no_retries(self, tmp_path):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+        setup = ExecutionResult(status=ExecutionStatus.SETUP_FAILED, exit_code=6,
+                                stderr="TWAIN_BUNDLE_FETCH_FAILED: 403")
+        m, _ = self._machine(tmp_path, [setup])
+        with pytest.raises(Exception):
+            m.execute()
+        assert len(m._execution_adapter.calls) == 1 and m._script_doctor.failures == []
+        assert m._load_artifact("self_heal")[0]["class"] == "operator"
 
     def test_template_bundles_are_not_healed(self, tmp_path):
         # A deterministic template didn't invent API calls; a crash there is

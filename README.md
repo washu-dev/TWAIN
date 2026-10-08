@@ -149,7 +149,7 @@ ones:
 | `TWAIN_STAGING=s3`, `TWAIN_RUN_BUCKET` | worker, API | Job files move through S3 with presigned URLs |
 | `TWAIN_ENV_FILE` | worker | `twain.sh` on RIS, which jobs source (`TWAIN_HOME`, `TWAIN_ENVS_ROOT`) |
 | `TWAIN_INVENTORY_HOURS` / `_MAX_AGE_HOURS` | worker | How often RIS is inventoried (24 h), and when planning falls back to the specs (168 h) |
-| `TWAIN_RUNTIME_REPAIR_ATTEMPTS` | worker | Repair rounds after a script crash (default 2; 0 disables) |
+| `TWAIN_SELF_HEAL_ATTEMPTS` | worker | Fix-and-re-run rounds after a failed calculation (default 3; 0 disables; `TWAIN_RUNTIME_REPAIR_ATTEMPTS` still works). Triage stops early for setup problems, shared-environment needs, resources, or the same failure twice |
 | `TWAIN_NOTIFY_BACKEND`, `TWAIN_NOTIFY_FROM` | worker | `log` or `sendgrid` (plus `ses`/`sns`); the email sender |
 | `TWAIN_ENV_APPROVERS` | worker | Who may approve changes to shared RIS environments (default `arifs@wustl.edu`) |
 | `TWAIN_AUTO_RUN=1` | runner | Unattended: skips the approval and heavy-calculation gates (testing only) |

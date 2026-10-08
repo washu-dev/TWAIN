@@ -363,6 +363,15 @@ def describe_failure(classified: "ClassifiedError", state: str,
             not next_step or _WORKER_PATH.search(next_step)):
         next_step = _CLUSTER_NEXT_STEPS[outcome].format(
             exc=f" ({exception[:200]})" if exception else "")
+    # What the self-heal loop tried (#186): when triage stopped because a person
+    # must act -- a shared environment, more time or memory -- that IS the next
+    # step, said in triage's words rather than the generic hint.
+    history = [h for h in (result.get("self_heal") or []) if isinstance(h, dict)]
+    last = history[-1] if history else None
+    if last and str(last.get("result", "")).startswith("stopped") and \
+            last.get("class") in ("environment", "resources"):
+        next_step = (f"{str(last.get('reason') or '').rstrip('.')}. TWAIN stopped here instead "
+                     f"of retrying, because this needs a decision from you.")
     if outcome == "setup_failed":
         # The generic EXECUTE hint ("inspect the script at <container path>")
         # is wrong here: the script never ran.
@@ -390,6 +399,9 @@ def describe_failure(classified: "ClassifiedError", state: str,
         "env": _job_env(output),
         # twain.sh on RIS, so the reproduce command sources the same setup.
         "env_file": os.getenv("TWAIN_ENV_FILE") or None,
+        # Each attempt's diagnosis and outcome, for the card's "What TWAIN tried".
+        "self_heal": [{k: h.get(k) for k in ("attempt", "class", "action", "reason", "result")}
+                      for h in history] or None,
     }
 
 
