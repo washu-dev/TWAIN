@@ -93,11 +93,24 @@ build() {
   done
 }
 
+# Run a command inside an env the way a TWAIN job does (twain_use_env in the
+# Slurm payload): its bin first on PATH, CONDA_PREFIX set, activate.d hooks
+# sourced. Checking with a bare "$p/bin/python" lied: OpenFF finds AmberTools
+# by looking for sqm on PATH, so AM1-BCC "failed" in an env where jobs work.
+in_env() {  # <prefix> <command...>
+  local prefix="$1"; shift
+  ( export PATH="$prefix/bin:$PATH" CONDA_PREFIX="$prefix"
+    for hook in "$prefix"/etc/conda/activate.d/*.sh; do
+      [ -r "$hook" ] && . "$hook" >/dev/null 2>&1
+    done
+    "$@" )
+}
+
 verify_one() {  # <version> <env>; prints [verify] lines, returns non-zero on any failure
   local version="$1" name="$2" p="$E/.versions/$1/$2" fail=0 m b n first broad
   [ -x "$p/bin/python" ] || { echo "[verify] $name: no python at $p"; return 1; }
   for m in $(imports_for "$name"); do
-    if err=$("$p/bin/python" -c "import $m" 2>&1); then echo "[verify] $name import $m OK"
+    if err=$(in_env "$p" python -c "import $m" 2>&1); then echo "[verify] $name import $m OK"
     else echo "[verify] $name import $m FAILED: $(echo "$err" | tail -1)"; fail=1; fi
   done
   for b in $(binaries_for "$name"); do
@@ -105,7 +118,7 @@ verify_one() {  # <version> <env>; prints [verify] lines, returns non-zero on an
   done
   local check; check=$(functional_check_for "$name")
   if [ -n "$check" ]; then
-    if err=$("$p/bin/python" -c "$check" 2>&1); then echo "[verify] $name functional: $(echo "$err" | tail -1)"
+    if err=$(in_env "$p" python -c "$check" 2>&1); then echo "[verify] $name functional: $(echo "$err" | tail -1)"
     else echo "[verify] $name functional check FAILED: $(echo "$err" | tail -1)"; fail=1; fi
   fi
   # A file naming another prefix (a copied env, an old team root) runs code from
