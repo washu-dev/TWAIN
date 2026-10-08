@@ -876,6 +876,37 @@ class TestFailureIsDescribed:
             "EXECUTE", {"status": "setup_failed", "stderr": "TWAIN_STALE_CHECKOUT: ..."})
         assert "git pull" in f["next_step"]
 
+    def test_a_cluster_crash_leads_with_its_exception_not_a_worker_path(self):
+        # Run cb1a625e (Slurm 3365219): the traceback was in stdout; stderr only
+        # said "payload exited 4", and the hint named /app/logs/... on the worker.
+        stdout = (
+            "[env] using /storage2/x/twain-envs/nwchem/bin/python\n"
+            "Traceback (most recent call last):\n"
+            '  File "/tmp/twain-cb1a/main.py", line 67, in make_systems\n'
+            "    inter = Interchange.from_smirnoff(force_field=ff, topology=off_top)\n"
+            '  File "/storage2/x/twain-envs/nwchem/lib/python3.11/site-packages/openff/x.py", line 280, in call\n'
+            "    raise ValueError(msg)\n"
+            'ValueError: No registered toolkits can provide the capability "assign_partial_charges"\n'
+            "Available toolkits are: [RDKit]\n")
+        f = error_handler.describe_failure(
+            self._classified("Stage EXECUTE failed — ConfigError: the generated run did not succeed "
+                             "(failed): Slurm job 3365219 failed (failed, exit 4)",
+                             hint="Inspect the script and dependencies at /app/logs/sessions/artifacts/run_bundle_cb1a"),
+            "EXECUTE",
+            {"status": "failed", "stdout": stdout, "stderr": "[twain-job] payload exited 4",
+             "install_log": {"job_id": "3365219", "attempt": 1}})
+        assert f["exception"].startswith("ValueError: No registered toolkits")
+        assert "/app/" not in f["next_step"] and "run_bundle_" not in f["next_step"]
+        assert "Re-run from BUILD" in f["next_step"] and "ValueError" in f["next_step"]
+        assert f["env"] == "nwchem" and f["attempt"] == 1
+        assert "Traceback" in f["job_stdout"]
+
+    def test_a_local_run_keeps_its_own_hint(self):
+        f = error_handler.describe_failure(
+            self._classified("boom", hint="Inspect the script at /tmp/bundle"), "EXECUTE",
+            {"status": "failed", "stdout": "", "install_log": {}})
+        assert f["next_step"] == "Inspect the script at /tmp/bundle" and f["env"] is None
+
     def test_job_stderr_is_a_bounded_tail_and_absent_when_empty(self):
         lines = "\n".join(f"line {i}" for i in range(500))
         f = error_handler.describe_failure(

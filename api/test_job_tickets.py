@@ -127,3 +127,28 @@ class TestRoute:
         monkeypatch.setattr(job_tickets, "get_connection", lambda: FakeConn(None))
         r = client.post("/api/job-tickets/urls", json={"objects": []})
         assert r.status_code == 401
+
+
+class TestRunFileUrls:
+    """The failure card's download links: read-only, scoped to the attempt, only for files that exist."""
+
+    class _S3:
+        def __init__(self, real, present):
+            self.real, self.present = real, present
+
+        def head_object(self, Bucket, Key):
+            from botocore.exceptions import ClientError
+            if Key not in self.present:
+                raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+            return {}
+
+        def generate_presigned_url(self, *a, **kw):
+            return self.real.generate_presigned_url(*a, **kw)
+
+    def test_links_only_what_was_uploaded(self, s3):
+        fake = self._S3(s3, {"runs/r1/attempt-2/input/bundle.tar.gz"})
+        out = job_tickets.run_file_urls("runs/r1/attempt-2", client=fake)
+        assert _key_of(out["urls"]["bundle"]) == "runs/r1/attempt-2/input/bundle.tar.gz"
+        assert out["urls"]["outputs"] is None          # the job died before uploading
+        assert out["expires_in"] == job_tickets.URL_TTL_SECONDS
+        assert "x-amz-signature" in out["urls"]["bundle"].lower()

@@ -754,7 +754,16 @@ export const ChatScreen: React.FC = () => {
         {status === 'error' && activity.failure && (
           // Where it stopped and why -- instead of "see the run log", which
           // pointed at a log nothing here shows.
-          <FailureCard failure={activity.failure} />
+          <FailureCard
+            failure={activity.failure}
+            conversationId={conversationId ?? undefined}
+            onRerun={(state) => {
+              const stage = RERUN_STAGES.find((s) => s.state === state);
+              if (!stage) return;
+              setRerunOpen(true);
+              openRerunDraft(stage);
+            }}
+          />
         )}
       </ScrollView>
 

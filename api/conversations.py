@@ -591,6 +591,26 @@ def get_artifact(session_id: str, name: str) -> dict | None:
         conn.close()
 
 
+def cluster_attempt(session_id: str, attempt: int | None = None) -> dict | None:
+    """The run's Slurm attempt (its newest when ``attempt`` is None), or None."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT ris_job_id, attempt, s3_prefix, status FROM cluster_jobs "
+            "WHERE session_id = %s AND (%s::int IS NULL OR attempt = %s::int) "
+            "ORDER BY attempt DESC LIMIT 1;",
+            (session_id, attempt, attempt),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {"job_id": row[0], "attempt": row[1], "s3_prefix": row[2], "status": row[3]}
+
+
 def owns_conversation(conversation_id: str, user_id: str) -> bool:
     """Cheap ownership check for endpoints polled every few seconds.
 
