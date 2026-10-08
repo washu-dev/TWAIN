@@ -8,6 +8,39 @@ All diagrams are in **draw.io format** (.drawio files) and can be opened with:
 
 ---
 
+## Current system (2026-10)
+
+### 7. **Deployment & dependencies** (`07_deployment_dependencies.drawio`)
+**Purpose**: How everything connects as deployed: the browser, CloudFront, the
+web app (S3), the API (ECS `twain-washu`), RDS, SQS, the worker
+(ECS `twain-runner`), the run bucket, secrets and IAM, GitHub Actions/ECR,
+Terraform, and RIS Compute2 (RIS API, storage2 `$TWAIN_HOME` folders, versioned
+environments, compute nodes). Also the repository's code map (modules 01–16,
+registries, templates) and every external dependency, marked with when it is
+fetched (image build, RIS provisioning, plan time, job run time, request time).
+**Best for**: onboarding, security reviews, "what breaks if X is down?"
+
+### 8. **Run lifecycle** (`08_run_lifecycle.drawio`)
+**Purpose**: One simulation from submission to results, across the researcher,
+web app, API, Postgres, SQS, worker, cluster monitor, LLM, S3, RIS and email:
+- the outbox dispatch and the clarify and approval suspensions (with emails);
+- BUILD/REPAIR, detached EXECUTE, the job ticket, and the job on the compute
+  node;
+- webhook-woken monitoring feeding the **pizza tracker** and the **subtask
+  checklist**;
+- the resume, collect, interpret and validate steps, then the result or the
+  **failure card**;
+- the **observer** gates and shared-environment approvals, drawn as planned
+  (#185, #187, #188).
+**Best for**: understanding what the user sees at each moment and why.
+
+> Diagrams 1–6 below are the **original design** (June–July 2026). They explain
+> the pipeline's concepts, but predate the ECS worker, SQS dispatch, RIS API
+> execution, S3 staging and the RIS inventory. Use 7 and 8 for the system as it
+> is.
+
+---
+
 ## 📊 Diagram Catalog
 
 ### 1. **System Dataflow** (`01_system_dataflow.drawio`)

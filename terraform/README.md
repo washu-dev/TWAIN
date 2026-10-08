@@ -1,82 +1,85 @@
-# TWAIN secrets (AWS Secrets Manager)
+# TWAIN infrastructure (Terraform)
 
-Terraform that manages a group of TWAIN secrets in AWS Secrets Manager, encrypted
-with a dedicated KMS key, and readable only by a single IAM role that you assume.
+Terraform for TWAIN's AWS pieces in account **730335203321**, region
+**us-east-1**: secrets and their key, the run-data bucket, the job queues, the
+IAM grants, and the worker's ECS service. It needs Terraform ≥ 1.7 (it uses
+`removed` blocks) and AWS provider ~> 5.60.
 
-## What it creates
+The API service, ALB, CloudFront, the app bucket, ECR and RDS were created
+before this Terraform existed and are **not** managed here (see the root
+[README](../README.md#deploying), "Bootstrapping from scratch"). Diagram
+[07](../docs/architecture/07_deployment_dependencies.drawio) shows how
+everything connects.
 
-| Resource | Purpose |
-| --- | --- |
-| `aws_secretsmanager_secret` (one per entry in `secrets.json`) | Named `TWAIN/<key>` and tagged `Project=TWAIN`, `Category=TWAIN` — the grouping convention |
-| `aws_kms_key` + alias `alias/twain-secrets` | Customer-managed key encrypting every secret; only the read role may `Decrypt` |
-| `aws_iam_role` `TWAIN-secrets-reader` | The only non-admin principal allowed to read/decrypt the secrets; its trust policy lets **you** assume it |
+> **WashU IT forbids IAM deletes.** `WashU_IT_Deny_IAM_Specific` denies
+> `iam:DeleteRolePolicy`, `iam:DetachRolePolicy` and related actions on every
+> role; `PutRolePolicy` is allowed. A plan that **replaces** or **destroys** an
+> `aws_iam_role_policy` will fail half-way. Move a grant by adding a new
+> resource address and *forgetting* the old one with
+> `removed { lifecycle { destroy = false } }` (see `iam_add_only.tf`). Check
+> every plan for "must be replaced" on IAM resources before applying.
 
-Access model: the KMS key policy grants `Decrypt` only to `TWAIN-secrets-reader`
-(plus account administrators, who can always access resources in their account —
-this is inherent to AWS and cannot be removed without locking yourself out). The
-role's identity policy scopes `GetSecretValue`/`DescribeSecret` to exactly the
-`TWAIN/*` secrets. So in practice: assume the role → read the secrets; nobody
-else (short of an account admin) can.
+## What it manages
 
-## Secret definitions — `secrets.json` (never committed)
+| File | Resources | Purpose |
+|---|---|---|
+| `main.tf` | `aws_kms_key.twain_secrets` (+ alias), one `aws_secretsmanager_secret` + version per `secrets.json` entry (`TWAIN/<key>`) | All runtime secrets: DB password, LLM credentials, RIS API token and webhook secret, SSO identifiers, GitHub PAT, SendGrid key |
+| `main.tf` | Role `TWAIN-secrets-reader` | Human or administrative read access to `TWAIN/*` |
+| `main.tf` | Role `TWAIN-sso-ci-reader` | Lets the app build read only `sso/APP_ID` and `sso/TENANT_ID` |
+| `main.tf` | `runner_execution_secrets` on `ecsTaskExecutionRole` | The worker's container secrets (`var.runner_secrets`), injected at start |
+| `run_data.tf` | Bucket `twain-run-data-<account>` + policy, lifecycle, encryption | Slurm job files: `runs/<run>/attempt-<n>/{input,output}/…`; TLS only, owner-enforced, SSE-S3, `runs/` expires after 90 days |
+| `run_data.tf` | `api_task_run_data` on `twain-api-ecs-task-role` | The API reads and writes `runs/*` in order to sign job and download links |
+| `worker.tf` | `twain-jobs.fifo` (+ `twain-jobs-dlq.fifo`) | Job dispatch: visibility 900 s, redrive after 5 receives |
+| `worker.tf` | `api_task_dispatch` on `twain-api-ecs-task-role` | The API sends job messages |
+| `worker.tf` | Role `TWAIN-runner-worker` + policy | The worker: SQS consume/send, `runs/*` get/put, the DB password secret, KMS decrypt |
+| `worker.tf` | Log group `/ecs/twain-runner`, bootstrap task definition, ECS service `twain-runner` | The worker service (Fargate, private subnets, no public IP). `ignore_changes` on the task definition, because CI deploys new revisions |
+| `iam_add_only.tf` | `removed` blocks | Forget (never delete) the two policies first attached to the wrong role |
 
-Secrets are defined in `secrets.json`, a **git-ignored** file. Start from the
-template:
+The execution role is `service-role/ecsTaskExecutionRole`. Look it up with
+`data "aws_iam_role"`; never build its ARN by hand, because the path matters
+(#177).
+
+## Secrets: `secrets.json` (git-ignored)
 
 ```bash
-cp secrets.example.json secrets.json   # then fill in real values
+cp secrets.example.json secrets.json      # then fill in values
 ```
 
-Each entry is `"<name>": { "description": "...", "value": "..." }`. The `<name>`
-may contain `/` to sub-group (e.g. `sso/azure-tenant-id` → secret
-`TWAIN/sso/azure-tenant-id`). A bare string value also works:
-`"my/name": "the-value"`.
+Each entry is `"<name>": {"description": "...", "value": "..."}` and becomes
+secret `TWAIN/<name>`. In use today:
 
-`terraform.tfstate` also holds secret values in plaintext and is git-ignored too.
-Do not share it; consider a remote encrypted backend (e.g. S3 + DynamoDB lock)
-for team use.
+| Key | Used by |
+|---|---|
+| `database/DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | API (all) and worker (password) |
+| `secure_api/API_KEY`, `CLIENT_ID`, `CLIENT_SECRET` | Worker (LLM gateway) |
+| `ris_api/TOKEN` · `ris_api/WEBHOOK_SECRET` | Worker (RIS API) · API (webhook signatures). A separate secret from RETICLE's, even if the PAT is the same |
+| `sso/APP_ID`, `sso/TENANT_ID` (+ `sso/APP_SECRET`) | App build and API (Entra) |
+| `github/GITHUB_ISSUE_TOKEN` | API (run reports, issues) |
+| `sendgrid/API_KEY` | Worker (email, when `TWAIN_NOTIFY_BACKEND=sendgrid`) |
 
-## Usage
+Removing a key deletes its secret, after `recovery_window_in_days` (7).
+`terraform.tfstate` contains secret values in plain text: it is git-ignored, so
+don't share it.
 
-Prerequisites: Terraform ≥ 1.5, AWS credentials with permission to create KMS
-keys, IAM roles, and Secrets Manager secrets (admin or equivalent).
+## Use
 
 ```bash
 cd terraform
-cp terraform.tfvars.example terraform.tfvars   # optional; pin region / your ARN
-cp secrets.example.json secrets.json           # fill in real values
-
 terraform init
-terraform plan
+terraform plan          # read it: no IAM replacements or destroys
 terraform apply
+terraform output        # role ARNs, bucket, queue URL, runner_secrets_missing (should be [])
 ```
 
-Pin the role to only you (recommended) by setting in `terraform.tfvars`:
+Variables worth knowing (defaults in `variables.tf`):
+- `api_task_role_name` = `twain-api-ecs-task-role`
+- `ecs_execution_role_name` = `ecsTaskExecutionRole`
+- `runner_secrets` (container env var → secret key)
+- `run_data_retention_days` = 90
+- `ecs_cluster_name` = `twain-cluster`
+- `runner_desired_count` = 1
+- `runner_subnet_ids`, `runner_security_group_ids`
 
-```hcl
-assume_role_principal_arns = ["arn:aws:iam::<account-id>:user/arifs"]
-```
-
-## Reading a secret (after apply)
-
-```bash
-# 1. Assume the role
-creds=$(aws sts assume-role \
-  --role-arn "$(terraform output -raw role_arn)" \
-  --role-session-name twain-secrets)
-
-export AWS_ACCESS_KEY_ID=$(echo "$creds"     | jq -r .Credentials.AccessKeyId)
-export AWS_SECRET_ACCESS_KEY=$(echo "$creds" | jq -r .Credentials.SecretAccessKey)
-export AWS_SESSION_TOKEN=$(echo "$creds"     | jq -r .Credentials.SessionToken)
-
-# 2. Read a secret
-aws secretsmanager get-secret-value \
-  --secret-id TWAIN/sso/azure-client-id \
-  --query SecretString --output text
-```
-
-## Changing secrets
-
-Edit `secrets.json` and re-run `terraform apply`. Adding a key creates a new
-secret; changing a `value` publishes a new version; removing a key deletes the
-secret (subject to `recovery_window_in_days`).
+To read a secret by hand, assume `TWAIN-secrets-reader`
+(`terraform output -raw role_arn`) and run
+`aws secretsmanager get-secret-value --secret-id TWAIN/<name>`.

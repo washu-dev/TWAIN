@@ -1,5 +1,7 @@
 # TWAIN Web App — Quick Start
 
+> **Current reference: [`README.md`](README.md).** This quick start predates single-registration (ID-token) Entra sign-in; where they differ, the README is right.
+
 Expo + React Native Web app for TWAIN. Runs on Web (the deployment target), iOS,
 and Android from one codebase. Talks to the [`../api`](../api) FastAPI backend.
 

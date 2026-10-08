@@ -1,383 +1,244 @@
 # TWAIN
 
 TWAIN turns a natural-language research request ("predict the aqueous
-solubility of aspirin at 25°C") into a planned, executed, and validated
-computational-chemistry run — with a human approval gate before anything is
-built or executed.
+solubility of aspirin at 25 °C") into a planned, executed and validated
+computational-chemistry run. A human approves the plan before anything is
+built or executed, and the calculation runs on WashU RIS Compute2 through the
+RIS API.
 
-This README covers everything from local dev to the AWS deploy:
-
-- [Architecture](#architecture) — what the pieces are, locally and in the cloud
-- [Quick start](#quick-start-one-command) — run everything locally with one command
-- [Running the pieces by hand](#running-the-pieces-by-hand)
-- [Configuration flags](#configuration-flags)
+- [Architecture](#architecture): the pieces and how a run flows through them
+- [Repository layout](#repository-layout)
+- [Run it locally](#run-it-locally)
+- [Configuration](#configuration)
 - [Tests](#tests)
-- [Deploying to AWS](#deploying-to-aws) — the full deployment runbook
+- [Deploying](#deploying): what happens on merge, and bootstrapping from scratch
 - [More documentation](#more-documentation)
 
 ## Architecture
 
+Diagrams (open with draw.io, or preview them on GitHub):
+- **[`docs/architecture/07_deployment_dependencies.drawio`](docs/architecture/07_deployment_dependencies.drawio)**
+  shows every component, folder and dependency across the web app, AWS, GitHub,
+  RIS and external services, including what is fetched at build, provisioning
+  and run time.
+- **[`docs/architecture/08_run_lifecycle.drawio`](docs/architecture/08_run_lifecycle.drawio)**
+  follows one run from submission to results: the pizza tracker, the in-stage
+  subtasks, emails, the approval gate, the detached Slurm job, and the planned
+  observer.
+
 ```
-Browser (localhost:3001)
-   │ HTTP
-   ▼
-Web app (Expo, app/) ──► API (FastAPI, api/, :8000) ──► Postgres (:5432, Docker)
-                                                           ▲
-                                             polls jobs /  │  writes events & messages
-                                                           ▼
-                                         Runner (runner/) ──► pipeline (modules/)
-                                                           └─► WashU LLM API (needs VPN)
+ Browser ──► CloudFront d1z5umg4xc2bl8.cloudfront.net
+               ├─ /*      → S3 (web app, app/)
+               └─ /api/*  → ALB → API (FastAPI, api/, ECS service twain-washu)
+                                     │  writes a job row (outbox) + SQS message
+                                     ▼
+ RDS Postgres (twaindb) ◄──► Worker (runner/, ECS service twain-runner)
+   jobs, run_events,          ├─ SQS consumers: run the pipeline (modules/) slice by slice
+   cluster_jobs, …            ├─ cluster monitor (one leader): polls Slurm jobs, publishes
+                              │  progress, resumes runs, keeps the RIS inventory current
+                              └─ LLM gateway (Claude via aiapi.wustl.edu)
+                                     │ RIS API (submit / status / output) + webhooks back
+                                     ▼
+ RIS Compute2: job_wrapper.sh ⇄ S3 run bucket (presigned URLs from the API)
+               runs main.py in a shared env under $TWAIN_HOME/twain-envs
 ```
 
-The web app never talks to the pipeline directly. The API writes a row into the
-`jobs` table (a Postgres-backed queue) and the **runner** — woken instantly by
-`LISTEN/NOTIFY` — claims the job and drives the state machine (INTAKE → CLARIFY →
-… → PLAN → *approval gate* → BUILD → EXECUTE → … → TERMINATE), writing messages,
-progress events, and artifacts back to Postgres for the app to render. When a run
-needs the researcher (a clarification, the plan approval, a heavy-calc confirm) it
-**suspends** — checkpointed to Postgres, the process released — and a `resume` job
-picks it back up when the user replies, so nothing stays pinned waiting on a human.
+1. **Submission.** The web app calls `POST /api/conversations`. The API inserts
+   a `jobs` row with status `dispatching`, which is an outbox, and sends its id
+   to the SQS FIFO queue `twain-jobs.fifo`. A relay re-sends any send that
+   failed.
+2. **Planning.** A worker claims the job and drives the state machine:
+   INTAKE → CLARIFY → DECOMPOSE → DISCOVER → PLAN. Planning uses the latest
+   **RIS inventory**, which records what the cluster environments actually
+   contain. The run then **suspends** at the approval gate and emails the
+   owner. Nothing waits on a human: the run is checkpointed to Postgres, and a
+   `resume` job picks it up after the reply.
+3. **Building.** BUILD writes the script, using the LLM plus templates. REPAIR
+   reviews it and smoke-tests it.
+4. **Execution.** EXECUTE uploads the run bundle to S3, issues a one-attempt
+   **job ticket**, submits the job through the **RIS API**, and pauses. No
+   process holds a Slurm wait.
+5. **The job on RIS.** On the compute node the job swaps its ticket for
+   presigned S3 links, picks a provisioned environment, runs the smoke test
+   and then `main.py`, and uploads its outputs.
+6. **Monitoring.** The **cluster monitor** follows the job, woken early by RIS
+   webhooks. It streams queue, node and log progress into `run_events`, which
+   the app shows as the **pizza tracker** (5 phases) and the in-stage subtask
+   checklist. When the job ends, the monitor enqueues the run's resume.
+7. **Results.** The worker collects the outputs, then runs INTERPRET →
+   VALIDATE (against baselines, Materials Project data and plausibility
+   ranges, with CORRECT/REPLAN loops) → ACCEPT → TERMINATE. The owner gets an
+   email, and the app shows the report. A failure produces a card with the
+   exception, the job's output, download links, a command to reproduce it on
+   RIS, and a one-click re-run.
 
-The same four pieces deploy to AWS (account **730335203321**, region
-**us-east-1**):
+| Component | Path | Runs on | Docs |
+|---|---|---|---|
+| Web app | [`app/`](app/) | S3 `twain-dev-1781888831` + CloudFront `E3PINHJ1G0F5PS` | [`app/README.md`](app/README.md) |
+| API | [`api/`](api/) | ECS Fargate service `twain-washu` (cluster `twain-cluster`) behind an ALB | [`api/README.md`](api/README.md) |
+| Worker / runner | [`runner/`](runner/) | ECS Fargate service `twain-runner` (1 vCPU / 4 GB, no inbound) | [`runner/README.md`](runner/README.md) |
+| Pipeline | [`modules/`](modules/) | inside the worker | [`modules/README.md`](modules/README.md) |
+| RIS side | [`scripts/ris/`](scripts/ris/) | Compute2 (`$TWAIN_HOME` on storage2) | [`scripts/ris/README.md`](scripts/ris/README.md) |
+| AWS infrastructure | [`terraform/`](terraform/) | account 730335203321, us-east-1 | [`terraform/README.md`](terraform/README.md) |
+| Database | `api/migrations/` | RDS Postgres `twaindb` | [`api/README.md#database`](api/README.md#database) |
 
-| Piece | What it is | Deploys to | Workflow |
-|-------|------------|-----------|----------|
-| **api** | FastAPI: conversations, auth, artifacts | ECS Fargate service `twain-api` (behind an ALB) | `.github/workflows/deploy-api.yml` |
-| **runner** | Claims `jobs` rows and drives the pipeline (heavy pixi/GPAW image) | ECS Fargate service `twain-runner` (no inbound) | `.github/workflows/ci-runner.yml` |
-| **app** | Expo web UI | S3 `twain-dev-1781888831` + CloudFront `E3PINHJ1G0F5PS` | `.github/workflows/deploy-app.yml` |
-| **db** | Shared Postgres (`twaindb`) | RDS `twain-app-database…rds.amazonaws.com` | — (already provisioned) |
+## Repository layout
 
-## Quick start (one command)
+| Path | What it is |
+|---|---|
+| `app/` | Expo (React Native web) client |
+| `api/` | FastAPI service; `api/migrations/*.sql` is the schema, applied at API startup |
+| `runner/` | The worker (SQS consumer and cluster monitor) and the shared run-processing code |
+| `modules/NN_*/` | The pipeline: intake, decomposition, method discovery, planning, code generation, execution adapters, interpretation, validation, self-correction, provenance and the control plane (state machine and LLM client) |
+| `configs/` | Registries (calculators, discovery libraries, intent map), validation baselines, physical ranges, cluster profiles (`clusters/compute2.json`) |
+| `schemas/` | JSON Schemas for the stage contracts (intent, goal graph, plan, results, validation, provenance) |
+| `scripts/ris/` | Everything that runs on RIS: env specs and builds, the inventory job, the job wrapper, `twain.sh.example` |
+| `scripts/` (other) | Versioning (`bump-version.sh`, `release-commit.sh`), AWS helpers, preflight |
+| `terraform/` | Secrets, KMS, run-data bucket, job queues, IAM, the worker's ECS service |
+| `tests/` | Pipeline unit, contract and integration tests |
+| `docs/` | Architecture, decisions, backlog ([index](docs/README.md)) |
+
+## Run it locally
 
 ```bash
-./dev.sh
-```
-
-This starts everything: Postgres (a native server if `psql` can reach one,
-otherwise the `twain-pg` Docker container — created on first run, with Colima
-started automatically on macOS), the API on :8000 (auth disabled for dev), the
-runner (with real execution enabled), and the web app on :3001. First run also
-applies DB migrations and installs API/app/pixi dependencies. Ctrl-C stops
-everything together.
-
-Variants:
-
-```bash
-./dev.sh --no-execute    # plan-only: never runs generated code
+./dev.sh                 # Postgres + API (:8000, auth off) + runner + web app (:3001)
+./dev.sh --no-execute    # plan only: never runs generated code
 ./dev.sh --no-app        # backend only (API + runner)
 ./dev.sh --no-runner     # UI only (chat won't progress past INTAKE)
 ```
 
+`dev.sh` starts Postgres: a native server if `psql` can reach one, otherwise
+the `twain-pg` Docker container (created on first run; Colima is started on
+macOS). It applies the migrations, installs dependencies on the first run, and
+stops everything together on Ctrl-C.
+
+Locally the runner uses the **Postgres queue** (`TWAIN_DISPATCH=db`: the
+polling runner claims `queued` rows). The cloud uses SQS (`TWAIN_DISPATCH=sqs`).
+
 Prerequisites:
-
 - [pixi](https://pixi.sh), Node/npm, and Docker (Docker Desktop, or
-  `brew install docker colima` on macOS)
-- WashU LLM credentials in the repo-root `.env` (`API_KEY`, `CLIENT_ID`,
-  `CLIENT_SECRET`) and the WUSTL VPN — the runner needs both to reach the LLM
-  gateway
+  `brew install docker colima`).
+- LLM gateway credentials in the repo-root `.env` (`API_KEY`, `CLIENT_ID`,
+  `CLIENT_SECRET`), and the WUSTL VPN.
+- To run on RIS from your machine: `RIS_API_TOKEN` plus `TWAIN_EXECUTE_SLURM=1`.
+  See [`runner/README.md`](runner/README.md).
 
-Then open <http://localhost:3001>, describe a simulation, wait ~30 s for the
-proposed execution plan, and hit **Approve & run**. If a conversation seems
-idle, check whether it is waiting on your approval before re-prompting. A single
-runner drives one slice at a time and serializes work per conversation, but a
-suspended run consumes nothing while it waits — so different conversations
-progress independently, and you can leave and come back to any of them.
-
-## Running the pieces by hand
-
-Useful when you want each process in its own terminal for separate logs.
-
-**Step 0 — infrastructure** (no terminal stays open):
+Then open <http://localhost:3001>, describe a simulation, and approve the
+plan. To run the pieces in separate terminals:
 
 ```bash
-colima start           # after a reboot; harmless if already running
-docker start twain-pg  # the Postgres container
+cd api && AUTH_DISABLED=true DB_HOST=localhost DB_NAME=twaindb DB_USER=postgres \
+  DB_PASSWORD=postgres pixi run python main.py                  # API on :8000
+DB_HOST=localhost DB_NAME=twaindb DB_USER=postgres DB_PASSWORD=postgres \
+  pixi run python -m runner.runner                              # polling runner
+cd app && npm run web                                           # web app on :3001
 ```
 
-**Terminal 1 — API** (port 8000):
+## Configuration
 
-```bash
-cd api
-AUTH_DISABLED=true DB_HOST=localhost DB_PORT=5432 DB_NAME=twaindb \
-  DB_USER=postgres DB_PASSWORD=postgres pixi run python main.py
-```
+[`.env.example`](.env.example) is the authoritative list of environment
+variables. Cloud values live in the ECS task definitions, Secrets Manager
+(`TWAIN/*`) and GitHub repository variables, not in `.env`. The most important
+ones:
 
-**Terminal 2 — runner** (on the WUSTL VPN):
-
-```bash
-export DB_HOST=localhost DB_PORT=5432 DB_NAME=twaindb DB_USER=postgres DB_PASSWORD=postgres
-TWAIN_EXECUTE_LOCALLY=1 pixi run python -m runner.runner
-```
-
-**Terminal 3 — web app** (port 3001):
-
-```bash
-cd app && npm run web
-```
-
-## Configuration flags
-
-| Env var | Where | Effect |
+| Variable | Where | Effect |
 |---|---|---|
-| `AUTH_DISABLED=true` | API | skip Entra sign-in; every request is a dev admin. Local only. |
-| `TWAIN_EXECUTE_LOCALLY=1` | runner | actually run the generated script at EXECUTE (otherwise planning-only) |
-| `TWAIN_AUTO_RUN=1` | runner | fully unattended: executes and skips the plan-approval + heavy-calc gates |
-| `TWAIN_EXECUTE_SLURM=1` | runner | route all runs to the Compute2 Slurm cluster (the deployment-wide backend; see `runner/README.md`) |
-| `TWAIN_VERIFY_CODEGEN=1` | runner | verify + repair generated scripts before running (defaults on when executing) |
-| `TWAIN_GITHUB_TOKEN` | pipeline | file `LibraryAddition` install requests as GitHub issues (see below); without it they are ledgered only |
-| `TWAIN_GITHUB_REPO` | pipeline | which repo those issues go to (defaults to the git `origin` remote) |
-| `TWAIN_LIBRARY_REQUEST_ISSUES` | pipeline | `auto` (default — on iff a token+repo resolve), `1`, or `0` |
-| `DB_HOST/PORT/NAME/USER/PASSWORD` | API + runner | Postgres connection (dev defaults: `localhost:5432`, `twaindb`, `postgres`/`postgres`) |
+| `AUTH_DISABLED=true` | API | Skip Entra sign-in (every request is a dev admin). Local only. |
+| `TWAIN_DISPATCH` | API, worker | `db` (Postgres queue, local) or `sqs` (cloud) |
+| `TWAIN_EXECUTE_SLURM=1` | worker | Run on RIS Compute2 (the cloud default) |
+| `TWAIN_STAGING=s3`, `TWAIN_RUN_BUCKET` | worker, API | Job files move through S3 with presigned URLs |
+| `TWAIN_ENV_FILE` | worker | `twain.sh` on RIS, which jobs source (`TWAIN_HOME`, `TWAIN_ENVS_ROOT`) |
+| `TWAIN_INVENTORY_HOURS` / `_MAX_AGE_HOURS` | worker | How often RIS is inventoried (24 h), and when planning falls back to the specs (168 h) |
+| `TWAIN_RUNTIME_REPAIR_ATTEMPTS` | worker | Repair rounds after a script crash (default 2; 0 disables) |
+| `TWAIN_NOTIFY_BACKEND`, `TWAIN_NOTIFY_FROM` | worker | `log` or `sendgrid` (plus `ses`/`sns`); the email sender |
+| `TWAIN_ENV_APPROVERS` | worker | Who may approve changes to shared RIS environments (default `arifs@wustl.edu`) |
+| `TWAIN_AUTO_RUN=1` | runner | Unattended: skips the approval and heavy-calculation gates (testing only) |
+| `TWAIN_GITHUB_TOKEN` | pipeline | File `LibraryAddition` issues for libraries TWAIN wanted but doesn't have |
 
-`.env.example` is the single authoritative list of every environment variable
-(DB, auth, LLM gateway, runner execution mode, budget rails, app). Cloud values
-live in the ECS task definitions + Secrets Manager, not in `.env`.
-
-## Missing libraries → `LibraryAddition` requests
-
-TWAIN only ever plans with libraries it can actually import — the preset set in
-`pixi.toml`, mirrored by `configs/discovery_registry.json` and
-`configs/calculator_registry.json`. That rule is unchanged: a plan never names a
-tool the run can't load.
-
-What used to be silent is now tracked. When method discovery reaches for a
-library that isn't installed — or the researcher asks for one by name ("compute
-it with VASP") — TWAIN:
-
-1. plans with the best **installed** library instead,
-2. tells the researcher on the plan they approve (in `safety_notes`, with the
-   library it substituted), and
-3. records the ask in `logs/library_requests.json` and files a GitHub issue
-   tagged **`LibraryAddition`** so the environment can be extended.
-
-Requests are deduplicated by library name, both locally and against open issues
-on GitHub, so a library TWAIN keeps wanting is one issue with a rising
-`occurrences` count — not one issue per run. With no token configured the request
-is still ledgered and still reported; only the issue is skipped, so nothing here
-is required to run TWAIN. See
+**Missing libraries.** TWAIN plans only with tools it can run. When discovery
+wants a library that isn't available, or the researcher names one, it plans
+with the best available alternative, says so on the plan card, and records a
+`LibraryAddition` request (deduplicated, and filed as a GitHub issue when a
+token is configured). See
 [`modules/04_method_discovery/library_requests.py`](modules/04_method_discovery/library_requests.py).
 
-A library the researcher names that *is* installed is simply honoured: it goes to
-the front of the discovery ranking and is offered to the discovery LLM as a
-preference, so a direct ask decides the toolset rather than just being noted.
-
-## Reporting an issue from a run
-
-The run window has a **Report** button, live from the moment a run exists until
-long after it ends. It opens a short form — category (Bug / Library / Result /
-Other), a title, and what happened — and files a GitHub issue with **the run's own
-data attached**: the state it reached, the toolset planning chose, the plan notes
-the researcher saw, the errors, the transcript tail, and the names of every
-artifact produced. A maintainer never has to ask "what were you running?".
-
-Because submitting publishes run data to the issue tracker, the form shows the
-exact snapshot that will be attached before you send it, and says up front when a
-deployment has no credentials (the report is then saved against the run instead of
-filed). Categories map to GitHub labels; `Library` reuses `LibraryAddition`, so a
-researcher asking for a missing package lands in the same bucket as discovery's
-own requests. Endpoints, statuses, and deployment config are in
-[`api/README.md`](api/README.md).
-
-## More documentation
-
-See [`docs/README.md`](docs/README.md) for the full documentation index. Highlights:
-
-- `docs/project/GETTING_STARTED.md` — project orientation and repo layout
-- `runner/README.md` — the runner service: Docker offload, Slurm/Compute2 execution, AWS deploy
-- `api/QUICKSTART.md`, `app/QUICKSTART.md` — per-service details
-- `docs/backlog/DETAILED_BACKLOG.md` — the story-level backlog
+**Reporting a run.** The run window's **Report** button files a GitHub issue
+with the run's own data attached: the state it reached, the toolset, plan
+notes, errors and the transcript tail. The form shows that data before you
+send. See [`api/README.md`](api/README.md#run-issue-reports).
 
 ## Tests
 
 ```bash
-pixi run test            # pipeline unit/contract/integration tests (tests/)
-pixi run pytest api/ -q  # API tests
-pytest runner/tests -q   # runner tests (no DB or pixi env needed)
+pixi run test                     # pipeline: tests/ (unit, contract, integration)
+pixi run pytest runner/tests -q   # worker/runner (real-Postgres tests run when one is local)
+cd api && pixi run --manifest-path ../pixi.toml python -m pytest -q   # API
+cd app && npx tsc --noEmit && npx expo lint                           # web app
 ```
 
----
+CI runs all of these on every pull request (see [Deploying](#deploying)).
 
-# Deploying to AWS
+## Deploying
 
-How to stand up TWAIN's web stack on AWS and exactly what is automated vs.
-what you still have to do by hand. Run `make help` for the tooling.
+**Merging to `master` deploys.** Each workflow is path-filtered:
 
-> **Verify as you go:** `python scripts/preflight.py` (local) and
-> `python scripts/preflight.py --aws` (cloud) are read-only checks that tell you
-> precisely what's ready and what's missing. Use them after every step below.
+| Workflow | Triggered by | Checks | Deploys |
+|---|---|---|---|
+| `deploy-api.yml` | `api/**` | ruff, pip-audit, pytest (≥50% coverage) | ECR `twain-ecr` → ECS `twain-washu`; release commit and tag `api-v…` |
+| `ci-runner.yml` | `runner/`, `modules/`, `configs/`, `schemas/`, `pixi.*` | ruff, runner tests, `tests/unit` | ECR `twain-runner-ecr` → ECS `twain-runner` |
+| `deploy-app.yml` | `app/**` | tsc, expo lint, audit gate, licence check | `expo export` → S3, CloudFront invalidation; release commit and tag `app-v…` |
+| `add-to-project.yml` | a new issue | none | Adds it to the TWAIN project board |
 
-See the [Architecture](#architecture) table above for what deploys where.
+- **Versions.** The API and the app each carry an independent version,
+  `YYYY.MM.DD.NNN` (`api/VERSION`, `app/VERSION`). It is shown in the app
+  footer and at `GET /api/version`.
+- **Migrations.** The API applies `api/migrations/*.sql` at startup
+  (idempotent, under an advisory lock). Deploy the API before code that needs
+  a new table.
+- **Settings without a code change:** repository variables `TWAIN_DISPATCH`,
+  `TWAIN_JOB_QUEUE_URL`, `TWAIN_RUN_BUCKET`, `TWAIN_ENV_FILE`,
+  `TWAIN_NOTIFY_BACKEND`, `TWAIN_NOTIFY_FROM` and `TWAIN_ENV_APPROVERS`. Change
+  one, then re-run the matching workflow.
+- **Secrets:** repository secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `API_BASE_URL` and `ADD_TO_PROJECT_PAT`. Runtime secrets live in Secrets
+  Manager under `TWAIN/*`, managed by Terraform from the git-ignored
+  `terraform/secrets.json`.
+- **Infrastructure:** `terraform -chdir=terraform plan` / `apply` (see
+  [`terraform/README.md`](terraform/README.md)). **WashU IT denies deleting
+  or detaching IAM role policies**, so IAM changes must only add.
 
-## What's automated now (you don't have to do these)
+**Rollback.**
+- API or worker: ECS keeps earlier task-definition revisions; update the
+  service to the previous one, or re-run the workflow on an earlier commit.
+- App: re-run `deploy-app.yml` on an earlier commit.
+- The database schema only moves forward, and every migration is idempotent.
+- A RIS environment: `scripts/ris/rebuild_envs.sh rollback <env> <version>`.
 
-- **DB schema** — the API applies `api/migrations/*.sql` on startup
-  (idempotent, advisory-locked). No manual migration against RDS. Disable with
-  `RUN_MIGRATIONS_ON_STARTUP=false`; run by hand with `make migrate`.
-- **Readiness checks** — `make preflight` / `make preflight-aws`.
-- **LLM secrets + task-def wiring** — `make secrets-apply` creates the three
-  Secrets Manager entries from your `.env` and replaces the `-REPLACE`
-  placeholders in `runner/ecs-task-definition.json`.
-- **Base AWS resources** — `make provision-apply` creates the ECR repos, log
-  groups, ECS cluster, and registers both task definitions (idempotent).
-- **Build + deploy** — the three GitHub workflows build images/bundles and
-  deploy on push to `master` (path-filtered) or via **Run workflow**
-  (`workflow_dispatch`).
+**Troubleshooting.**
 
-## Already provisioned in this account
+| Symptom | Look at |
+|---|---|
+| The chat never leaves INTAKE | `/ecs/twain-runner`: is the worker up (`worker up: …`)? Is SQS sending working (`/ecs/twain-api`, "SQS send … failed")? |
+| A run fails on RIS | The failure card: exception, job stdout/stderr, Reproduce on RIS. Exit 3 = `twain.sh` unreadable, 6 = bundle download, 7 = output upload (4 = stale checkout, only on jobs submitted before #196) |
+| Plans pick environments that don't exist | `SELECT taken_at, status FROM ris_inventory ORDER BY id DESC LIMIT 3;`, and the worker log line `planning from …` |
+| No emails | Repository variables `TWAIN_NOTIFY_BACKEND=sendgrid` and `TWAIN_NOTIFY_FROM`, the `TWAIN/sendgrid/API_KEY` secret, and the user's notification preferences |
 
-From the committed task definitions: the **RDS** instance + `twaindb`, the **DB
-password secret** (`DBPASSWORD-xfmLoq`), the **S3 bucket + CloudFront**, and the
-**IAM roles** `ecsTaskExecutionRole` / `ecsTaskRole`. If any of these were torn
-down, recreate them first (they're assumed by the task defs and workflows).
+**Bootstrapping from scratch** (already done for this account): `make preflight`
+/ `make preflight-aws` check readiness. `scripts/aws/provision.sh` creates the
+ECR repositories, log groups, the ECS cluster and the API service (with its ALB
+target group: HTTP 8000, health check `/api/health`). Terraform creates
+secrets, the bucket, the queues, IAM and the worker service. Deploy the API
+first: its migrations create the schema.
 
-## Do this once — the remaining manual steps
-
-You need: the **awscli v2** configured with credentials for account
-730335203321, **`gh`** (or the GitHub UI) for repo secrets, and the LLM gateway
-creds. Everything below is copy-paste.
-
-### Step 0 — Prove it works locally first (recommended)
-
-Run the [Quick start](#quick-start-one-command) above (`./dev.sh`), start a
-simulation, approve the plan, and watch it run. This exercises the exact same
-code that runs in cloud. `make preflight` verifies local config.
-
-### Step 1 — Fill `.env` with the LLM gateway credentials
-
-`API_KEY`, `CLIENT_ID`, `CLIENT_SECRET` (see `.env.example`). Required by the
-local runner; the cloud runner reads them from Terraform-managed secrets
-(Step 2).
-
-### Step 2 — Create the runner secrets and wire the runner task def
-
-```bash
-# terraform/secrets.json (git-ignored; template: secrets.example.json) holds the
-# LLM creds under secure_api/* and the RIS API PAT under ris_api/TOKEN.
-terraform -chdir=terraform apply   # secrets + ECS execution-role read access
-terraform -chdir=terraform output runner_secrets_missing   # must be []
-make secrets              # PLAN — show the ARNs it will wire
-make secrets-apply        # patches the -REPLACE ARNs in the task def
-git add runner/ecs-task-definition.json && git commit -m "Wire runner secret ARNs"
-```
-
-This is the step that clears the `-REPLACE` placeholders.
-
-### Step 3 — Provision the base AWS resources
-
-```bash
-make provision            # PLAN
-make provision-apply      # ECR repos + log groups + cluster + task-def registration
-```
-
-### Step 4 — Create the two ECS services (once)
-
-Deploys *update* existing services, so they must exist first. You need your VPC
-**subnets** and a **security group** that can reach RDS on 5432 (reuse the RDS
-VPC/SG). Find them in the RDS console, or:
-
-```bash
-aws rds describe-db-instances --query \
-  'DBInstances[0].{subnets:DBSubnetGroup.Subnets[].SubnetIdentifier,vpc:DBSubnetGroup.VpcId}' \
-  --region us-east-1
-```
-
-- **Runner** (no load balancer):
-  ```bash
-  SUBNETS=subnet-aaa,subnet-bbb SECURITY_GROUPS=sg-xxx \
-    scripts/aws/provision.sh --apply     # creates twain-runner if SUBNETS+SG are set
-  ```
-- **API** (must register with the ALB target group so CloudFront/browsers can
-  reach it). `provision.sh` prints the exact `aws ecs create-service` command —
-  fill in your subnets, SG, and `targetGroupArn`, then run it. If you don't have
-  an ALB + target group yet, create them (target group: HTTP, port 8000, health
-  check path `/api/health`, target type `ip`) and point a listener rule at it.
-
-### Step 5 — Set the GitHub repo secrets
-
-| Secret | Used by | Value |
-|--------|---------|-------|
-| `AWS_ACCESS_KEY_ID` | all 3 workflows | deploy IAM user's key |
-| `AWS_SECRET_ACCESS_KEY` | all 3 workflows | deploy IAM user's secret |
-| `API_BASE_URL` | app build | public HTTPS URL of the API (the ALB/domain) |
-
-```bash
-gh secret set AWS_ACCESS_KEY_ID       # paste when prompted
-gh secret set AWS_SECRET_ACCESS_KEY
-gh secret set API_BASE_URL --body "https://<your-api-domain>"
-```
-
-### Step 6 — Deploy (order matters the first time)
-
-Deploy the **API first** (its startup migration creates the schema the runner
-needs), then the runner, then the app.
-
-```bash
-gh workflow run deploy-api.yml     # or: push a change under api/
-gh workflow run ci-runner.yml      # or: push a change under runner/
-gh workflow run deploy-app.yml     # or: push a change under app/
-```
-
-### Step 7 — Verify
-
-```bash
-python scripts/preflight.py --aws                 # all green?
-curl https://<your-api-domain>/api/health         # {"status":"ok"}
-```
-
-Open the CloudFront URL, sign in, run a simulation end to end.
-
-## Auth for a shared/cloud deploy
-
-`AUTH_DISABLED=true` is **local-dev only**. For a shared deploy, set one of:
-
-- **Entra SSO** — `ENTRA_TENANT_ID` + `ENTRA_API_AUDIENCE` (add them to the api
-  task def `environment`), and the frontend OIDC client id. *(SSO is not wired
-  into the frontend yet — see the project plan.)*
-- **Interim email login** — `INTERIM_JWT_SECRET` (+ optional
-  `INTERIM_ALLOWED_DOMAINS`, `BOOTSTRAP_ADMIN_EMAILS`). Enables
-  `POST /api/auth/login`. Good enough for a pilot.
-
-`preflight` warns if neither is configured.
-
-## Rollback
-
-- **api / runner** — ECS keeps prior task-definition revisions. Roll back in the
-  console (Update service → pick the previous revision) or re-run the workflow on
-  an earlier commit. The DB schema is forward-only + idempotent; a rollback of
-  code is safe as long as the older code doesn't need a table a newer migration
-  dropped (none do today).
-- **app** — re-run `deploy-app.yml` on an earlier commit (it re-syncs S3 +
-  invalidates CloudFront).
-
-## Troubleshooting the deploy
-
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| API task crash-loops on boot | migration can't reach RDS, or bad creds | check the `/ecs/twain-api` logs; verify SG allows the API→RDS on 5432 and `AWS_SECRET_ARN` resolves |
-| Chat never leaves **INTAKE** | no runner is claiming jobs | is `twain-runner` running? check `/ecs/twain-runner` logs |
-| Runner errors on the LLM call | LLM secrets missing/placeholder | `make secrets-apply`, redeploy the runner; `preflight --aws` flags `-REPLACE` |
-| App loads but every call fails | `API_BASE_URL` wrong or CORS | set the `API_BASE_URL` secret + rebuild app; add the app origin to CORS in `api/main.py` |
-| `register-task-definition` skipped | `-REPLACE` still in the task def | run Step 2 first |
-
-## Honesty about what's been tested
-
-- The **startup migration**, **preflight**, and **Makefile** are exercised here
-  (unit tests + local runs).
-- The **AWS scripts** (`setup_secrets.sh`, `provision.sh`) are syntax-checked but
-  **not run against AWS from this repo** — review them and run the PLAN mode
-  (no `--apply`) first. `setup_secrets.sh` only reads Terraform outputs and
-  patches the task def; `provision.sh` is idempotent and check-then-create.
-- Creating the **API ECS service + ALB target group** is environment-specific
-  (your VPC/subnets/SG/ALB); that piece is documented, not scripted.
-
----
+**Auth.** The app signs in with Microsoft Entra ID (OIDC auth-code + PKCE),
+and the API validates the tokens (`ENTRA_TENANT_ID`, `ENTRA_API_AUDIENCE`).
+`AUTH_DISABLED` is for local development only. An interim email login
+(`INTERIM_JWT_SECRET`) exists for pilots.
 
 ## More documentation
 
-See [`docs/README.md`](docs/README.md) for the full documentation index. Highlights:
-
-- `docs/project/GETTING_STARTED.md` — project orientation and repo layout
-- `runner/README.md` — the runner service: Docker offload, Slurm/RIS, and AWS deploy
-- `api/QUICKSTART.md`, `app/QUICKSTART.md` — per-service details
-- `docs/backlog/DETAILED_BACKLOG.md` — the story-level backlog
+- [`docs/README.md`](docs/README.md): the documentation index (architecture, decisions, backlog)
+- [`docs/architecture/DIAGRAMS_INDEX.md`](docs/architecture/DIAGRAMS_INDEX.md): every diagram, including 07 and 08
+- Component READMEs: [app](app/README.md) · [api](api/README.md) ·
+  [runner](runner/README.md) · [modules](modules/README.md) ·
+  [scripts/ris](scripts/ris/README.md) · [terraform](terraform/README.md)
