@@ -34,7 +34,9 @@ because the smoke tests need the *import* name to verify the tool loads.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
+from http.client import InvalidURL
 from typing import Callable, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -230,6 +232,43 @@ def canonical_tool_key(tool_name: str) -> str:
     return _ALIASES.get(key, key)
 
 
+#: How a plan joins several tools into one name ("OpenMM+OpenFF Toolkit+RDKit").
+_TOOL_SEPARATORS = re.compile(r"\s*(?:\+|,|&|/|;|\band\b|\bwith\b)\s*", re.IGNORECASE)
+
+
+def tool_keys(tool_name: str) -> List[str]:
+    """The registry keys a tool name stands for -- several when a plan combined them.
+
+    A known name (an alias like ``dftb+`` included) is one tool. Anything else is
+    split on ``+ , & / ; and with``, so a combined name doesn't reach PyPI as one
+    package name with spaces in it -- an ``InvalidURL`` (#188). An unknown part
+    keeps its words joined by hyphens, PyPI-style.
+
+    >>> tool_keys("OpenMM+OpenFF Toolkit+RDKit")
+    ['openmm', 'openff-toolkit', 'rdkit']
+    >>> tool_keys("DFTB+")
+    ['dftbplus']
+    >>> tool_keys("Some New Tool")
+    ['some-new-tool']
+    """
+    key = canonical_tool_key(tool_name)
+    if key in TOOL_REGISTRY or key in _ALIASES.values():
+        return [key]
+    keys: List[str] = []
+    for part in _TOOL_SEPARATORS.split(key) if key else []:
+        part = canonical_tool_key(part)
+        if part and part not in TOOL_REGISTRY:
+            part = re.sub(r"\s+", "-", part)
+        if part and part not in keys:
+            keys.append(part)
+    return keys
+
+
+def _unknown(key: str) -> Dependency:
+    safe = key or "unknown-tool"
+    return Dependency(safe, None, safe.replace("-", "_"), pinned=False)
+
+
 def infer(tool_name: str) -> List[Dependency]:
     """Infer the full pinned dependency list for a tool.
 
@@ -244,18 +283,9 @@ def infer(tool_name: str) -> List[Dependency]:
     >>> infer("TotallyMadeUpTool")[0].pinned
     False
     """
-    key = canonical_tool_key(tool_name)
-    resolved: List[Dependency] = []
-    entry = TOOL_REGISTRY.get(key)
-    if entry is not None:
-        resolved.append(entry.tool)
-        resolved.extend(entry.extras)
-    else:
-        # Unknown tool: assume the tool name is itself pip-installable/importable,
-        # but don't pretend we know a good version to pin.
-        safe = key or "unknown-tool"
-        resolved.append(Dependency(safe, None, safe.replace("-", "_"), pinned=False))
-
+    # An unknown tool: assume its name is itself pip-installable/importable, but
+    # don't pretend we know a good version to pin.
+    resolved: List[Dependency] = import_names(tool_name)
     resolved.extend(COMMON_RUNTIME)
 
     seen: set[str] = set()
@@ -278,12 +308,11 @@ def import_names(tool_name: str) -> List[Dependency]:
     >>> [d.import_name for d in import_names("deepchem")]
     ['deepchem', 'sklearn']
     """
-    key = canonical_tool_key(tool_name)
-    entry = TOOL_REGISTRY.get(key)
-    if entry is None:
-        safe = key or "unknown-tool"
-        return [Dependency(safe, None, safe.replace("-", "_"), pinned=False)]
-    return [entry.tool, *entry.extras]
+    deps: List[Dependency] = []
+    for key in tool_keys(tool_name) or [""]:
+        entry = TOOL_REGISTRY.get(key)
+        deps.extend([entry.tool, *entry.extras] if entry is not None else [_unknown(key)])
+    return deps
 
 
 def requirements_txt(tool_name: str, *, header: Optional[str] = None) -> str:
@@ -347,7 +376,7 @@ def is_available_on_pypi(
     except HTTPError as exc:
         # 404 is a definitive "not found"; other HTTP errors are inconclusive.
         return False if exc.code == 404 else None
-    except (URLError, ValueError, json.JSONDecodeError, KeyError):
+    except (URLError, InvalidURL, ValueError, json.JSONDecodeError, KeyError):
         return None
 
     if version is None:

@@ -148,3 +148,98 @@ class TestInTheStateMachine:
         m, steps, _ = self._machine(tmp_path, SOLUBILITY_PLAN)
         m._observe(State.INTAKE, State.CLARIFY)
         assert steps == []
+
+
+def _reviewer(verdict, reason="because", seen=None):
+    def agent(prompt):
+        if seen is not None:
+            seen.append(prompt)
+        return f'Sure. {{"verdict": "{verdict}", "reason": "{reason}"}}'
+    return agent
+
+
+class TestReviewerOnTheScript:
+    """The LLM reviewer before EXECUTE (#188): request + script only."""
+
+    PLAN = {"requested_property": "aqueous_solubility_at_25C",
+            "target_system": {"kind": "molecule", "molecule": {"name": "caffeine"}}}
+
+    def _check(self, agent, monkeypatch, mode=None, main="print(logS)\n"):
+        if mode:
+            monkeypatch.setenv("TWAIN_OBSERVER_LLM", mode)
+        else:
+            monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+        v = O.Verdict("bundle")
+        O.llm_script_check(v, agent, request="Aqueous solubility of caffeine at 25 C",
+                           plan=self.PLAN, main_py=main)
+        return v
+
+    def test_it_sees_the_request_and_the_script_and_nothing_else(self, monkeypatch):
+        seen = []
+        self._check(_reviewer("yes", seen=seen), monkeypatch, main="SCRIPT_BODY = 1\n")
+        assert "Aqueous solubility of caffeine" in seen[0] and "SCRIPT_BODY" in seen[0]
+        assert "did not write" in seen[0]
+
+    def test_a_yes_passes(self, monkeypatch):
+        v = self._check(_reviewer("yes"), monkeypatch)
+        assert [c.status for c in v.checks] == [O.PASS]
+
+    def test_a_no_stops_the_run(self, monkeypatch):
+        v = self._check(_reviewer("no", "it computes logP descriptors, not solubility"), monkeypatch)
+        assert v.failed and "logP descriptors" in v.failed[0].detail
+
+    def test_warn_mode_only_warns(self, monkeypatch):
+        v = self._check(_reviewer("no"), monkeypatch, mode="warn")
+        assert not v.failed and v.warnings
+
+    @pytest.mark.parametrize("agent", [_reviewer("unsure"), _reviewer("maybe"),
+                                       lambda p: "no json", lambda p: 1 / 0, None])
+    def test_an_unclear_answer_or_no_agent_adds_nothing(self, agent, monkeypatch):
+        assert self._check(agent, monkeypatch).checks == []
+
+    def test_off_means_off(self, monkeypatch):
+        seen = []
+        assert self._check(_reviewer("no", seen=seen), monkeypatch, mode="0").checks == []
+        assert seen == []
+
+
+class TestReviewerOnTheOutputs:
+    def test_doubtful_outputs_warn_and_never_stop(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+        (tmp_path / "results.json").write_text('{"band_gap_eV": 0.0}')
+        seen, v = [], O.Verdict("outputs")
+        O.llm_outputs_check(v, _reviewer("no", "silicon is not a metal", seen), request="Si gap",
+                            plan={"requested_property": "band_gap"},
+                            execution_result={"succeeded": True, "artifacts_dir": str(tmp_path)})
+        assert not v.failed and "silicon is not a metal" in v.warnings[0].detail
+        assert '"band_gap_eV": 0.0' in seen[0]
+
+    def test_a_failed_job_is_not_reviewed(self, tmp_path):
+        v = O.Verdict("outputs")
+        O.llm_outputs_check(v, _reviewer("no"), request="x", plan={},
+                            execution_result={"succeeded": False, "stdout": "boom"})
+        assert v.checks == []
+
+
+class TestReviewerInTheStateMachine:
+    _machine = TestInTheStateMachine._machine
+
+    def test_a_no_on_the_script_stops_before_execute(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+        m, _, _ = self._machine(tmp_path, {"requested_property": "logp"},
+                                _bundle(tmp_path, "logp = None\nprint('hello')\n"))
+        m._agent = _reviewer("no", "it prints hello")
+        m._request = "logP of ethanol"
+        with pytest.raises(Exception, match="it prints hello"):
+            m._observe(State.REPAIR, State.EXECUTE)
+
+    def test_doubtful_outputs_are_recorded_with_the_result(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+        (tmp_path / "results.csv").write_text("band_gap\n0.0\n")
+        m, _, artifacts = self._machine(tmp_path, {"requested_property": "band_gap"})
+        artifacts["execution_result"] = {"status": "success", "succeeded": True,
+                                         "artifacts_dir": str(tmp_path)}
+        m._agent = _reviewer("no", "a zero gap for silicon")
+        m.review_request = "band gap of silicon"
+        m._observe(State.EXECUTE, State.INTERPRET)
+        assert "a zero gap for silicon" in artifacts["execution_result"]["observer_warnings"][0]

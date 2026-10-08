@@ -160,6 +160,30 @@ class TestPyPIAvailability:
             raise HTTPError(url, 503, "Service Unavailable", {}, None)
         assert depinf.is_available_on_pypi("pymatgen", fetch=boom) is None
 
+    def test_an_unfetchable_name_is_none_not_a_crash(self):
+        from http.client import InvalidURL
+
+        def bad(url):
+            raise InvalidURL(f"URL can't contain control characters: {url!r}")
+        assert depinf.is_available_on_pypi("openmm openff", fetch=bad) is None
+
+
+class TestCombinedToolNames:
+    """A plan named three tools as one ("OpenMM+OpenFF Toolkit+RDKit", #188)."""
+
+    def test_each_tool_is_its_own_dependency(self):
+        names = [d.package.lower() for d in depinf.import_names("OpenMM+OpenFF Toolkit+RDKit")]
+        assert "openmm" in names and "openff-toolkit" in names and "rdkit" in names
+        assert not any(" " in n or "+" in n for n in names)
+
+    def test_a_name_with_a_plus_in_it_is_still_one_tool(self):
+        assert depinf.tool_keys("DFTB+") == ["dftbplus"]
+
+    def test_planning_sees_the_split(self):
+        import statemachine as SM
+        deps = SM._plan_dependencies(["OpenMM+OpenFF Toolkit+RDKit", "rdkit"])
+        assert len({d.package.lower() for d in deps}) == len(deps) >= 3
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Template library

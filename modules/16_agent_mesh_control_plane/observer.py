@@ -20,8 +20,20 @@ be able to stop the next stage -- an asynchronous subscriber can't:
 Each check is ``pass`` / ``warn`` / ``fail``. A ``fail`` stops the run with the
 check's reason (the failure card shows it); a ``warn`` is recorded and shown.
 Every verdict is published as a subtask line, so the tracker shows the checks.
-LLM judgement ("does this script compute the property for this system?") is
-P4 (#188) and plugs in here as further checks.
+
+**LLM judgement (#188)** adds what fixed rules can't decide. It is a reviewer,
+not the author: its own prompt, shown only the researcher's request and the
+stage's output, never the conversation that produced them.
+
+* before EXECUTE: "does this script compute the requested property for the
+  requested system?" A clear *no* stops the run (nothing has been submitted;
+  re-running is cheap).
+* before INTERPRET: "are these outputs physically sensible?" A *no* is a
+  warning recorded with the result, never a stop: the calculation is done, and
+  validation and the researcher make the call.
+
+``TWAIN_OBSERVER_LLM``: ``enforce`` (default), ``warn`` (a script *no* only
+warns), or ``0`` (off). An unclear or unreadable answer adds nothing.
 """
 from __future__ import annotations
 
@@ -177,3 +189,92 @@ def outputs_gate(execution_result: dict | None) -> Verdict:
     else:
         v.add("outputs", PASS, f"{len(files)} output file(s) to interpret")
     return v
+
+
+# --------------------------------------------------------------- LLM judgement (#188)
+YES, NO, UNSURE = "yes", "no", "unsure"
+_REVIEWER = (
+    "You are an independent reviewer of a computational-chemistry pipeline. You did not "
+    "write what you are shown, and you judge only what is in front of you. Reply with JSON "
+    'only: {"verdict": "yes" | "no" | "unsure", "reason": one sentence}. Say "no" only '
+    "when you are confident; when in doubt, say \"unsure\".\n\n")
+
+
+def llm_mode() -> str:
+    mode = os.environ.get("TWAIN_OBSERVER_LLM", "enforce").strip().lower()
+    return "off" if mode in ("0", "off", "false", "no") else ("warn" if mode == "warn" else "enforce")
+
+
+def _ask(agent, prompt: str) -> tuple[str, str] | None:
+    """(verdict, reason) from the reviewer, or None if it gave no usable answer."""
+    try:
+        raw = agent(_REVIEWER + prompt) or ""
+        data = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
+        verdict = str(data.get("verdict") or "").strip().lower()
+        reason = " ".join(str(data.get("reason") or "").split())[:300]
+    except Exception:  # noqa: BLE001 - an unreadable review adds nothing
+        return None
+    return (verdict, reason or verdict) if verdict in (YES, NO, UNSURE) else None
+
+
+def _task(request: str | None, plan: dict) -> str:
+    system = plan.get("target_system") or {}
+    return (f"The researcher asked: {(request or '').strip()[:1500] or '(not recorded)'}\n"
+            f"Requested property: {plan.get('requested_property') or '(unspecified)'}\n"
+            f"System: {json.dumps(system, default=str)[:800] if system else '(unspecified)'}\n")
+
+
+def llm_script_check(v: Verdict, agent, *, request: str | None, plan: dict,
+                     main_py: str) -> None:
+    """Add the reviewer's "does this script compute what was asked?" to ``v``."""
+    mode = llm_mode()
+    if agent is None or mode == "off" or not main_py.strip():
+        return
+    answer = _ask(agent, _task(request, plan) + (
+        "\nDoes the script below compute the requested property for the requested system "
+        "(not a different property, not a different or placeholder system)?\n\n"
+        f"```python\n{main_py[:14000]}\n```"))
+    if answer is None or answer[0] == UNSURE:
+        return
+    verdict, reason = answer
+    if verdict == YES:
+        v.add("review", PASS, f"reviewer: the script computes what was asked ({reason})")
+    else:
+        v.add("review", FAIL if mode == "enforce" else WARN,
+              f"reviewer: the script doesn't compute what was asked -- {reason}")
+
+
+def _output_digest(execution_result: dict, limit: int = 6000) -> str:
+    """The job's small text outputs and the end of its stdout, for the reviewer."""
+    parts = []
+    outputs = execution_result.get("artifacts_dir")
+    if outputs and Path(outputs).is_dir():
+        for path in sorted(Path(outputs).rglob("*")):
+            if (path.is_file() and path.suffix.lower() in (".json", ".csv", ".txt", ".yaml")
+                    and path.stat().st_size <= 200_000):
+                text = path.read_text(encoding="utf-8", errors="replace")
+                parts.append(f"--- {path.name}\n{text[:2500]}")
+    stdout = (execution_result.get("stdout") or "").strip()
+    if stdout:
+        parts.append(f"--- end of stdout\n{stdout[-2500:]}")
+    return "\n".join(parts)[:limit]
+
+
+def llm_outputs_check(v: Verdict, agent, *, request: str | None, plan: dict,
+                      execution_result: dict | None) -> None:
+    """Add the reviewer's "are these outputs physically sensible?" to ``v`` (warn only)."""
+    result = execution_result or {}
+    if agent is None or llm_mode() == "off" or not result.get("succeeded"):
+        return
+    digest = _output_digest(result)
+    if not digest:
+        return
+    answer = _ask(agent, _task(request, plan) + (
+        "\nThe calculation finished. Are its outputs physically sensible for this system and "
+        "property (plausible magnitude, sign and units; not an obvious placeholder, zero, or "
+        f"NaN)?\n\n{digest}"))
+    if answer is None or answer[0] == UNSURE:
+        return
+    verdict, reason = answer
+    looks = "look physically sensible" if verdict == YES else "look physically doubtful"
+    v.add("review", PASS if verdict == YES else WARN, f"reviewer: the outputs {looks} ({reason})")
