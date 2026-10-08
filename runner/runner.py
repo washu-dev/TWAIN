@@ -390,6 +390,14 @@ def _build_orchestrator(engine, db: RunnerDB, session_id: str, params: dict, not
     # client which sees "finished" can always read the results. It can only be
     # given the orchestrator now: the sink is built first and passed *into* it.
     sink.flush_artifacts = lambda: capture_artifacts(db, session_id, orch)
+    # The observer's reviewer judges stage output against what was asked (#188).
+    # A resume job carries no request, so read it back from the transcript.
+    sm = getattr(orch, "sm", None)
+    if sm is not None and not params.get("request") and hasattr(db, "opening_request"):
+        try:
+            sm.review_request = db.opening_request(session_id)
+        except Exception as exc:  # noqa: BLE001 - the review just sees less
+            print(f"[observer] couldn't read the request for {session_id}: {exc}")
     return orch
 
 

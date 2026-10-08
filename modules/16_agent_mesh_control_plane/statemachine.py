@@ -891,8 +891,20 @@ class StateMachine:
             verdict = observer.bundle_gate(
                 plan, Path(bundle_dir), template=self._bundle_config(bundle_dir).get("template"),
                 periodic=_is_periodic(sysd))
+            main = Path(bundle_dir) / "main.py"
+            if not verdict.failed and main.is_file():
+                observer.llm_script_check(verdict, self._reviewer(), request=self._review_text(),
+                                          plan=plan, main_py=main.read_text(encoding="utf-8"))
         else:
-            verdict = observer.outputs_gate(self._load_artifact("execution_result"))
+            result = self._load_artifact("execution_result")
+            verdict = observer.outputs_gate(result)
+            if not verdict.failed:
+                observer.llm_outputs_check(verdict, self._reviewer(), request=self._review_text(),
+                                           plan=plan, execution_result=result)
+                if verdict.warnings and isinstance(result, dict):
+                    result["observer_warnings"] = [c.detail for c in verdict.warnings]
+                    self.context.artifacts["execution_result"] = self._write_artifact(
+                        "execution_result", result)
         for check in verdict.checks:
             mark = {"pass": "✓", "warn": "⚠", "fail": "✕"}[check.status]
             self._progress(stage, f"observer.{check.name}",
@@ -904,6 +916,18 @@ class StateMachine:
                 f"the observer stopped the run before {nxt.name}: {reasons}",
                 "Re-run from PLAN or BUILD after addressing this -- nothing was submitted "
                 "to the cluster.")
+
+    def _review_text(self):
+        """What the researcher asked, for the reviewer: the request this machine was
+        started with, else what the driver read back on resume (``review_request``)."""
+        return getattr(self, "_request", None) or getattr(self, "review_request", None)
+
+    def _reviewer(self):
+        """The observer's LLM: the same model, a fresh prompt each time (no shared
+        conversation), or None offline -- the machine never builds one just to review."""
+        if getattr(self, "_agent", None) is None:
+            return None
+        return lambda prompt: self._agent_text(prompt, max_tokens=300)
 
     def _note_on_plan(self, plan: dict, verdict) -> None:
         """Put the observer's PLAN warnings on the plan card, once."""

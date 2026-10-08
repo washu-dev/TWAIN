@@ -509,6 +509,14 @@ class RunnerDB:
         finally:
             conn.close()
 
+    def opening_request(self, session_id: str) -> str | None:
+        """The researcher's opening request (resume jobs don't carry it); the same
+        message ``rerun_conversation`` reuses."""
+        row = self._query_one(
+            "SELECT content FROM messages WHERE conversation_id = %s AND role = 'user' "
+            "AND kind = 'chat' ORDER BY id LIMIT 1;", (session_id,))
+        return (row or {}).get("content") if row else None
+
     def run_title(self, session_id: str) -> str | None:
         """The run's title (its originating request), or None if unknown.
 
