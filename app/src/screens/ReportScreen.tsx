@@ -135,7 +135,12 @@ export const ReportScreen: React.FC = () => {
           <View style={styles.badges}>
             <StatusBadge status={report.status} />
             <View style={styles.stateBadge}>
-              <Text style={styles.stateBadgeText}>final state: {report.final_state}</Text>
+              {/* TERMINATE is the pipeline's normal last state, not an abort. */}
+              <Text style={styles.stateBadgeText}>
+                {['TERMINATE', 'ACCEPT'].includes(String(report.final_state))
+                  ? 'finished'
+                  : `stopped at ${String(report.final_state ?? 'unknown').toLowerCase()}`}
+              </Text>
             </View>
           </View>
 
@@ -198,7 +203,11 @@ const ValidationCard: React.FC<{ report: Report }> = ({ report }) => {
         (metric.unit ? ` ${metric.unit}` : '')
       : null;
 
-  const status = String(validation?.['acceptance_status'] ?? 'not performed');
+  // "accepted" with nothing checked (no literature value, no target) only means
+  // nothing objected; show it as unverified rather than a green pass.
+  const unchecked = validation?.['verified'] === false;
+  const rawStatus = String(validation?.['acceptance_status'] ?? 'not performed');
+  const status = unchecked && rawStatus === 'accepted' ? 'not verified' : rawStatus;
   const rationale =
     typeof validation?.['rationale'] === 'string' ? (validation['rationale'] as string) : null;
   const rerun = (validation?.['rerun'] ?? null) as

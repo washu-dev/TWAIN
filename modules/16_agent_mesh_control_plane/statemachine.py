@@ -3664,6 +3664,11 @@ class StateMachine:
             gap = None
         artifact["gap"] = gap
         artifact["gap_basis"] = basis
+        # Whether anything actually checked the value: a literature baseline, an
+        # acceptance target, or a plausibility finding. "accepted" with nothing
+        # checked only means "nothing objected" -- the summary must say so.
+        artifact["verified"] = bool(result.comparisons) or gap is not None \
+            or bool(artifact.get("plausibility"))
         logger.info("[validate] %s -- %s", status, artifact["rationale"])
         # Ask the researcher before spending another calculation. Deliberately
         # BEFORE _gate_rerun: everything above only reads, so if this suspends

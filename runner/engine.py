@@ -349,7 +349,9 @@ class _RealEngine:
         """
         state = getattr(getattr(orch, "sm", None), "current_state", None)
         name = state.name if state is not None else "unknown"
-        lines = [f"Run complete (final state: {name})."]
+        # TERMINATE is just the pipeline's last state -- every finished run ends
+        # there. Saying "final state: TERMINATE" read as an abnormal stop.
+        lines = ["Run finished." if name in ("TERMINATE", "ACCEPT") else f"Run ended at {name}."]
         normalized = self._read_artifact(orch, "normalized_result")
         metric = (normalized or {}).get("primary_metric") or {}
         if isinstance(metric.get("value"), (int, float)):
@@ -368,8 +370,14 @@ class _RealEngine:
                 reason = loop.get("stop_reason") or loop.get("reason") or "budget exhausted"
                 flagged = (f" (correction loop stopped: {reason}; "
                            "delivered for your review)")
-            lines.append(f"Validation: {status}{flagged}"
-                         + (f" — {rationale}" if rationale else ""))
+            if status == "accepted" and report.get("verified") is False:
+                # "accepted" here means nothing objected, not that anything agreed.
+                lines.append("Validation: not verified — no literature value or "
+                             "acceptance target covers this result. Check it "
+                             "before relying on it.")
+            else:
+                lines.append(f"Validation: {status}{flagged}"
+                             + (f" — {rationale}" if rationale else ""))
         elif normalized:
             lines.append("Validation: not performed — no reference was "
                          "available to check this result against.")

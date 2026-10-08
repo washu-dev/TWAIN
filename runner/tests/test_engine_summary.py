@@ -48,7 +48,8 @@ NORMALIZED = {
 
 def test_planning_only_run_keeps_the_plain_line(tmp_path):
     summary = _engine().final_summary(_orch(tmp_path, {}))
-    assert summary.startswith("Run complete (final state: TERMINATE).")
+    assert summary.startswith("Run finished.")
+    assert "TERMINATE" not in summary          # a state name read as an abnormal stop
     assert "Validation" not in summary
 
 
@@ -70,6 +71,21 @@ def test_interpreted_result_without_a_reference_says_so(tmp_path):
     summary = _engine().final_summary(orch)
     assert "Result: logS" in summary
     assert "Validation: not performed — no reference" in summary
+
+
+def test_accepted_with_nothing_checked_says_not_verified(tmp_path):
+    # Runs 6678e7e7 and the formation-energy run: "Validation: accepted -- No
+    # literature baseline ..." read as a pass; nothing had checked the value.
+    orch = _orch(tmp_path, {
+        "normalized_result": NORMALIZED,
+        "validation_report": {
+            "acceptance_status": "accepted", "verified": False,
+            "rationale": "No literature baseline or matching acceptance criterion "
+                         "covers this result; delivered without external validation.",
+        },
+    })
+    summary = _engine().final_summary(orch)
+    assert "Validation: not verified" in summary and "accepted" not in summary
 
 
 def test_stopped_correction_loop_is_flagged(tmp_path):
