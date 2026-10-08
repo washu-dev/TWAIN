@@ -46,6 +46,9 @@ CONFIG_PATH = (Path(__file__).resolve().parents[1].parent
 # after the property AND its unit ("standard_heat_of_formation_kJ_mol"). The plan
 # and the baseline DB key on the property alone, which is the same mismatch
 # _BASELINE_PROPERTY_ALIASES exists for.
+#: "_at_25c", "_at_298k", "_at_298_15k", "_at_1_atm", "_25c" -- conditions inside a metric name.
+_CONDITION = re.compile(r"_(?:at_)?\d+(?:_\d+)?_?(?:c|k|degc|degrees_c|atm|bar)(?=_|$)")
+
 _UNIT_SUFFIX = re.compile(
     r"_(?:"
     r"kj_?mol|kj_?per_?mol|kcal_?mol|ev|ev_?per_?atom|ev_?atom|"
@@ -151,6 +154,11 @@ class _Table:
         key = _normalise(metric_name)
         if not key:
             return None
+        # Conditions name WHEN the value holds, not WHAT it is: drop them first, so
+        # "aqueous_solubility_at_25c_mol_per_l" is checked as
+        # "aqueous_solubility_mol_per_l". Without this a generated metric name
+        # matched nothing and a 4.8e11 mol/L solubility was accepted (6678e7e7).
+        key = _CONDITION.sub("", key) or key
         found = self._by_name.get(key)
         if found is not None:
             return found

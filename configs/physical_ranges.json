@@ -88,6 +88,23 @@
       "why": "Already a log, so the bound is tight and safe: -15 is below anything measurable, and +2 would be 100 mol/L, which no solute reaches. Catches a raw concentration reported where a log was asked for."
     },
     {
+      "property": "molar_solubility",
+      "aliases": [
+        "aqueous_solubility_mol_per_l",
+        "aqueous_solubility_mol_l",
+        "aqueous_solubility_molar",
+        "molar_solubility",
+        "solubility_mol_per_l",
+        "solubility_mol_l",
+        "solubility_molar"
+      ],
+      "unit": "mol/L",
+      "min": 0.0,
+      "max": 100.0,
+      "reason": "a molar solubility is a concentration; pure water itself is 55.5 mol/L",
+      "why": "Linear, not log: nothing dissolves to more than ~20 mol/L, so 100 is generous. Catches a value off by many orders of magnitude -- run 6678e7e7 reported aspirin at 4.8e11 mol/L (real: ~0.02) and VALIDATE accepted it because no range matched the name."
+    },
+    {
       "property": "density",
       "aliases": [
         "crystal_density",

@@ -229,3 +229,26 @@ class TestTheShippedTableIsCoherent:
         electron count and basis set. Adding one would flag big molecules."""
         assert P.load_table().lookup("total_energy") is None
         assert P.load_table().lookup("cohesive_energy") is None
+
+
+class TestMolarSolubility:
+    """Run 6678e7e7: aspirin reported at 4.8e11 mol/L (real ~0.02) and accepted,
+    because the generated metric name matched no range at all."""
+
+    def test_the_regression(self):
+        finding = P.check_metric("aqueous_solubility_at_25C_mol_per_L", 4.79403e11, "mol/L")
+        assert finding is not None and "55.5 mol/L" in finding.reason
+
+    @pytest.mark.parametrize("value", [0.0183, 3.3e-5, 12.0])
+    def test_real_solubilities_pass(self, value):
+        assert P.check_metric("aqueous_solubility_at_25C_mol_per_L", value, "mol/L") is None
+
+    @pytest.mark.parametrize("name", ["aqueous_solubility_at_298K_mol_per_L",
+                                      "aqueous_solubility_at_298.15K_mol_per_L",
+                                      "solubility_25C_mol_L", "molar_solubility"])
+    def test_condition_suffixes_are_ignored(self, name):
+        assert P.load_table().lookup(name).property == "molar_solubility"
+
+    def test_a_log_solubility_still_uses_the_log_range(self):
+        assert P.load_table().lookup("log_solubility_at_25C").property == "logS"
+        assert P.check_metric("logS", -1.7, "log10(mol/L)") is None
