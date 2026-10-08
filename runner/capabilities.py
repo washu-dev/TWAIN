@@ -298,7 +298,9 @@ def resolve_from_specs(entries: list[dict] | None = None) -> list[dict]:
     every package it needs, i.e. what that env was built to hold. Needs the
     pipeline modules on sys.path (runner.engine._load()).
     """
-    from statemachine import _cluster_env_specs, _plan_dependencies
+    from statemachine import _cluster_env_specs, _plan_dependencies, cluster_env_source
+    source = cluster_env_source()
+    observed = source.startswith("RIS inventory")
     entries = registry_entries() if entries is None else entries
     specs = _cluster_env_specs()
     rows = []
@@ -313,8 +315,10 @@ def resolve_from_specs(entries: list[dict] | None = None) -> list[dict]:
         wanted = {d.package.lower() for d in deps}
         env = next((name for name in _search_order({n: n for n in specs}, entry["name"])
                     if wanted and wanted <= specs.get(name, frozenset())), None)
-        detail = (f"declared by the {env} env spec (scripts/ris/envs/{env}.yml)" if env
-                  else "no single env spec declares its packages" if wanted
+        detail = ((f"installed in the {env} env ({source})" if observed
+                   else f"declared by the {env} env spec (scripts/ris/envs/{env}.yml)") if env
+                  else ("no single env has all its packages" if observed
+                        else "no single env spec declares its packages") if wanted
                   else "no import name is known for this entry")
         rows.append({**entry, "installed": env is not None, "env": env, "detail": detail})
     return rows

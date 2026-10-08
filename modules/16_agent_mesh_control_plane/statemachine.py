@@ -86,6 +86,40 @@ def _module_importable(module: str) -> bool:
 
 _CLUSTER_ENV_SPECS_CACHE: Optional[dict] = None
 
+# What RIS ACTUALLY has, from the latest inventory job (#185) -- set by the
+# runner before each slice via use_cluster_inventory(). When set, it replaces
+# the spec files as the source of truth for planning: a spec says what an env
+# should hold, the inventory what it does (run e825d5ed planned for an env that
+# was never provisioned at the root the job used).
+_CLUSTER_INVENTORY: Optional[dict] = None
+_CLUSTER_INVENTORY_TAKEN: Optional[str] = None
+
+
+def use_cluster_inventory(envs: Optional[dict], taken_at: Optional[str] = None) -> None:
+    """Plan from an observed inventory ``{env: iterable of package names}``; None = specs.
+
+    An env the inventory could not read (it reports an error) keeps its spec's
+    contents rather than counting as empty -- an unreadable listing is not
+    evidence that nothing is installed.
+    """
+    global _CLUSTER_INVENTORY, _CLUSTER_INVENTORY_TAKEN
+    if not envs:
+        _CLUSTER_INVENTORY, _CLUSTER_INVENTORY_TAKEN = None, None
+        return
+    specs = _spec_env_packages()
+    _CLUSTER_INVENTORY = {
+        str(name).lower(): (frozenset(str(p).lower() for p in pkgs) if pkgs is not None
+                            else specs.get(str(name).lower(), frozenset()))
+        for name, pkgs in envs.items()}
+    _CLUSTER_INVENTORY_TAKEN = taken_at
+
+
+def cluster_env_source() -> str:
+    """Where planning's view of the cluster envs comes from, for notes and logs."""
+    if _CLUSTER_INVENTORY is not None:
+        return f"RIS inventory{f' of {_CLUSTER_INVENTORY_TAKEN}' if _CLUSTER_INVENTORY_TAKEN else ''}"
+    return "env specs (scripts/ris/envs/*.yml)"
+
 
 def _cluster_env_specs() -> dict:
     """``{env name: frozenset(package names)}`` from the cluster env specs.
@@ -97,6 +131,13 @@ def _cluster_env_specs() -> dict:
     Kept per env -- not as one union -- because a job runs in a single env:
     "some spec lists it" is not "the env this job uses has it" (#169).
     """
+    if _CLUSTER_INVENTORY is not None:
+        return _CLUSTER_INVENTORY
+    return _spec_env_packages()
+
+
+def _spec_env_packages() -> dict:
+    """The spec files' view (cached): ``{env: frozenset(package names)}``."""
     global _CLUSTER_ENV_SPECS_CACHE
     if _CLUSTER_ENV_SPECS_CACHE is not None:
         return _CLUSTER_ENV_SPECS_CACHE

@@ -389,6 +389,9 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     job_events = RisJobEventWaiter(db)
     # On resume/rerun the orchestrator rebuilds its state + context from the session
     # store; request/researcher_id are only needed to *start* a run.
+    # Plan from what RIS actually has (the newest inventory, #185), not the specs.
+    from runner import inventory
+    inventory.apply_latest(db)
     orch = _build_orchestrator(engine, db, session_id, params, notifier, cancel,
                                job_event_wait=job_events.wait,
                                issue_job_ticket=getattr(db, "issue_job_ticket", None),

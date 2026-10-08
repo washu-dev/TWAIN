@@ -134,20 +134,31 @@ def main() -> None:
     from execution_adapter.cluster_profile import ClusterProfile
     from execution_adapter.ris_api_adapter import RisApiAdapter
 
+    from runner import inventory
+    from runner.capabilities import publish_from_specs
     from runner.monitor import ClusterMonitor
+
+    def refresh_cluster_view():
+        # Planning and the capability list both follow the newest inventory.
+        log.info("planning from %s", inventory.apply_latest(db))
+        publish_from_specs(db)
+
+    profile = ClusterProfile.load(os.getenv("TWAIN_SLURM_CLUSTER") or "compute2")
+    adapter = RisApiAdapter(profile)
     monitor = ClusterMonitor(
-        db, RisApiAdapter(ClusterProfile.load(os.getenv("TWAIN_SLURM_CLUSTER") or "compute2")),
+        db, adapter,
         poll_seconds=float(os.getenv("TWAIN_MONITOR_POLL_SECONDS", "30")), sqs_client=client,
-        reap=lambda: _reap_orphans(db, DEFAULT_LEASE_SECONDS, DEFAULT_MAX_ATTEMPTS))
+        reap=lambda: _reap_orphans(db, DEFAULT_LEASE_SECONDS, DEFAULT_MAX_ATTEMPTS),
+        inventory=inventory.InventoryScheduler(db, adapter, profile,
+                                               on_ingest=refresh_cluster_view))
     threads = [threading.Thread(target=monitor.run, args=(stop,), name="monitor", daemon=True)]
     for i in range(max(1, int(os.getenv("TWAIN_WORKER_CONCURRENCY", "2")))):
         threads.append(threading.Thread(target=consume, args=(db, client, queue_url, stop),
                                         name=f"consumer-{i}", daemon=True))
     # Not publish(): it probes env directories that exist only on RIS storage
-    # and would mark every library unavailable from here. The env specs say
-    # the same thing declaratively, and ship in the image.
-    from runner.capabilities import publish_from_specs
-    publish_from_specs(db)
+    # and would mark every library unavailable from here. The latest RIS
+    # inventory (#185) says what the envs hold; the specs stand in until one exists.
+    refresh_cluster_view()
     for t in threads:
         t.start()
     log.info("worker up: %d consumers + cluster monitor on %s", len(threads) - 1, queue_url)
