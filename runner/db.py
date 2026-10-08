@@ -219,6 +219,65 @@ class RunnerDB:
             """,
             (str(ris_job_id), session_id, int(attempt), s3_prefix, Json(detail or {})))
 
+    # ---- RIS inventory (#185): what the cluster envs actually contain ----------
+    def inventory_pending(self) -> dict | None:
+        """The inventory job in flight, if any."""
+        return self._query_one(
+            "SELECT * FROM ris_inventory WHERE status = 'submitted' "
+            "ORDER BY id DESC LIMIT 1;", ())
+
+    def inventory_due(self, every_hours: float) -> bool:
+        """True when no inventory is in flight and none ended in the last ``every_hours``.
+
+        A failed one counts too: retrying a broken inventory every tick would
+        submit a Slurm job every 30 seconds.
+        """
+        row = self._query_one(
+            """
+            SELECT
+              EXISTS (SELECT 1 FROM ris_inventory WHERE status = 'submitted') AS busy,
+              EXISTS (SELECT 1 FROM ris_inventory
+                      WHERE status IN ('ingested', 'failed')
+                        AND finished_at > now() - make_interval(secs => %s)) AS fresh;
+            """, (float(every_hours) * 3600,))
+        return bool(row) and not row["busy"] and not row["fresh"]
+
+    def inventory_submitting(self) -> int:
+        """A new 'submitted' row (its job id is set once ris-api answers)."""
+        return int(self._query_one(
+            "INSERT INTO ris_inventory (status) VALUES ('submitted') RETURNING id;",
+            (), commit=True)["id"])
+
+    def inventory_set_job(self, inventory_id: int, ris_job_id: str) -> None:
+        self._execute("UPDATE ris_inventory SET ris_job_id = %s WHERE id = %s;",
+                      (str(ris_job_id), int(inventory_id)))
+
+    def inventory_ingested(self, inventory_id: int, snapshot: dict) -> None:
+        self._execute(
+            """
+            UPDATE ris_inventory SET status = 'ingested', finished_at = now(),
+              taken_at = %s, envs_root = %s, envs = %s, modules = %s
+            WHERE id = %s;
+            """,
+            (snapshot.get("taken_at"), snapshot.get("envs_root"),
+             Json(snapshot.get("envs") or {}), Json(snapshot.get("modules") or []),
+             int(inventory_id)))
+
+    def inventory_failed(self, inventory_id: int, error: str) -> None:
+        self._execute(
+            "UPDATE ris_inventory SET status = 'failed', finished_at = now(), error = %s "
+            "WHERE id = %s;", (str(error)[:2000], int(inventory_id)))
+
+    def latest_inventory(self, max_age_hours: float) -> dict | None:
+        """The newest ingested inventory no older than ``max_age_hours``, or None."""
+        return self._query_one(
+            """
+            SELECT id, taken_at, envs_root, envs FROM ris_inventory
+            WHERE status = 'ingested'
+              AND finished_at > now() - make_interval(secs => %s)
+            ORDER BY finished_at DESC LIMIT 1;
+            """, (float(max_age_hours) * 3600,))
+
     def mark(self, ris_job_id: str, status: str) -> None:
         stamp = {"collected": "collected_at", "finished": "finished_at"}.get(status)
         self._execute(

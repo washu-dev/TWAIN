@@ -11,7 +11,8 @@ run -- no process waits on it. This loop does the waiting for all of them:
 * when a job finishes, marks it and enqueues + sends the run's ``resume``,
   which collects it on whichever worker takes the message;
 * relays outbox jobs whose SQS send never happened, and reaps jobs held by a
-  worker that died.
+  worker that died;
+* keeps the RIS inventory current (runner/inventory.py, #185).
 
 Exactly one monitor is active however many workers run: each tick needs the
 Postgres advisory lock held on its own connection, so a second worker's monitor
@@ -53,7 +54,8 @@ MONITOR_LOCK = "twain-cluster-monitor"
 class ClusterMonitor:
     def __init__(self, db, adapter, *, poll_seconds: float = 30.0,
                  relay_grace_seconds: float = 30.0, sqs_client=None,
-                 reap: Callable[[], None] | None = None, clock=time.monotonic):
+                 reap: Callable[[], None] | None = None, clock=time.monotonic,
+                 inventory=None):
         """``adapter``: a RisApiAdapter (poll with its 404 -> accounting fallback,
         ``last_detail``, ``stdout_page``). ``reap``: the runner's orphan reaper."""
         self.db = db
@@ -62,6 +64,7 @@ class ClusterMonitor:
         self.relay_grace_seconds = relay_grace_seconds
         self.sqs_client = sqs_client
         self.reap = reap
+        self.inventory = inventory   # runner.inventory.InventoryScheduler (#185)
         self._clock = clock
         self._activities: dict = {}
 
@@ -75,6 +78,11 @@ class ClusterMonitor:
                 self.reap()
             except Exception as exc:  # noqa: BLE001 - one bad pass must not stop the loop
                 print(f"[monitor] reaper failed: {exc}")
+        if self.inventory is not None:
+            try:
+                stats["inventory"] = self.inventory.tick()
+            except Exception as exc:  # noqa: BLE001 - never let it stall the run monitor
+                print(f"[monitor] inventory pass failed: {exc}")
         due = {r["ris_job_id"]: r for r in self.db.open_cluster_jobs(self.poll_seconds)}
         for job_id in force:
             row = due.get(str(job_id)) or self.db.cluster_job(str(job_id))

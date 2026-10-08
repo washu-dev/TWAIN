@@ -983,9 +983,31 @@ class TestSlurmClusterGrounding:
     def _fresh_caches(self):
         SM._CLUSTER_ENV_SPECS_CACHE = None
         SM._PYPI_VERDICTS.clear()
+        SM.use_cluster_inventory(None)
         yield
         SM._CLUSTER_ENV_SPECS_CACHE = None
         SM._PYPI_VERDICTS.clear()
+
+    def test_the_inventory_replaces_the_specs_for_planning(self, monkeypatch):
+        """#185: plan from what RIS has. An env a spec promises but the inventory
+        doesn't list can't host the run (e825d5ed); one it lists with the
+        packages can, whatever the spec says."""
+        toolset = ["OpenMM", "OpenFF Toolkit", "RDKit"]
+        # Hermetic: openmm and rdkit are on PyPI, openff-toolkit is conda-only.
+        monkeypatch.setattr(SM, "_pip_installable", lambda dep: dep.package.lower() != "openff-toolkit")
+        assert SM.cluster_env_candidates(toolset) == ["nwchem"]          # specs: nwchem
+        SM.use_cluster_inventory({"default": ["rdkit", "xtb-python"]}, "2026-10-08T15:08Z")
+        assert SM.cluster_env_candidates(toolset) is None                 # not provisioned
+        assert SM.cluster_env_source() == "RIS inventory of 2026-10-08T15:08Z"
+        SM.use_cluster_inventory({"default": ["rdkit"],
+                                  "nwchem": ["nwchem", "openmm", "openff-toolkit", "rdkit"]})
+        assert SM.cluster_env_candidates(toolset) == ["nwchem"]
+        SM.use_cluster_inventory(None)
+        assert SM.cluster_env_source().startswith("env specs")
+
+    def test_an_env_the_inventory_could_not_read_keeps_its_spec(self):
+        SM.use_cluster_inventory({"psi4": None, "default": ["rdkit"]})
+        assert "psi4" in SM._cluster_env_specs()["psi4"]
 
     def test_env_specs_parse_to_package_names(self):
         pkgs = SM._cluster_env_packages()

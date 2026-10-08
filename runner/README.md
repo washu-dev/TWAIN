@@ -335,6 +335,27 @@ queueing), **edit the spec, commit, and rerun the script**. Never
 `twain-envs/default` silently lost rdkit, and hand edits also race against
 teammates' running jobs.
 
+#### What the envs actually contain: the RIS inventory
+
+Planning uses **what is installed** rather than what the specs promise (#185).
+The worker's cluster monitor submits `scripts/ris/inventory.sh`, a
+read-only job of about a minute on the profile's short partition, whenever the
+newest inventory is older than `TWAIN_INVENTORY_HOURS` (24). It stores the
+result in `ris_inventory`: every env's version, Python and installed packages
+(conda's plus pip's), and the `module spider` list. Each run then plans from
+the newest inventory, and the capability list is published from it. The spec
+files are only a fallback, used when no inventory exists or the newest is
+older than `TWAIN_INVENTORY_MAX_AGE_HOURS` (168).
+
+```bash
+TWAIN_ENV_FILE=/storage2/fs1/mdan/Active/common/projects/twain/TWAIN/twain.sh \
+  bash scripts/ris/inventory.sh | grep '^TWAIN_INVENTORY_JSON'   # the same job, by hand
+```
+
+After promoting an env, the next scheduled inventory picks it up. To pick it up
+sooner, mark the latest inventory stale:
+`UPDATE ris_inventory SET finished_at = now() - interval '2 days' WHERE status <> 'submitted';`
+
 #### Rebuilding a shared env: build beside, verify, promote
 
 Every simulation uses these envs, so a rebuild never touches the live one.
