@@ -94,6 +94,10 @@
         {
           "name": "RIS_API_TOKEN",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/ris_api/TOKEN-ruCRKa"
+        },
+        {
+          "name": "MP_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/materials_project/API_KEY-Ntp75l"
         }
       ],
       "logConfiguration": {
