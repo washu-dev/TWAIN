@@ -134,7 +134,7 @@ def main() -> None:
     from execution_adapter.cluster_profile import ClusterProfile
     from execution_adapter.ris_api_adapter import RisApiAdapter
 
-    from runner import inventory
+    from runner import env_proposals, inventory
     from runner.capabilities import publish_from_specs
     from runner.monitor import ClusterMonitor
 
@@ -150,7 +150,8 @@ def main() -> None:
         poll_seconds=float(os.getenv("TWAIN_MONITOR_POLL_SECONDS", "30")), sqs_client=client,
         reap=lambda: _reap_orphans(db, DEFAULT_LEASE_SECONDS, DEFAULT_MAX_ATTEMPTS),
         inventory=inventory.InventoryScheduler(db, adapter, profile,
-                                               on_ingest=refresh_cluster_view))
+                                               on_ingest=refresh_cluster_view),
+        env_changes=env_proposals.EnvChangeScheduler(db, adapter, profile))
     threads = [threading.Thread(target=monitor.run, args=(stop,), name="monitor", daemon=True)]
     for i in range(max(1, int(os.getenv("TWAIN_WORKER_CONCURRENCY", "2")))):
         threads.append(threading.Thread(target=consume, args=(db, client, queue_url, stop),

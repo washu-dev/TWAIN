@@ -454,6 +454,61 @@ class RunnerDB:
         finally:
             conn.close()
 
+    # ---- shared-environment change proposals (#187) ---------------------------
+    def env_proposal_open(self, env: str, package: str) -> dict | None:
+        return self._query_one(
+            "SELECT * FROM env_proposals WHERE env = %s AND package = %s "
+            "AND status IN ('pending', 'approved', 'building') ORDER BY id DESC LIMIT 1;",
+            (env, package))
+
+    def env_proposal_insert(self, **fields) -> dict:
+        return self._query_one(
+            """
+            INSERT INTO env_proposals
+                (session_id, env, package, module, reason, spec_before, spec_after)
+            VALUES (%(session_id)s, %(env)s, %(package)s, %(module)s, %(reason)s,
+                    %(spec_before)s, %(spec_after)s)
+            RETURNING *;
+            """, fields, commit=True)
+
+    def env_proposals_by_status(self, status: str) -> list:
+        return self._query_all(
+            "SELECT * FROM env_proposals WHERE status = %s ORDER BY id;", (status,))
+
+    def env_proposal_update(self, proposal_id: int, **fields) -> None:
+        allowed = {"status", "ris_job_id", "version", "result"}
+        sets = [f"{k} = %({k})s" for k in fields if k in allowed]
+        if fields.get("status") in ("promoted", "failed"):
+            sets.append("finished_at = now()")
+        self._execute(f"UPDATE env_proposals SET {', '.join(sets)} WHERE id = %(id)s;",
+                      {**fields, "id": int(proposal_id)})
+
+    def inventory_mark_due(self) -> None:
+        """Make the next monitor tick re-inventory RIS (an env just changed), while the
+        current snapshot stays young enough for planning to keep using it."""
+        self._execute(
+            "UPDATE ris_inventory SET finished_at = now() - interval '25 hours' "
+            "WHERE status IN ('ingested', 'failed') "
+            "AND finished_at > now() - interval '25 hours';", ())
+
+    def insert_email_action_rows(self, rows, valid_hours: float) -> None:
+        """Tokens not tied to a question: ``[(hash, session_id, kind, choice, label,
+        proposal_id, recipient)]``."""
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            for row in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO email_actions (token_hash, session_id, gate_kind, choice, label,
+                                               proposal_id, recipient, expires_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s));
+                    """, (*row, float(valid_hours) * 3600))
+            conn.commit()
+            cursor.close()
+        finally:
+            conn.close()
+
     def run_title(self, session_id: str) -> str | None:
         """The run's title (its originating request), or None if unknown.
 

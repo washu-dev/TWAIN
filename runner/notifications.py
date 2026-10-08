@@ -538,3 +538,22 @@ def _error_body(exc: urllib.error.HTTPError) -> str:
         return exc.read().decode("utf-8", "replace").strip()[:400]
     except Exception:  # noqa: BLE001 -- the status code alone still gets reported
         return ""
+
+
+def send_email(to_addr: str, subject: str, body: str, actions: list | None = None) -> None:
+    """Email anyone (an env approver, a run owner) outside a run's gate flow. Never raises."""
+    backend = os.getenv("TWAIN_NOTIFY_BACKEND", "log").strip().lower()
+    try:
+        if backend == "sendgrid" and to_addr:
+            _ensure_env_loaded()
+            api_key, from_addr = os.getenv("TWAIN_SENDGRID_API_KEY"), os.getenv("TWAIN_NOTIFY_FROM")
+            if not api_key or not from_addr:
+                raise RuntimeError("TWAIN_SENDGRID_API_KEY / TWAIN_NOTIFY_FROM not set")
+            _sendgrid_post(api_key, from_addr, to_addr, subject, body,
+                           html=_html_body(subject, body, actions or []))
+            logger.info("[notify] SendGrid accepted '%s' → %s", subject, to_addr)
+        else:
+            logger.info("[notify] %s → %s | %s", subject, to_addr or "<no recipient>", body)
+    except Exception as exc:  # noqa: BLE001 - best effort, but never silent
+        logger.error("[notify] could not email %s (%s): %s", to_addr, subject, exc)
+
