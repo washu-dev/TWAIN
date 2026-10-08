@@ -547,3 +547,55 @@ def test_the_runner_keys_methods_the_way_planning_does():
         assert MH.method_key(plan) == SM.StateMachine._method_key(plan)
         assert MH.history_key(plan) == SM.history_key(plan.get("requested_property"),
                                                       plan.get("acceptance_metrics"))
+
+
+# -- one job, one cluster env: aspirin solubility -----------------------------------
+
+ASPIRIN_PICK = dict(libraries=["OpenMM", "RDKit", "OpenFF Toolkit", "ASE"], calculator="xtb",
+                    calculator_library="ASE", reasoning="GFN2-xTB with ALPB water")
+
+
+def test_a_toolset_is_trimmed_to_fit_one_env():
+    # openff-toolkit is only in nwchem; xtb-python only in default.
+    assert SM.StateMachine._fit_one_env(["xtb", "ASE", "OpenMM"],
+                                        ["RDKit", "OpenFF Toolkit", "ASE"]) == ["OpenFF Toolkit"]
+    assert SM.StateMachine._fit_one_env(["RDKit"], ["ASE"]) == []
+
+
+def test_a_core_that_fits_no_env_is_none():
+    assert SM.StateMachine._fit_one_env(["xtb", "OpenFF Toolkit"], []) is None
+
+
+def _plan_with_pick(machine, tmp_path, monkeypatch, **pick):
+    from method_discovery.llm_discovery import ToolRecommendation
+    _seed_intent(machine, tmp_path)
+    machine.decompose()
+    machine.discover()
+    machine.execute_slurm = True
+    monkeypatch.setattr(machine, "_llm_recommend",
+                        lambda *a, **k: ToolRecommendation(**{**ASPIRIN_PICK, **pick}))
+    monkeypatch.setattr(machine, "_installed_libraries", lambda ranked, names: (list(names), []))
+    assert machine.plan() == State.BUILD
+    return machine._load_artifact("execution_plan")
+
+
+def test_aspirin_solubility_plans_instead_of_stopping(machine, tmp_path, monkeypatch):
+    plan = _plan_with_pick(machine, tmp_path, monkeypatch)
+    libs = plan["selected_method"]["libraries"]
+    assert "OpenFF Toolkit" not in libs and libs[0] == "OpenMM"
+    assert SM.cluster_env_candidates(SM._selected_toolset(plan)) is not None
+    assert any(n.startswith("Dropped from the toolset: OpenFF Toolkit") for n in plan["safety_notes"])
+
+
+def test_an_unrunnable_core_falls_back_to_the_ranking(machine, tmp_path, monkeypatch):
+    plan = _plan_with_pick(machine, tmp_path, monkeypatch,
+                           libraries=["OpenFF Toolkit", "RDKit"], calculator="xtb",
+                           calculator_library="OpenFF Toolkit")
+    assert "OpenFF Toolkit" not in plan["selected_method"]["libraries"]
+    assert any("used the discovery ranking's pick instead" in n for n in plan["safety_notes"])
+    assert SM.cluster_env_candidates(SM._selected_toolset(plan)) is not None
+
+
+def test_the_refusal_names_each_tool_once():
+    gap = SM._cluster_env_gap(["xtb", "OpenMM", "OpenFF Toolkit", "OpenMM"])
+    assert gap.count("OpenMM") == 1
