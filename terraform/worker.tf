@@ -152,8 +152,17 @@ resource "aws_ecs_service" "runner" {
 
   # Start the new task before stopping the old one. Overlap is safe: claims
   # are idempotent per job, and the monitor's advisory lock keeps one leader.
-  deployment_minimum_healthy_percent = 0
+  # 100 (not 0): with 0, ECS stopped the working worker before a replacement
+  # had started, so a broken revision (2026-10-08) left nothing running.
+  deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
+
+  # A revision whose tasks can't start (a bad secret reference, a broken image)
+  # is rolled back by ECS, and the CI deploy fails loudly instead of hanging.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   lifecycle {
     ignore_changes = [task_definition] # CI owns revisions

@@ -183,10 +183,23 @@ jobs:
       # definition naming a secret that doesn't exist yet fails every launch.
       - name: Add the SendGrid secret when email notifications are on
         if: steps.svc.outputs.exists == 'true' && vars.TWAIN_NOTIFY_BACKEND == 'sendgrid'
+        # The full ARN, never a bare name: ECS reads a non-ARN valueFrom as an SSM
+        # parameter, and every task then failed to start (ssm:GetParameters denied).
+        env:
+          SENDGRID_SECRET_ARN: ${{ vars.TWAIN_SENDGRID_SECRET_ARN || 'arn:aws:secretsmanager:us-east-1:730335203321:secret:TWAIN/sendgrid/API_KEY-TyoRPH' }}
         run: |
-          jq '.containerDefinitions[0].secrets += [{"name": "TWAIN_SENDGRID_API_KEY",
-                "valueFrom": "TWAIN/sendgrid/API_KEY"}]' \
+          jq --arg arn "$SENDGRID_SECRET_ARN" \
+            '.containerDefinitions[0].secrets += [{"name": "TWAIN_SENDGRID_API_KEY", "valueFrom": $arn}]' \
             runner/ecs-task-definition.json > runner/td.tmp && mv runner/td.tmp runner/ecs-task-definition.json
+
+      - name: Every secret is referenced by ARN
+        if: steps.svc.outputs.exists == 'true'
+        run: |
+          bad=$(jq -r '.containerDefinitions[0].secrets[]? | select(.valueFrom | startswith("arn:") | not) | .name' runner/ecs-task-definition.json)
+          if [ -n "$bad" ]; then
+            echo "::error::secrets must use a full ARN in valueFrom (a bare name is read as an SSM parameter): $bad"
+            exit 1
+          fi
 
       - name: Render task definition with the new image
         if: steps.svc.outputs.exists == 'true'
