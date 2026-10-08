@@ -135,14 +135,24 @@ _STEP_FAILED = {
 }
 
 
-def _s3_job_script() -> str:
-    """The job's command for S3 staging: twain.sh -> stale-checkout guard -> wrapper.
+#: The S3 job wrapper, shipped inside every job script (see _s3_job_script).
+JOB_WRAPPER = Path(__file__).resolve().parents[2] / "scripts" / "ris" / "job_wrapper.sh"
 
-    Modelled on RETICLE's jobs.py prologue. The wrapper and the env specs come
-    from the RIS checkout at $CODE_DIR, so a checkout older than the code that
-    submitted the job fails here, loudly, with the fix (exit 4) -- not halfway
-    through the run.
+
+def _s3_job_script(wrapper: Optional[str] = None) -> str:
+    """The job's command for S3 staging: twain.sh -> the embedded job wrapper.
+
+    The wrapper (scripts/ris/job_wrapper.sh) travels INSIDE the job script, so
+    the job always runs the wrapper of the code that submitted it. It used to be
+    read from the RIS checkout at $CODE_DIR, which meant every worker deploy
+    needed a `git pull` on RIS first -- and a stale-checkout guard (exit 4)
+    stopped every job until someone did (run 99680dfe). Nothing on RIS has to
+    track master any more; twain.sh still provides TWAIN_HOME / TWAIN_ENVS_ROOT.
     """
+    body = wrapper if wrapper is not None else JOB_WRAPPER.read_text(encoding="utf-8")
+    marker = "TWAIN_JOB_WRAPPER_EOF"
+    if marker in body:
+        raise ValueError(f"job wrapper contains its heredoc marker {marker}")
     return "\n".join([
         'if [ -n "${TWAIN_ENV_FILE:-}" ]; then',
         '  if [ ! -r "$TWAIN_ENV_FILE" ]; then',
@@ -153,23 +163,15 @@ def _s3_job_script() -> str:
         "  fi",
         '  . "$TWAIN_ENV_FILE"',
         "fi",
-        'if [ -z "${CODE_DIR:-}" ] || [ ! -f "$CODE_DIR/scripts/ris/job_wrapper.sh" ]; then',
-        ('  echo "TWAIN_ENV_FILE: CODE_DIR=${CODE_DIR:-<unset>} is not a TWAIN checkout -- '
-         'export CODE_DIR=<your clone of github.com/washu-dev/TWAIN> in '
-         '${TWAIN_ENV_FILE:-twain.sh}" >&2'),
-        "  exit 3",
-        "fi",
-        'if [ -n "${TWAIN_EXPECTED_SHA:-}" ] && command -v git >/dev/null 2>&1; then',
-        '  if ! git -c safe.directory="*" -C "$CODE_DIR" merge-base --is-ancestor '
-        '"$TWAIN_EXPECTED_SHA" HEAD 2>/dev/null; then',
-        '    echo "TWAIN_STALE_CHECKOUT: $CODE_DIR is at $(git -c safe.directory="*" '
-        '-C "$CODE_DIR" rev-parse --short HEAD 2>/dev/null) and does not contain '
-        '$TWAIN_EXPECTED_SHA (the code that submitted this job). '
-        'Run: git -C $CODE_DIR pull" >&2',
-        "    exit 4",
-        "  fi",
-        "fi",
-        'exec bash "$CODE_DIR/scripts/ris/job_wrapper.sh"',
+        # Provenance only (no longer a gate): which code submitted this job.
+        '[ -n "${TWAIN_EXPECTED_SHA:-}" ] && echo "[twain-job] submitted by TWAIN@${TWAIN_EXPECTED_SHA}" >&2',
+        'TWAIN_WRAPPER="$(mktemp "${TMPDIR:-/tmp}/twain-wrapper.XXXXXX")" || exit 3',
+        f"cat > \"$TWAIN_WRAPPER\" <<'{marker}'",
+        body.rstrip("\n"),
+        marker,
+        'bash "$TWAIN_WRAPPER"; twain_rc=$?',
+        'rm -f "$TWAIN_WRAPPER"',
+        'exit $twain_rc',
     ])
 
 

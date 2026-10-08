@@ -40,7 +40,7 @@ RUN apt-get update \
     && if [ "$WITH_SIM" = "1" ]; then bash runner/fetch_slako.sh; fi
 
 # The commit this image was built from (CI passes it): enables the RIS
-# stale-checkout guard on S3-staged jobs (TWAIN_EXPECTED_SHA).
+# provenance line in each S3-staged job's log (TWAIN_EXPECTED_SHA).
 ARG GIT_SHA=
 ENV TWAIN_GIT_SHA=$GIT_SHA
 

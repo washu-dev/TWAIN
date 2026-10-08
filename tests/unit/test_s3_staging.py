@@ -162,8 +162,9 @@ def test_an_s3_run_never_touches_ssh_and_scopes_its_ticket(tmp_path):
     assert 30 * 60 < ttl <= 7 * 86400
     script = ris.specs[0]["script"]
     assert "export TWAIN_TICKET=tkt-1" in script and "TWAIN_ATTEMPT=1" in script
-    assert ". \"$TWAIN_ENV_FILE\"" in script and "TWAIN_STALE_CHECKOUT" in script
-    assert 'exec bash "$CODE_DIR/scripts/ris/job_wrapper.sh"' in script
+    assert ". \"$TWAIN_ENV_FILE\"" in script
+    # The wrapper travels inside the job: nothing is read from a RIS checkout.
+    assert "TWAIN_BUNDLE_FETCH_FAILED" in script and "CODE_DIR" not in script
     assert "working_dir" not in ris.specs[0]          # the wrapper picks node scratch
     uploaded = _names(s3.objects[("twain-run-data", f"runs/sess1/attempt-1/{BUNDLE_KEY}")])
     assert {"main.py", "twain_payload.sh"} <= uploaded
@@ -204,16 +205,17 @@ def test_a_broken_twain_sh_is_explained_as_setup(tmp_path):
     assert "twain.sh" in run.message
 
 
-def _run_job_script(tmp_path, env_file_body=None, *, env_file=None):
-    """Run the real job prologue in bash; returns (exit code, stderr)."""
+def _run_job_script(tmp_path, env_file_body=None, *, env_file=None,
+                    wrapper='echo "wrapper ran in $PWD" >&2; exit 0\n'):
+    """Run the real job prologue in bash (with a stand-in wrapper); returns (rc, stderr)."""
     from execution_adapter.slurm_execution_adapter import _s3_job_script
-    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "TMPDIR": str(tmp_path)}
     if env_file_body is not None:
         env_file = tmp_path / "twain.sh"
         env_file.write_text(env_file_body)
     if env_file is not None:
         env["TWAIN_ENV_FILE"] = str(env_file)
-    proc = subprocess.run(["bash", "-c", _s3_job_script()], env=env,
+    proc = subprocess.run(["bash", "-c", _s3_job_script(wrapper)], env=env, cwd=tmp_path,
                           capture_output=True, text=True, timeout=30, check=False)
     return proc.returncode, proc.stderr
 
@@ -223,18 +225,30 @@ def test_job_script_names_a_missing_twain_sh(tmp_path):
     assert rc == 3 and "missing or not readable" in err and "nope/twain.sh" in err
 
 
-def test_job_script_names_a_missing_code_dir(tmp_path):
-    # the first live run: twain.sh defined only the old name, TWAIN_DIR
-    rc, err = _run_job_script(tmp_path, f"export TWAIN_DIR={tmp_path}\n")
-    assert rc == 3 and "CODE_DIR=<unset> is not a TWAIN checkout" in err
+def test_job_script_needs_no_checkout_on_ris(tmp_path):
+    # Run 99680dfe: a worker deploy without a `git pull` on RIS stopped every
+    # job (exit 4). The wrapper is embedded now -- no CODE_DIR, no guard.
+    rc, err = _run_job_script(tmp_path, "export TWAIN_HOME=/x\n")
+    assert rc == 0 and "wrapper ran" in err and "STALE" not in err
 
 
-def test_job_script_runs_the_wrapper_from_code_dir(tmp_path):
-    wrapper = tmp_path / "code" / "scripts" / "ris" / "job_wrapper.sh"
-    wrapper.parent.mkdir(parents=True)
-    wrapper.write_text('echo "wrapper ran" >&2; exit 0\n')
-    rc, err = _run_job_script(tmp_path, f"export CODE_DIR={tmp_path / 'code'}\n")
-    assert rc == 0 and "wrapper ran" in err
+def test_job_script_passes_the_wrapper_exit_code_and_cleans_up(tmp_path):
+    rc, _ = _run_job_script(tmp_path, wrapper="exit 6\n")
+    assert rc == 6
+    assert not list(tmp_path.glob("twain-wrapper.*"))      # the temp copy is gone
+
+
+def test_the_real_wrapper_embeds_cleanly():
+    from execution_adapter.slurm_execution_adapter import JOB_WRAPPER, _s3_job_script
+    script = _s3_job_script()
+    assert JOB_WRAPPER.read_text().strip().splitlines()[-1] in script
+    subprocess.run(["bash", "-n", "-c", script], check=True)
+
+
+def test_a_wrapper_containing_the_marker_is_refused():
+    from execution_adapter.slurm_execution_adapter import _s3_job_script
+    with pytest.raises(ValueError):
+        _s3_job_script("echo TWAIN_JOB_WRAPPER_EOF\n")
 
 
 def test_env_paths_honour_twain_envs_root_on_the_node(tmp_path):
