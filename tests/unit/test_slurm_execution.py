@@ -1429,3 +1429,16 @@ def test_a_failed_ssh_pull_is_reported_not_a_crash(tmp_path):
     result = adapter.execute(str(_bundle(tmp_path)), run_id="s")
     assert result.status == ExecutionStatus.FAILED
     assert "fetching outputs failed" in result.message and "connection unexpectedly closed" in result.message
+
+
+def test_payload_puts_a_guarded_bundle_on_pythonpath(tmp_path):
+    """The structure guard loads through sitecustomize, which Python only finds on
+    PYTHONPATH -- set before the smoke test, so it covers that and the run."""
+    adapter = _exec_adapter(tmp_path, _happy_cluster_runner(), env_pythons=["/envs/gpaw/bin/python"])
+    bundle = _bundle(tmp_path)
+    plain = adapter._payload(bundle, install_deps=True, run_smoke=True)
+    assert "PYTHONPATH" not in plain
+    (bundle / "sitecustomize.py").write_text("")
+    guarded = adapter._payload(bundle, install_deps=True, run_smoke=True)
+    line = 'export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"'
+    assert line in guarded and guarded.index(line) < guarded.index('"$PY" inline_tests.py')
