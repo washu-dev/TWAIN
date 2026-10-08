@@ -763,6 +763,41 @@ def list_artifacts(conversation_id: str, user: CurrentUser):
     return {"data": items, "count": len(items)}
 
 
+def _zip_name(name: str) -> str:
+    """Where an artifact goes in the download: bundle files keep their path
+    (run_bundle/main.py), stage records go under twain/ with an extension."""
+    if "/" in name:
+        return name
+    return f"twain/{name}.json"
+
+
+@app.get("/api/conversations/{conversation_id}/files.zip")
+def download_run_files(conversation_id: str, user: CurrentUser):
+    """Every file TWAIN kept for this run, as one zip: the run bundle (main.py,
+    config, requirements, the job script), its outputs, and the stage records.
+
+    Built from the artifacts table, so it works for any run -- cluster or local,
+    finished or failed -- without S3 or RIS access. Replaces the report's
+    "Results stored at /app/logs/..." line, which named a folder inside the
+    worker container nobody could open.
+    """
+    import io
+    import zipfile
+
+    conversation = _require_own_conversation(conversation_id, user)
+    rows = convo.all_artifacts(conversation_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="This run has no files yet.")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for row in rows:
+            archive.writestr(_zip_name(row["name"]), row["content"] or "")
+    slug = re.sub(r"[^a-z0-9]+", "-", (conversation.get("title") or "run").lower()).strip("-")[:40]
+    filename = f"twain-{slug or 'run'}-{conversation_id.split('-')[0]}.zip"
+    return Response(content=buffer.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @app.get("/api/conversations/{conversation_id}/artifacts/{name:path}")
 def get_artifact(conversation_id: str, name: str, user: CurrentUser):
     """Return one artifact's full content (name may contain '/', e.g. run_bundle/main.py)."""

@@ -591,6 +591,22 @@ def get_artifact(session_id: str, name: str) -> dict | None:
         conn.close()
 
 
+def all_artifacts(session_id: str) -> list:
+    """Every artifact's name, kind and content, for the report's zip download."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "SELECT name, kind, content FROM artifacts WHERE session_id = %s ORDER BY name;",
+            (session_id,),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return rows
+    finally:
+        conn.close()
+
+
 def cluster_attempt(session_id: str, attempt: int | None = None) -> dict | None:
     """The run's Slurm attempt (its newest when ``attempt`` is None), or None."""
     conn = get_connection()
