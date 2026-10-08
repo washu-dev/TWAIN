@@ -31,6 +31,8 @@ from cross_validation.baseline_validator import (
     Prediction,
 )
 from cross_validation import mp_reference, plausibility
+
+import observer
 from cross_validation.mp_reference import MaterialsProjectBaselines
 from self_correction.failure_classifier import RunEvidence
 from self_correction.reflection import reflect
@@ -822,6 +824,9 @@ class StateMachine:
     def run(self):
         handler = getattr(self, self.current_state.name.lower())
         next_state = handler()
+        # The observer judges this stage's output before the next stage starts
+        # (a failed gate stops the run here, with the reason).
+        self._observe(self.current_state, next_state)
 
         key = (self.current_state, next_state)
         if(key not in GUARDS):
@@ -837,6 +842,62 @@ class StateMachine:
 
 
 
+
+    # ------------------------------------------------------------- the observer
+    #: Transitions the observer gates, and the stage its verdict is shown under.
+    _OBSERVED = {
+        (State.PLAN, State.BUILD): "PLAN",
+        (State.REPAIR, State.EXECUTE): "REPAIR",
+        (State.EXECUTE, State.INTERPRET): "EXECUTE",
+    }
+
+    def _observe(self, current: State, nxt: State) -> None:
+        """Run the observer's gate for this transition (observer.py, #185)."""
+        stage = self._OBSERVED.get((current, nxt))
+        if stage is None or os.environ.get("TWAIN_OBSERVER", "1") == "0":
+            return
+        plan = self._load_artifact("execution_plan") or {}
+        intent = self._load_artifact("intent_spec")
+        sysd = plan.get("target_system") or (intent or {}).get("system_descriptors") or {}
+        if current == State.PLAN:
+            verdict = observer.plan_gate(
+                plan, intent, repo_root=twain_paths.REPO_ROOT, periodic=_is_periodic(sysd),
+                env_candidates=(cluster_env_candidates(_selected_toolset(plan))
+                                if self.execute_slurm else []),
+                execute_slurm=self.execute_slurm)
+            self._note_on_plan(plan, verdict)
+        elif current == State.REPAIR:
+            bundle_dir = self.context.artifacts.get("run_bundle")
+            if not bundle_dir:
+                return
+            verdict = observer.bundle_gate(
+                plan, Path(bundle_dir), template=self._bundle_config(bundle_dir).get("template"),
+                periodic=_is_periodic(sysd))
+        else:
+            verdict = observer.outputs_gate(self._load_artifact("execution_result"))
+        for check in verdict.checks:
+            mark = {"pass": "✓", "warn": "⚠", "fail": "✕"}[check.status]
+            self._progress(stage, f"observer.{check.name}",
+                           "failed" if check.status == "fail" else "done",
+                           f"Observer {mark} {check.detail}")
+        if verdict.failed:
+            reasons = "; ".join(c.detail for c in verdict.failed)
+            raise _config_error(
+                f"the observer stopped the run before {nxt.name}: {reasons}",
+                "Re-run from PLAN or BUILD after addressing this -- nothing was submitted "
+                "to the cluster.")
+
+    def _note_on_plan(self, plan: dict, verdict) -> None:
+        """Put the observer's PLAN warnings on the plan card, once."""
+        notes = plan.setdefault("safety_notes", [])
+        added = False
+        for check in verdict.warnings:
+            note = f"Observer: {check.detail}."
+            if note not in notes:
+                notes.append(note)
+                added = True
+        if added:
+            self.context.artifacts["execution_plan"] = self._write_artifact("execution_plan", plan)
 
     def new_state(self, next_state: State):
         self.current_state = next_state
