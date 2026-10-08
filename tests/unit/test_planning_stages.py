@@ -599,3 +599,63 @@ def test_an_unrunnable_core_falls_back_to_the_ranking(machine, tmp_path, monkeyp
 def test_the_refusal_names_each_tool_once():
     gap = SM._cluster_env_gap(["xtb", "OpenMM", "OpenFF Toolkit", "OpenMM"])
     assert gap.count("OpenMM") == 1
+
+
+# -- #222: the reviewer judges the method at PLAN ----------------------------------
+
+def _review_machine(machine, tmp_path, monkeypatch, judge):
+    _seed_intent(machine, tmp_path)
+    machine.decompose()
+    machine.discover()
+    monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+    prompts = []
+
+    def agent(prompt):
+        prompts.append(prompt)
+        tools = prompt.split("Proposed method: ", 1)[1].split(".\n", 1)[0]
+        return '{"verdict": "%s", "reason": "judged %s"}' % (judge(tools), tools)
+    monkeypatch.setattr(machine, "_reviewer", lambda: agent)
+    return prompts
+
+
+def test_a_method_the_reviewer_rejects_is_replaced_before_approval(machine, tmp_path, monkeypatch):
+    first = {}
+    def judge(tools):
+        first.setdefault("tools", tools)
+        return "no" if tools == first["tools"] else "yes"
+    _review_machine(machine, tmp_path, monkeypatch, judge)
+    assert machine.plan() == State.BUILD
+    plan = machine._load_artifact("execution_plan")
+    (rejected,) = machine.context.failed_methods
+    assert rejected["stage"] == "PLAN"
+    assert SM.StateMachine._method_key(plan) != rejected["method"]
+    assert plan["safety_notes"][0].startswith("Method replaced before you saw it:")
+
+
+def test_when_the_reviewer_rejects_everything_the_researcher_decides(machine, tmp_path, monkeypatch):
+    _review_machine(machine, tmp_path, monkeypatch, lambda tools: "no")
+    assert machine.plan() == State.BUILD                 # never a dead end
+    plan = machine._load_artifact("execution_plan")
+    assert len([m for m in machine.context.failed_methods if m["stage"] == "PLAN"]) == 2
+    assert plan["safety_notes"][0].startswith("Reviewer's concern:")
+
+
+def test_advise_only_mode(machine, tmp_path, monkeypatch):
+    monkeypatch.setenv("TWAIN_PLAN_REVIEW_REPLANS", "0")
+    _review_machine(machine, tmp_path, monkeypatch, lambda tools: "no")
+    machine.plan()
+    assert machine.context.failed_methods == []
+    assert machine._load_artifact("execution_plan")["safety_notes"][0].startswith("Reviewer's concern:")
+
+
+def test_the_reviewer_and_the_method_pick_get_the_solubility_guidance(machine, tmp_path, monkeypatch):
+    prompts = _review_machine(machine, tmp_path, monkeypatch, lambda tools: "yes")
+    # File the seed's metric under the solubility family (configs/property_families.json
+    # does this once it's on master; independent of it here).
+    monkeypatch.setattr(SM, "history_key", lambda prop, metrics=None: "aqueous_solubility")
+    machine.plan()
+    assert "ESOL" in prompts[0] and "hydration or solvation free energy alone" in prompts[0]
+    from method_discovery import llm_discovery as LD
+    assert "ESTABLISHED ROUTES" in LD.build_prompt(
+        objective="x", material="y", domain=None, requested_property=None, platform="linux-64",
+        libraries=[], calculators=[], guidance=SM.method_guidance("aqueous_solubility"))

@@ -241,7 +241,32 @@ def llm_script_check(v: Verdict, agent, *, request: str | None, plan: dict,
         v.add("review", PASS, f"reviewer: the script computes what was asked ({reason})")
     else:
         v.add("review", FAIL if mode == "enforce" else WARN,
-              f"reviewer: the script doesn't compute what was asked -- {reason}")
+              f"the reviewer found the script doesn't compute what was asked -- {reason}")
+
+
+def llm_method_check(agent, *, request: str | None, plan: dict,
+                     guidance: str | None = None) -> tuple[str, str] | None:
+    """The reviewer's "can this method compute what was asked?" at PLAN (#222).
+
+    Returns ``(verdict, reason)`` -- ``yes`` / ``no`` -- or None when there is no
+    reviewer, it is off, or the answer was unclear. Judged before the approval
+    card, so a method that cannot deliver the property is replaced before the
+    researcher spends an approval (and a cluster job) on it.
+    """
+    if agent is None or llm_mode() == "off":
+        return None
+    method = plan.get("selected_method") or {}
+    tools = " + ".join(method.get("libraries") or []) or method.get("tool_name") or "?"
+    answer = _ask(agent, _task(request, plan) + (
+        f"\nProposed method: {tools}"
+        + (f" with the calculator {method['calculator']}" if method.get("calculator") else "")
+        + f".\nPlan summary: {str(plan.get('summary') or '')[:2500]}\n"
+        + (f"\nEstablished routes for this property:\n{guidance}\n" if guidance else "")
+        + "\nCan this method, as planned, compute the requested property for this system "
+          "(the quantity itself, not a related one it cannot be converted from)?"))
+    if answer is None or answer[0] == UNSURE:
+        return None
+    return answer
 
 
 def _output_digest(execution_result: dict, limit: int = 6000) -> str:

@@ -168,6 +168,7 @@ class TestGuardTable:
         (State.REPAIR, State.EXECUTE),
         (State.EXECUTE, State.INTERPRET),
         (State.EXECUTE, State.REPLAN),
+        (State.REPAIR, State.REPLAN),
         (State.INTERPRET, State.VALIDATE),
         (State.VALIDATE, State.ACCEPT),
         (State.VALIDATE, State.REPLAN),

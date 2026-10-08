@@ -144,6 +144,23 @@ def history_key(requested_property, acceptance_metrics=None) -> str:
     return ""
 
 
+_METHOD_GUIDANCE: Optional[dict] = None
+
+
+def method_guidance(key: str) -> Optional[str]:
+    """Established routes to a property (configs/method_guidance.json), by history key."""
+    global _METHOD_GUIDANCE
+    if _METHOD_GUIDANCE is None:
+        try:
+            _METHOD_GUIDANCE = json.loads(
+                (twain_paths.REPO_ROOT / "configs" / "method_guidance.json")
+                .read_text(encoding="utf-8")).get("guidance") or {}
+        except (OSError, ValueError) as exc:
+            logger.warning("[plan] method guidance unavailable: %s", exc)
+            _METHOD_GUIDANCE = {}
+    return _METHOD_GUIDANCE.get(key) if key else None
+
+
 def _proven_methods(key: str) -> list:
     """Methods that have completed for this history key here, best record first."""
     if _METHOD_HISTORY is None or not key:
@@ -735,6 +752,8 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     # Method fallback (#188): the method couldn't be made to work; re-plan
     # without it (and back through the approval gate, since the method changed).
     (State.EXECUTE, State.REPLAN): lambda c: c.execution_status is False and bool(c.failed_methods),
+    # The reviewer rejected the method's script before anything ran (#222).
+    (State.REPAIR, State.REPLAN): lambda c: bool(c.failed_methods),
     (State.INTERPRET, State.VALIDATE): lambda c: True,
     (State.VALIDATE, State.ACCEPT): lambda c: c.validation_result == "accepted",
     (State.VALIDATE, State.REPLAN): lambda c: c.validation_result == "rejected",
@@ -886,8 +905,9 @@ class StateMachine:
         handler = getattr(self, self.current_state.name.lower())
         next_state = handler()
         # The observer judges this stage's output before the next stage starts
-        # (a failed gate stops the run here, with the reason).
-        self._observe(self.current_state, next_state)
+        # (a failed gate stops the run here, with the reason -- or, when the
+        # reviewer rejects the method, re-plans without it: #222).
+        next_state = self._observe(self.current_state, next_state) or next_state
 
         key = (self.current_state, next_state)
         if(key not in GUARDS):
@@ -912,8 +932,12 @@ class StateMachine:
         (State.EXECUTE, State.INTERPRET): "EXECUTE",
     }
 
-    def _observe(self, current: State, nxt: State) -> None:
-        """Run the observer's gate for this transition (observer.py, #185)."""
+    def _observe(self, current: State, nxt: State) -> Optional[State]:
+        """Run the observer's gate for this transition (observer.py, #185).
+
+        Returns a state to go to instead of ``nxt`` (REPLAN, when the reviewer
+        rejected the method's script and a method fallback is left), else None.
+        """
         stage = self._OBSERVED.get((current, nxt))
         if stage is None or os.environ.get("TWAIN_OBSERVER", "1") == "0":
             return
@@ -954,11 +978,41 @@ class StateMachine:
                            "failed" if check.status == "fail" else "done",
                            f"Observer {mark} {check.detail}")
         if verdict.failed:
+            if (current == State.REPAIR and {c.name for c in verdict.failed} == {"review"}
+                    and self._fall_back_on_review(plan, verdict.failed[0].detail)):
+                return State.REPLAN
             reasons = "; ".join(c.detail for c in verdict.failed)
+            # The reason leads: the failure card's headline is the first clause.
             raise _config_error(
-                f"the observer stopped the run before {nxt.name}: {reasons}",
+                f"{reasons[:1].upper()}{reasons[1:]} (the observer stopped the run before "
+                f"{nxt.name})",
                 "Re-run from PLAN or BUILD after addressing this -- nothing was submitted "
                 "to the cluster.")
+        return None
+
+    def _fall_back_on_review(self, plan: dict, reason: str) -> bool:
+        """The reviewer rejected the method's script: re-plan without the method (#222).
+
+        The same path and budget as a method EXECUTE couldn't make work (#209):
+        the method is recorded, the run goes REPAIR -> REPLAN -> PLAN, and the new
+        method needs the researcher's approval. Nothing has been submitted.
+        """
+        failed = self._failed_methods()
+        if len([m for m in failed if m.get("stage") != "PLAN"]) >= self._method_fallback_budget():
+            return False
+        key = self._method_key(plan)
+        if not key or key in {m.get("method") for m in failed}:
+            return False
+        method = plan.get("selected_method") or {}
+        failed.append({"method": key, "libraries": list(method.get("libraries") or []),
+                       "calculator": method.get("calculator"), "stage": "REPAIR",
+                       "reason": reason,
+                       "last_attempt": max([int(m.get("last_attempt") or 0)
+                                            for m in failed] or [0])})
+        self.context.failed_methods = failed
+        self._progress("REPAIR", "fallback", "failed",
+                       f"{reason}; re-planning with another method -- it will need your approval")
+        return True
 
     def _review_text(self):
         """What the researcher asked, for the reviewer: the request this machine was
@@ -1930,8 +1984,9 @@ class StateMachine:
             for name in preempted_uninstalled
         ]
 
-        proven = [p for p in _proven_methods(history_key(
-                      requested_property, intent.get("acceptance_metrics")))
+        family = history_key(requested_property, intent.get("acceptance_metrics"))
+        guidance = method_guidance(family)
+        proven = [p for p in _proven_methods(family)
                   if str(p.get("method") or "").lower() not in avoid]
         if proven and not honoured_requests:
             # The deterministic pick prefers a proven library-only method too (the
@@ -1942,7 +1997,7 @@ class StateMachine:
                 else len(proven_libs)))
         recommendation = self._llm_recommend(intent, ranked, requested_property, domain,
                                              platform, requested_libraries=honoured_requests,
-                                             proven=proven)
+                                             proven=proven, guidance=guidance)
         if recommendation is not None and avoid:
             rec_calc = find_calculator(recommendation.calculator)
             rec_key = (rec_calc.name if rec_calc else recommendation.calculator
@@ -2329,11 +2384,18 @@ class StateMachine:
             if new_key in avoid:
                 raise self._no_method_left(failed_methods)
             gave_up = failed_methods[-1]
-            execution_plan.safety_notes.insert(0, (
-                f"Method changed: {gave_up.get('calculator') or gave_up['method']} couldn't be "
-                f"made to work for this run ({gave_up.get('reason')}), so TWAIN re-planned "
-                f"with {calc_entry.name if calc_entry is not None else libraries[0]}. This is a "
-                f"different method from the one you approved; it runs only if you approve it."))
+            now_using = calc_entry.name if calc_entry is not None else libraries[0]
+            if gave_up.get("stage") == "PLAN":
+                execution_plan.safety_notes.insert(0, (
+                    f"Method replaced before you saw it: "
+                    f"{gave_up.get('calculator') or gave_up['method']} was rejected because "
+                    f"{gave_up.get('reason')}. This plan uses {now_using}."))
+            else:
+                execution_plan.safety_notes.insert(0, (
+                    f"Method changed: {gave_up.get('calculator') or gave_up['method']} couldn't be "
+                    f"made to work for this run ({gave_up.get('reason')}), so TWAIN re-planned "
+                    f"with {now_using}. This is a different method from the one you approved; "
+                    f"it runs only if you approve it."))
 
         if self.execute_slurm:
             # The whole toolset must fit ONE cluster env (+ pip): each library can
@@ -2357,6 +2419,18 @@ class StateMachine:
                         "environment. Re-run from PLAN naming the tool you want (for "
                         "example \"use RDKit\"), or ask the TWAIN team to extend a shared "
                         "environment (an approved change: scripts/ris/envs/*.yml).")
+        if self._method_rejected_at_plan(asdict(execution_plan), guidance, execution_plan):
+            try:
+                return self.plan()   # re-plan without the rejected method
+            except Exception as exc:  # noqa: BLE001
+                if "no other method fits" not in str(exc):
+                    raise
+                # Nothing else to offer: keep this plan, with the concern on top.
+                rejected = self.context.failed_methods.pop()
+                execution_plan.safety_notes.insert(0, (
+                    f"Reviewer's concern: {rejected['reason']}. TWAIN found no other method; "
+                    f"approve only if you disagree, or re-run from PLAN naming the method "
+                    f"you want."))
         self.context.artifacts["execution_plan"] = self._write_artifact(
             "execution_plan", asdict(execution_plan))
         self._revoke_approval_if_plan_changed()
@@ -2400,7 +2474,7 @@ class StateMachine:
         return None
 
     def _llm_recommend(self, intent, ranked, requested_property, domain, platform,
-                       requested_libraries=None, proven=None):
+                       requested_libraries=None, proven=None, guidance=None):
         """Ask the LLM to pick a toolset, grounded by platform availability.
 
         Returns a ToolRecommendation, or None (no agent wired, or the pick
@@ -2431,7 +2505,7 @@ class StateMachine:
                 objective=intent.get("objective", ""), material=material, domain=domain,
                 requested_property=requested_property, platform=platform,
                 libraries=library_candidates, calculators=calc_candidates,
-                requested_libraries=requested_libraries, proven=proven,
+                requested_libraries=requested_libraries, proven=proven, guidance=guidance,
                 agent=self._agent_text,
             )
         except Exception:  # noqa: BLE001 - any failure -> deterministic fallback
@@ -2996,6 +3070,54 @@ class StateMachine:
         })
 
     @staticmethod
+    def _plan_review_budget() -> int:
+        """How many methods the PLAN reviewer may reject per run (default 2; 0 = advise only)."""
+        try:
+            return max(0, int(os.getenv("TWAIN_PLAN_REVIEW_REPLANS", "2")))
+        except ValueError:
+            return 2
+
+    def _method_rejected_at_plan(self, plan: dict, guidance, execution_plan) -> bool:
+        """Ask the reviewer whether this method can compute what was asked (#222).
+
+        A confident no excludes the method and asks for a re-plan (True), while
+        the budget lasts and another method can be tried. Past that, the plan
+        goes to the approval card with the reviewer's concern on top: the
+        researcher decides. An unclear answer, or no reviewer, changes nothing.
+        """
+        answer = observer.llm_method_check(self._reviewer(), request=self._review_text(),
+                                           plan=plan, guidance=guidance)
+        if answer is None:
+            return False
+        verdict, reason = answer
+        tools = self._method_key(plan)
+        if verdict == observer.YES:
+            self._progress("PLAN", "observer.method", "done",
+                           f"Observer ✓ reviewer: {tools} can compute what was asked ({reason})")
+            return False
+        failed = self._failed_methods()
+        rejected = [m for m in failed if m.get("stage") == "PLAN"]
+        if tools and len(rejected) < self._plan_review_budget():
+            method = plan.get("selected_method") or {}
+            failed.append({"method": tools, "libraries": list(method.get("libraries") or []),
+                           "calculator": method.get("calculator"), "stage": "PLAN",
+                           "reason": f"the reviewer judged it can't compute what was asked: {reason}",
+                           "last_attempt": max([int(m.get("last_attempt") or 0)
+                                                for m in failed] or [0])})
+            self.context.failed_methods = failed
+            self._progress("PLAN", "observer.method", "failed",
+                           f"Observer ✕ reviewer: {tools} can't compute what was asked "
+                           f"({reason}); re-planning without it")
+            return True
+        execution_plan.safety_notes.insert(0, (
+            f"Reviewer's concern: this method may not compute what you asked -- {reason}. "
+            f"TWAIN found no other method the reviewer accepts; approve only if you "
+            f"disagree, or re-run from PLAN naming the method you want."))
+        self._progress("PLAN", "observer.method", "failed",
+                       f"Observer ⚠ reviewer doubts {tools} ({reason}); flagged on the plan")
+        return False
+
+    @staticmethod
     def _no_method_left(failed_methods: list):
         tried = ", ".join(m.get("calculator") or m.get("method") for m in failed_methods)
         return _config_error(
@@ -3063,7 +3185,7 @@ class StateMachine:
         withdrawn and the researcher sees it before anything runs.
         """
         failed = self._failed_methods()
-        if len(failed) >= self._method_fallback_budget():
+        if len([m for m in failed if m.get("stage") != "PLAN"]) >= self._method_fallback_budget():
             return False
         last = history[-1] if history else None
         if triaged:
