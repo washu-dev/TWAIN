@@ -332,7 +332,7 @@ def _cluster_env_gap(libraries) -> str:
     homes = {b: sorted(n for n, pk in specs.items() if b.lower() in pk) for b in blockers}
     parts = [f"{b} ({'only in ' + ', '.join(homes[b]) if homes[b] else 'in no env spec'}"
              f"; not pip-installable)" for b in blockers]
-    names = ", ".join(n for n in libraries if isinstance(n, str) and n.strip())
+    names = ", ".join(dict.fromkeys(n for n in libraries if isinstance(n, str) and n.strip()))
     return (f"{names} need {'; '.join(parts) or 'packages no single env provides'} "
             f"-- no single env provides all of them")
 
@@ -1988,6 +1988,28 @@ class StateMachine:
             else:
                 # Primary (and driver) are fine; carry on without the missing extras.
                 recommendation.libraries = installed_named
+        # A Slurm job runs in ONE cluster env (+ pip), so the model's toolset must
+        # fit one together. Supporting libraries that don't are dropped; a core
+        # (calculator, its driver, the primary) that doesn't is not runnable, and
+        # the ranking's pick is used instead. Aspirin solubility: the model chose
+        # OpenMM + RDKit + OpenFF Toolkit + ASE with xtb -- openff-toolkit lives
+        # only in nwchem, xtb-python only in default -- and planning stopped.
+        env_notes = []
+        if recommendation is not None and self.execute_slurm:
+            fit = self._fit_one_env(
+                [recommendation.calculator, recommendation.calculator_library,
+                 recommendation.libraries[0]], recommendation.libraries[1:])
+            if fit is None:
+                core = [n for n in (recommendation.libraries[0], recommendation.calculator) if n]
+                env_notes.append(
+                    f"Discovery (LLM) suggested {' with '.join(core)}, but no single cluster "
+                    f"environment provides them together, so TWAIN used the discovery "
+                    f"ranking's pick instead.")
+                recommendation = None
+            elif fit:
+                recommendation.libraries = [n for n in recommendation.libraries
+                                            if n not in fit]
+                env_notes.append(self._dropped_for_env_note(fit))
         if recommendation is not None:
             libraries = recommendation.libraries
             primary = self._candidate_by_name(ranked, libraries[0]) or ranked[0]
@@ -2089,6 +2111,7 @@ class StateMachine:
         execution_plan.selected_method.libraries = libraries
         if selection_note:
             execution_plan.safety_notes.append(selection_note)
+        execution_plan.safety_notes.extend(env_notes)
         # Candidates filtered for not being installed. Any of them that TWAIN
         # actually wanted gets its own, fuller note below (with its install
         # request), so it is left out here rather than mentioned twice.
@@ -2319,12 +2342,21 @@ class StateMachine:
             # that can only die in pip (#169).
             toolset = _selected_toolset(asdict(execution_plan))
             if cluster_env_candidates(toolset) is None:
-                raise _config_error(
-                    "no RIS cluster environment can run this plan: "
-                    + _cluster_env_gap(toolset),
-                    "Provision or extend a shared env so one env provides these "
-                    "packages together (scripts/ris/envs/*.yml + "
-                    "scripts/ris/provision_envs.sh), then rerun.")
+                method = execution_plan.selected_method
+                fit = self._fit_one_env(
+                    [method.calculator, method.calculator_library, method.tool_name,
+                     (method.libraries or [None])[0]], list(method.libraries or [])[1:])
+                if fit:
+                    method.libraries = [n for n in method.libraries if n not in fit]
+                    execution_plan.safety_notes.append(self._dropped_for_env_note(fit))
+                else:
+                    raise _config_error(
+                        "no RIS cluster environment can run this plan: "
+                        + _cluster_env_gap(toolset),
+                        "TWAIN couldn't find a method whose tools share one cluster "
+                        "environment. Re-run from PLAN naming the tool you want (for "
+                        "example \"use RDKit\"), or ask the TWAIN team to extend a shared "
+                        "environment (an approved change: scripts/ris/envs/*.yml).")
         self.context.artifacts["execution_plan"] = self._write_artifact(
             "execution_plan", asdict(execution_plan))
         self._revoke_approval_if_plan_changed()
@@ -2971,6 +3003,33 @@ class StateMachine:
             f"work ({failed_methods[-1].get('reason')})",
             "Re-run from PLAN to choose the method yourself (name a library or calculator "
             "in your request), or from EXECUTE once the failure is fixed.")
+
+    @staticmethod
+    def _fit_one_env(core: list, optional: list) -> Optional[list]:
+        """Which of ``optional`` to drop so ``core`` + the rest fit ONE cluster env.
+
+        None if ``core`` alone fits no env; else the dropped names (``[]`` when
+        everything fits). Supporting libraries are kept greedily, in order, each
+        only if the toolset still fits with it.
+        """
+        core = [n for n in dict.fromkeys(core) if isinstance(n, str) and n.strip()]
+        if cluster_env_candidates(core) is None:
+            return None
+        kept, dropped = list(core), []
+        for name in optional:
+            if not isinstance(name, str) or not name.strip() or name in kept:
+                continue
+            if cluster_env_candidates(kept + [name]) is None:
+                dropped.append(name)
+            else:
+                kept.append(name)
+        return dropped
+
+    @staticmethod
+    def _dropped_for_env_note(dropped: list) -> str:
+        return (f"Dropped from the toolset: {', '.join(dropped)} -- no single cluster "
+                f"environment provides {'it' if len(dropped) == 1 else 'them'} together with "
+                f"the rest of the method, and a job runs in one environment.")
 
     def _failed_methods(self) -> list:
         return list(getattr(self.context, "failed_methods", None) or [])
