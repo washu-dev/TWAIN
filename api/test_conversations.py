@@ -543,3 +543,40 @@ class TestEmailActionRoutes:
         from main import app as the_app
         routes = [r for r in the_app.routes if getattr(r, "path", "") == "/api/actions/{token}"]
         assert routes and all("CurrentUser" not in str(r.dependant.dependencies) for r in routes)
+
+
+class TestFilesZip:
+    """The report's 'Download all files': every artifact, from the database."""
+
+    ROWS = [
+        {"name": "execution_plan", "kind": "json", "content": '{"summary": "x"}'},
+        {"name": "run_bundle/main.py", "kind": "python", "content": "print(1)\n"},
+        {"name": "run_bundle/results.csv", "kind": "text", "content": "angle\n104.5\n"},
+    ]
+
+    @patch("conversations.all_artifacts")
+    @patch("main._require_own_conversation")
+    def test_zip_holds_every_file(self, owner, rows):
+        import io
+        import zipfile
+        owner.return_value = {"id": "94f80d50-d073", "title": "Optimize the geometry of water"}
+        rows.return_value = self.ROWS
+        r = client.get("/api/conversations/94f80d50-d073/files.zip")
+        assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+        assert 'filename="twain-optimize-the-geometry-of-water-94f80d50.zip"' in r.headers["content-disposition"]
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        assert sorted(z.namelist()) == ["run_bundle/main.py", "run_bundle/results.csv",
+                                        "twain/execution_plan.json"]
+        assert z.read("run_bundle/results.csv") == b"angle\n104.5\n"
+
+    @patch("conversations.all_artifacts", return_value=[])
+    @patch("main._require_own_conversation", return_value={"id": "c", "title": "t"})
+    def test_no_files_is_404(self, _owner, _rows):
+        assert client.get("/api/conversations/c/files.zip").status_code == 404
+
+    @patch("conversations.all_artifacts")
+    def test_someone_elses_run_is_not_served(self, rows):
+        from fastapi import HTTPException
+        with patch("main._require_own_conversation", side_effect=HTTPException(404, "nope")):
+            assert client.get("/api/conversations/c/files.zip").status_code == 404
+        rows.assert_not_called()

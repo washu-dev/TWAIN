@@ -518,6 +518,17 @@ class APIClient {
     return response.data.data;
   }
 
+  /** Every file TWAIN kept for a run, as a zip (bundle, outputs, stage records). */
+  async downloadRunFiles(id: string): Promise<{ blob: Blob; filename: string }> {
+    const response = await this.client.get(`/api/conversations/${id}/files.zip`, {
+      responseType: 'blob',
+      timeout: 60000,
+    });
+    const header = String(response.headers['content-disposition'] ?? '');
+    const match = /filename="([^"]+)"/.exec(header);
+    return { blob: response.data as Blob, filename: match ? match[1] : `twain-run-${id.split('-')[0]}.zip` };
+  }
+
   // ── Reporting an issue from the run window ─────────────────────────────────
   /** What would be attached to an issue for this run — shown before submitting. */
   async getIssueContext(id: string): Promise<IssueContext> {

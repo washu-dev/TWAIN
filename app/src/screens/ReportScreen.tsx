@@ -16,6 +16,7 @@ import { apiClient, ArtifactMeta, Report } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
 import { useConversationStream } from '@/hooks/useConversationStream';
 import { canCopy, copyText } from '@/utils/clipboard';
+import { canDownload, saveBlob, saveText } from '@/utils/download';
 import { formatDurationHours, formatElapsed } from '@/utils/duration';
 import { Colors, Elevation, Gradients, Radius, Spacing } from '@/constants/theme';
 
@@ -421,6 +422,12 @@ const ArtifactRow: React.FC<{ conversationId: string; meta: ArtifactMeta }> = ({
     copiedTimer.current = setTimeout(() => setCopied(false), 1500);
   };
 
+  const handleDownload = async () => {
+    if (loading) return;
+    const text = await ensureContent();
+    if (text !== null && !saveText(text, meta.name)) setError('Downloading is only available in the browser.');
+  };
+
   return (
     <View style={styles.artifact}>
       {/* The toggle and the copy button are siblings rather than nested, so a tap
@@ -444,6 +451,17 @@ const ArtifactRow: React.FC<{ conversationId: string; meta: ArtifactMeta }> = ({
             accessibilityLabel={`Copy ${meta.name}`}
           >
             <Text style={styles.copyText}>{copied ? '✓ Copied' : 'Copy'}</Text>
+          </TouchableOpacity>
+        )}
+        {canDownload && (
+          <TouchableOpacity
+            style={[styles.copyBtn, loading && styles.copyBtnDisabled]}
+            onPress={handleDownload}
+            disabled={loading}
+            accessibilityRole="button"
+            accessibilityLabel={`Download ${meta.name}`}
+          >
+            <Text style={styles.copyText}>Download</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -564,14 +582,6 @@ const ResultCard: React.FC<{
           The plan, budget, and any files it did produce are below.
         </Text>
       ) : null}
-      {resultsDir ? (
-        <View style={styles.resultPathBox}>
-          <Text style={styles.resultPathLabel}>Results stored at</Text>
-          <Text style={styles.resultPath} selectable>
-            {resultsDir}
-          </Text>
-        </View>
-      ) : null}
     </View>
   );
 };
@@ -580,8 +590,43 @@ const ResultCard: React.FC<{
 const Files: React.FC<{ report: Report }> = ({ report }) => {
   const outputs = report.artifacts.filter((a) => a.name.startsWith('output/'));
   const details = report.artifacts.filter((a) => !a.name.startsWith('output/'));
+  const [zipping, setZipping] = useState(false);
+  const [zipError, setZipError] = useState<string | null>(null);
+  // Every file the run kept, as one zip -- in place of the old "Results stored
+  // at /app/logs/..." line, a folder inside the worker no one could open.
+  const downloadAll = async () => {
+    setZipping(true);
+    setZipError(null);
+    try {
+      const { blob, filename } = await apiClient.downloadRunFiles(report.conversation.id);
+      if (!saveBlob(blob, filename)) setZipError('Downloading is only available in the browser.');
+    } catch (e) {
+      setZipError(e instanceof Error ? e.message : 'Could not download the files');
+    } finally {
+      setZipping(false);
+    }
+  };
   return (
     <>
+      {canDownload && report.artifacts.length > 0 && (
+        <View style={styles.downloadAll}>
+          <TouchableOpacity
+            style={[styles.downloadAllBtn, zipping && styles.copyBtnDisabled]}
+            onPress={downloadAll}
+            disabled={zipping}
+            accessibilityRole="button"
+          >
+            <Text style={styles.downloadAllText}>
+              {zipping ? 'Preparing…' : `Download all files (.zip, ${report.artifacts.length})`}
+            </Text>
+          </TouchableOpacity>
+          <Text style={styles.sectionHint}>
+            The run bundle (main.py, config, requirements, the job script), its outputs, and the
+            plan, results and validation records.
+          </Text>
+          {zipError && <Text style={styles.error}>{zipError}</Text>}
+        </View>
+      )}
       {outputs.length > 0 && (
         <>
           <Text style={styles.sectionHeading}>Output files</Text>
@@ -611,6 +656,15 @@ const Files: React.FC<{ report: Report }> = ({ report }) => {
 const mono = Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' });
 
 const styles = StyleSheet.create({
+  downloadAll: { marginTop: Spacing.three, gap: Spacing.one },
+  downloadAllBtn: {
+    alignSelf: 'flex-start',
+    backgroundColor: C.washuRed,
+    borderRadius: Radius.control,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
+  },
+  downloadAllText: { color: C.washuWhite, fontWeight: '700', fontSize: 13 },
   container: { flex: 1, backgroundColor: C.background },
   topBar: {
     flexDirection: 'row',
