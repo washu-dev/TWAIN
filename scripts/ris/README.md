@@ -23,9 +23,9 @@ $TWAIN_HOME/
   .micromamba/builds/          per-build package caches (disposable)
 ```
 
-- **Ignore `/storage2/fs1/mdan/Active/dtrc2026-workshop/`.** It's the old,
-  `junbo.y`-owned tree of the retired login-node runner, and nothing references
-  it.
+- **Ignore `/storage2/fs1/mdan/Active/dtrc2026-workshop/`.** It held the old,
+  `junbo.y`-owned envs and the retired login-node runner; those were moved out
+  on 2026-10-08 (#184), and nothing in TWAIN references it.
 - **Write access** to this tree is limited to its owner, the lab's storage
   groups (`storage2-mdan-common-rw`, `storage2-mdan-rw`) and RIS IT. storage2
   is **NFSv4**, so check access with `nfs4_getfacl`: mode bits and `umask` are

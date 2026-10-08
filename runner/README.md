@@ -515,9 +515,10 @@ scales horizontally; RDS and S3 hold everything a run needs.
    `[monitor] leading: watching cluster jobs`.
 5. `gh variable set TWAIN_DISPATCH --body sqs`, then re-run **API Server - Build &
    Deploy** (workflow_dispatch). From then on every new job goes to SQS.
-6. Ask RIS to stop the login-node runner (`junbo.y`'s tmux session `twain-runner`
-   on c2-login-001); after step 5 it only ever sees `queued` jobs, of which there
-   are no new ones.
+6. Stop any login-node polling runner (the old one, `junbo.y`'s tmux session
+   `twain-runner` on c2-login-001, was retired with the `dtrc2026-workshop` tree
+   on 2026-10-08, #184); after step 5 it would only ever see `queued` jobs, of
+   which there are no new ones.
 
 **Rollback:** `gh variable set TWAIN_DISPATCH --body db` and redeploy the API --
 new jobs go back to `queued` for the polling runner. Runs already paused on a
@@ -569,7 +570,7 @@ bash scripts/ris/auto_update.sh && git log -1 --format='%h %s'             # now
 cat auto-update.status 2>/dev/null || echo "auto-update healthy"
 ```
 
-If the runner, cron, and deploy dir belong to someone else (today `junbo.y`),
+If the runner, cron, and deploy dir belong to someone else,
 that account must either do the above, or stop its runner (`tmux kill-session
 -t twain-runner`, and remove `auto_update.sh` from its crontab) so a new owner
 can start one: `tmux new -d -s twain-runner bash scripts/ris/start_runner.sh`,
