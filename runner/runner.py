@@ -35,7 +35,7 @@ import os
 import threading
 import time
 
-from runner import dispatch
+from runner import dispatch, method_history
 from runner.artifacts import (
     capture_artifacts,
     rehydrate_artifacts,
@@ -219,6 +219,7 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
             summary = engine.final_summary(orch)
             db.add_assistant_message(session_id, summary, kind="chat", state="TERMINATE")
             notifier(session_id, "completed", summary)
+            method_history.record(db, session_id, orch)
             return
         if status == "error":
             # Where it stopped and why -- the old "see the run log" pointed at a
@@ -229,6 +230,7 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
             db.add_assistant_message(session_id, fail_msg, kind="chat")
             notifier(session_id, "failed", fail_msg)
             _propose_env_change(db, session_id, getattr(orch, "last_failure", None))
+            method_history.record(db, session_id, orch)
             return
         # Reached a terminal state without pausing (e.g. empty discovery).
         summary = engine.final_summary(orch)
@@ -430,6 +432,8 @@ def process_job(job: dict, db: RunnerDB, engine=None) -> None:
     # Plan from what RIS actually has (the newest inventory, #185), not the specs.
     from runner import inventory
     inventory.apply_latest(db)
+    # ... and prefer methods that have worked here before (#188).
+    method_history.apply(db)
     orch = _build_orchestrator(engine, db, session_id, params, notifier, cancel,
                                job_event_wait=job_events.wait,
                                issue_job_ticket=getattr(db, "issue_job_ticket", None),

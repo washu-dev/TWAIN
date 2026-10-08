@@ -27,6 +27,7 @@ waiting.
 | `worker.py` | ECS entrypoint. Runs `TWAIN_WORKER_CONCURRENCY` SQS consumers (claim the job by id → `process_job` → done or re-queue) plus the monitor thread |
 | `monitor.py` | Cluster monitor, a single leader through a Postgres advisory lock and woken by RIS webhooks (`LISTEN ris_job_events`). Polls `cluster_jobs` through the RIS API, publishes queue/node/log progress, enqueues the resume when a job ends, relays the outbox, reaps orphaned jobs, ticks the inventory |
 | `inventory.py` | Submits `scripts/ris/inventory.sh` daily; ingests it into `ris_inventory`; `apply_latest()` points planning at it |
+| `method_history.py` | What each method did here (#188): records one `method_outcomes` row per run per method when a run ends; points planning at the history so the same request gets the same, proven method |
 | `env_proposals.py` | Shared-environment change proposals (#187): drafted from a triage stop, approved from email, built + verified + promoted by one RIS job from the monitor's tick |
 | `runner.py` | `process_job` (start / resume / rerun slices, suspend, checkpoint, leases, retries) and the polling-runner CLI |
 | `engine.py` | Builds the `Orchestrator` (state machine, LLM client, Postgres store, event sink) from the execution flags |

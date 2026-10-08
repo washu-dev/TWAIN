@@ -250,8 +250,11 @@ def tool_keys(tool_name: str) -> List[str]:
     ['dftbplus']
     >>> tool_keys("Some New Tool")
     ['some-new-tool']
+    >>> tool_keys("openff.toolkit")     # an import name, as a failed job reports it
+    ['openff-toolkit']
     """
     key = canonical_tool_key(tool_name)
+    key = _BY_IMPORT_NAME.get(key, key)
     if key in TOOL_REGISTRY or key in _ALIASES.values():
         return [key]
     keys: List[str] = []
@@ -262,6 +265,12 @@ def tool_keys(tool_name: str) -> List[str]:
         if part and part not in keys:
             keys.append(part)
     return keys
+
+
+#: A registry tool by its import name ("openff.toolkit" -> "openff-toolkit").
+_BY_IMPORT_NAME: Dict[str, str] = {
+    str(entry.tool.import_name).lower(): key for key, entry in TOOL_REGISTRY.items()
+    if entry.tool.import_name and str(entry.tool.import_name).lower() != key}
 
 
 def _unknown(key: str) -> Dependency:
