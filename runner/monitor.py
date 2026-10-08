@@ -55,7 +55,7 @@ class ClusterMonitor:
     def __init__(self, db, adapter, *, poll_seconds: float = 30.0,
                  relay_grace_seconds: float = 30.0, sqs_client=None,
                  reap: Callable[[], None] | None = None, clock=time.monotonic,
-                 inventory=None):
+                 inventory=None, env_changes=None):
         """``adapter``: a RisApiAdapter (poll with its 404 -> accounting fallback,
         ``last_detail``, ``stdout_page``). ``reap``: the runner's orphan reaper."""
         self.db = db
@@ -65,6 +65,7 @@ class ClusterMonitor:
         self.sqs_client = sqs_client
         self.reap = reap
         self.inventory = inventory   # runner.inventory.InventoryScheduler (#185)
+        self.env_changes = env_changes  # runner.env_proposals.EnvChangeScheduler (#187)
         self._clock = clock
         self._activities: dict = {}
 
@@ -83,6 +84,11 @@ class ClusterMonitor:
                 stats["inventory"] = self.inventory.tick()
             except Exception as exc:  # noqa: BLE001 - never let it stall the run monitor
                 print(f"[monitor] inventory pass failed: {exc}")
+        if self.env_changes is not None:
+            try:
+                stats["env_changes"] = self.env_changes.tick()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[monitor] env-change pass failed: {exc}")
         due = {r["ris_job_id"]: r for r in self.db.open_cluster_jobs(self.poll_seconds)}
         for job_id in force:
             row = due.get(str(job_id)) or self.db.cluster_job(str(job_id))

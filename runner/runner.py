@@ -228,12 +228,42 @@ def _drive_run(db: RunnerDB, session_id: str, orch, engine, notifier=default_not
                         "The run stopped unexpectedly. Open the run to see what happened.")
             db.add_assistant_message(session_id, fail_msg, kind="chat")
             notifier(session_id, "failed", fail_msg)
+            _propose_env_change(db, session_id, getattr(orch, "last_failure", None))
             return
         # Reached a terminal state without pausing (e.g. empty discovery).
         summary = engine.final_summary(orch)
         db.add_assistant_message(session_id, summary, kind="chat")
         notifier(session_id, "completed", summary)
         return
+
+
+def _propose_env_change(db, session_id: str, failure: dict | None) -> None:
+    """If triage stopped because a shared env lacks a conda-only package, propose
+    the change to the approvers (#187) and tell the researcher. Never raises."""
+    try:
+        from runner import env_proposals
+        want = env_proposals.proposal_from_failure(failure)
+        if not want:
+            return
+        try:
+            from statemachine import _plan_dependencies
+            deps = _plan_dependencies([want["module"]])
+            package = deps[0].package if deps else want["module"].replace(".", "-")
+        except Exception:  # noqa: BLE001
+            package = want["module"].replace(".", "-")
+        proposal = env_proposals.propose(db, session_id=session_id, env=want["env"],
+                                         package=package, module=want["module"],
+                                         reason=want["reason"])
+        if proposal:
+            db.add_assistant_message(
+                session_id,
+                f"TWAIN proposed adding {package} to the shared {want['env']} environment "
+                f"(proposal #{proposal['id']}) and emailed the environment approver. Shared "
+                f"environments change only with approval; you'll get an email with a "
+                f"\"Re-run from EXECUTE\" button once it's in.",
+                kind="chat")
+    except Exception as exc:  # noqa: BLE001 - a proposal is a bonus, never a failure
+        print(f"[env-change] proposal for {session_id} failed: {exc}")
 
 
 def _cross_approval_gate(db, session_id, orch, engine, notifier) -> str:
