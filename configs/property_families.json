@@ -1,0 +1,11 @@
+{
+  "_comment": "Families of property names that mean the same quantity, so the method history (#210) and planning reuse (#217, #218) file them together. Acceptance-metric names come from the LLM and vary run to run: aspirin solubility was filed as aqueous_solubility_at_25c, aqueous_solubility_log_mol_per_l and aqueous_solubility_25c. Each family is a regex matched against the normalized key (lower case, words joined by _); the first match wins. A key no family matches is used as it is. Read by modules/16_agent_mesh_control_plane/statemachine.py and runner/method_history.py.",
+  "families": [
+    {"key": "aqueous_solubility", "pattern": "solubilit|(^|_)log_?s(_|$)"},
+    {"key": "formation_enthalpy", "pattern": "(heat|enthalpy|energy)_of_formation|formation_(enthalpy|energy|heat)|(^|_)delta_?h_?f(_|$)"},
+    {"key": "band_gap", "pattern": "band_?gap"},
+    {"key": "bulk_modulus", "pattern": "bulk_modulus"},
+    {"key": "boiling_point", "pattern": "boiling_(point|temperature)"},
+    {"key": "partition_coefficient", "pattern": "(^|_)c?log_?p(_|$)|partition_coefficient"}
+  ]
+}
