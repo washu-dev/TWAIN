@@ -51,10 +51,19 @@ imports_for() {
     *)       echo "ase rdkit pymatgen" ;;
   esac
 }
+# A real calculation step per env, where an import isn't proof enough: run the
+# capability plans actually depend on (empty = imports + binaries only).
+functional_check_for() {
+  case "$1" in
+    # AM1-BCC charges: what OpenFF/Interchange does for every small molecule.
+    nwchem) echo "from openff.toolkit import Molecule; m = Molecule.from_smiles('CCO'); m.assign_partial_charges('am1bcc'); print('am1bcc OK', round(float(sum(m.partial_charges.m)), 6))" ;;
+    *) echo ;;
+  esac
+}
 binaries_for() {
   case "$1" in
     abinit) echo abinit ;; cp2k) echo cp2k.ssmp ;; dftbplus) echo "dftb+" ;;
-    nwchem) echo nwchem ;; psi4) echo psi4 ;;     qe) echo pw.x ;; *) echo ;;
+    nwchem) echo "nwchem sqm" ;; psi4) echo psi4 ;; qe) echo pw.x ;; *) echo ;;
   esac
 }
 
@@ -94,6 +103,11 @@ verify_one() {  # <version> <env>; prints [verify] lines, returns non-zero on an
   for b in $(binaries_for "$name"); do
     [ -x "$p/bin/$b" ] && echo "[verify] $name binary $b OK" || { echo "[verify] $name binary $b MISSING"; fail=1; }
   done
+  local check; check=$(functional_check_for "$name")
+  if [ -n "$check" ]; then
+    if err=$("$p/bin/python" -c "$check" 2>&1); then echo "[verify] $name functional: $(echo "$err" | tail -1)"
+    else echo "[verify] $name functional check FAILED: $(echo "$err" | tail -1)"; fail=1; fi
+  fi
   # A file naming another prefix (a copied env, an old team root) runs code from
   # there -- or came from a poisoned package cache. Neither may ship.
   n=$(grep -rIl -e "/twain-envs/" "$p/bin" "$p/etc" 2>/dev/null | xargs -r grep -L "$p" 2>/dev/null | wc -l)

@@ -44,6 +44,11 @@ dependencies:
   # job pip-layered it at run time. The pre-2026-10 env had it only by a manual
   # install (drift); approved by arifs 2026-10-07.
   - openmm
+  # ambertools: OpenFF's default AM1-BCC partial charges run through AmberTools'
+  # sqm (or OpenEye, which we don't license). Without it Interchange.from_smirnoff
+  # dies with "No registered toolkits can provide assign_partial_charges ...
+  # am1bcc" (run cb1a625e, Slurm 3365219). Approved by arifs 2026-10-08.
+  - ambertools
   - numpy
   - pandas
   - pyyaml
