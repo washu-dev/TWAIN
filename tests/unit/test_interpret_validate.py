@@ -269,6 +269,7 @@ def test_validate_accepts_close_agreement(machine, tmp_path):
     _validator("validation_report.schema.json").validate(report)
     assert report["acceptance_status"] == "accepted"
     assert report["cross_validation"]["comparisons"][0]["molecule"] == "aspirin"
+    assert report["verified"] is True              # a literature value checked it
 
 
 def test_validate_marginal_agreement_routes_to_correct(machine, tmp_path):
@@ -573,6 +574,8 @@ def test_validate_no_reference_at_all_delivers_as_is(machine, tmp_path):
     report = machine._load_artifact("validation_report")
     assert report["acceptance_status"] == "accepted"
     assert "without external validation" in report["rationale"]
+    # "accepted" only because nothing objected: the summary must say "not verified".
+    assert report["verified"] is False
 
 
 # -- correct -------------------------------------------------------------------
