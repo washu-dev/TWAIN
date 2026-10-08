@@ -505,7 +505,9 @@ Only if you'll work on cluster execution or RIS maintenance.
   `nfs4_getfacl`.
 - **Changing a shared environment** is an approved change: edit
   `scripts/ris/envs/<env>.yml`, get sign-off (`TWAIN_ENV_APPROVERS`), then
-  `rebuild_envs.sh build → verify → promote` (rollback is one command). See the
+  `rebuild_envs.sh build → verify → promote` (rollback is one command). A run
+  that fails for want of a conda-only package proposes the change itself and
+  emails the approvers Approve/Reject buttons (#187). See the
   [runner README](../runner/README.md#rebuilding-a-shared-env-build-beside-verify-promote).
 
 ---

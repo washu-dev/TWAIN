@@ -61,3 +61,44 @@ def issue(db, session_id: str, *, base_url: str | None = None) -> list:
     except Exception as exc:  # noqa: BLE001 - the email still goes, without buttons
         log.warning("[notify] could not issue email actions for %s: %s", session_id, exc)
         return []
+
+
+def _buttons(db, rows_spec, base: str, valid_hours: float) -> list:
+    rows, buttons = [], []
+    for (session_id, kind, choice, label, primary, proposal_id, recipient) in rows_spec:
+        token = secrets.token_urlsafe(32)
+        rows.append((token_hash(token), session_id, kind, choice, label, proposal_id, recipient))
+        buttons.append({"label": label, "url": f"{base}/api/actions/{token}", "primary": primary})
+    db.insert_email_action_rows(rows, valid_hours)
+    return buttons
+
+
+def issue_for_proposal(db, proposal: dict, approver: str, *, base_url: str | None = None) -> list:
+    """Approve / Reject buttons for a shared-environment change (#187), for one approver."""
+    base = (base_url or os.getenv("TWAIN_API_PUBLIC_URL", "")).strip().rstrip("/")
+    if not base or not proposal.get("session_id"):
+        return []
+    try:
+        sid, pid = str(proposal["session_id"]), proposal["id"]
+        return _buttons(db, [
+            (sid, "env_change", "approve", "Approve the change", True, pid, approver),
+            (sid, "env_change", "reject", "Reject", False, pid, approver)], base, hours())
+    except Exception as exc:  # noqa: BLE001 - the email still goes, without buttons
+        log.warning("[env-change] could not issue buttons for proposal %s: %s",
+                    proposal.get("id"), exc)
+        return []
+
+
+def issue_rerun(db, session_id: str, owner: str, *, base_url: str | None = None) -> list:
+    """A "Re-run from EXECUTE" button for a run whose environment was just fixed."""
+    base = (base_url or os.getenv("TWAIN_API_PUBLIC_URL", "")).strip().rstrip("/")
+    if not base:
+        return []
+    try:
+        return _buttons(db, [(session_id, "rerun", "EXECUTE", "Re-run from EXECUTE", True,
+                              None, owner)],
+                        base, hours())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[env-change] could not issue a re-run button for %s: %s", session_id, exc)
+        return []
+
