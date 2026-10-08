@@ -1,5 +1,7 @@
 # TWAIN API — Quick Start
 
+> **Current reference: [`README.md`](README.md)** (all routes, migrations, configuration and deploy). This file is the short local-run guide.
+
 The FastAPI service behind the web UI (conversations, auth, artifacts). It shares
 a Postgres database with the **runner**; its `id` for each conversation is the
 engine's session id. For the full picture see the repo-root `README.md`

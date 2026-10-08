@@ -1,15 +1,40 @@
-# TWAIN Runner Service
+# TWAIN Runner / Worker
 
-Drives the pipeline for the web UI. It claims queued jobs from the Postgres
-`jobs` table, constructs an `Orchestrator`, and streams progress back into the
-shared database (`run_events`, `messages`, `conversations`, `sessions`) that the
-API reads. See `docs/architecture/web_ui_plan.md` §4.
+Drives the pipeline ([`modules/`](../modules/README.md)) for the web UI. In
+production it is the **`twain-runner` worker on ECS Fargate**. Its consumer
+threads take job messages from the SQS FIFO queue `twain-jobs.fifo` and run
+one slice of a run at a time. A **cluster monitor** inside the same process
+watches every Slurm job a run is paused on, keeps the **RIS inventory**
+current, relays unsent jobs, and reaps the jobs of dead workers. Everything a
+run needs lives in RDS Postgres and S3, so any worker can continue any run. See
+diagrams [07](../docs/architecture/07_deployment_dependencies.drawio) (what
+connects to what) and [08](../docs/architecture/08_run_lifecycle.drawio) (one
+run, end to end).
 
-Why a separate service (not the API): the pipeline needs the heavy pixi
-environment (`pymatgen`, `ase`, …), the WashU LLM credentials, and runs for
-minutes. When it needs the researcher it **suspends** rather than blocks — the
-run is checkpointed and the process is released — so one runner serves many runs
-and nothing spins waiting on a human.
+Locally (`../dev.sh`) the same code runs as the **polling runner**
+(`python -m runner.runner`, `TWAIN_DISPATCH=db`), which claims `queued` rows.
+The older login-node deployment of that runner on RIS is **retired**; its
+sections below are kept for reference and marked *legacy*.
+
+Why a separate service (not the API): the pipeline needs the pixi environment,
+the LLM gateway credentials and the RIS API token, and a run lasts minutes to
+hours. When it needs the researcher, or a Slurm job, it **suspends** instead of
+blocking. The run is checkpointed and the process released, so nothing sits
+waiting.
+
+| File | Role |
+|---|---|
+| `worker.py` | ECS entrypoint. Runs `TWAIN_WORKER_CONCURRENCY` SQS consumers (claim the job by id → `process_job` → done or re-queue) plus the monitor thread |
+| `monitor.py` | Cluster monitor, a single leader through a Postgres advisory lock and woken by RIS webhooks (`LISTEN ris_job_events`). Polls `cluster_jobs` through the RIS API, publishes queue/node/log progress, enqueues the resume when a job ends, relays the outbox, reaps orphaned jobs, ticks the inventory |
+| `inventory.py` | Submits `scripts/ris/inventory.sh` daily; ingests it into `ris_inventory`; `apply_latest()` points planning at it |
+| `runner.py` | `process_job` (start / resume / rerun slices, suspend, checkpoint, leases, retries) and the polling-runner CLI |
+| `engine.py` | Builds the `Orchestrator` (state machine, LLM client, Postgres store, event sink) from the execution flags |
+| `dispatch.py` | The worker's half of SQS dispatch (re-queue as `dispatching`, send) |
+| `db.py` | All Postgres access (jobs, messages, events, sessions, tickets, cluster jobs, inventory) |
+| `bridges.py` · `suspend.py` | Ask / approval bridges (raise `SuspendRun`), the event sink |
+| `pg_store.py` · `artifacts.py` | Session checkpoints in Postgres; stage artifacts saved and restored across workers |
+| `capabilities.py` | Publishes `library_availability` (what the cluster can run) from the inventory |
+| `notifications.py` | Owner email (SendGrid / SES) or SMS (SNS), with deduplication, rate caps and user preferences |
 
 ## How a run flows (async suspend/resume)
 A *job* is one slice of a run, not a whole run. A run advances until it needs the
@@ -38,7 +63,8 @@ responds. No thread is ever pinned to a waiting run.
    `squeue` polls (where it also `scancel`s the cluster job), then settles the
    conversation as `cancelled` instead of `error`.
 
-**Waking the runner** — instead of polling every second, the runner `LISTEN`s on
+**Waking the runner** (the local polling runner; the ECS worker is woken by its SQS
+long poll instead) — instead of polling every second, the runner `LISTEN`s on
 the `twain_jobs` channel; a trigger (`api/migrations/003_job_notify.sql`)
 `NOTIFY`s it the instant a job is queued, so a released runner wakes immediately.
 A generous fallback poll (`--poll`, default 30s) covers any missed notification.
@@ -521,7 +547,9 @@ Wrapper exits the failure card explains: **4** stale RIS checkout, **6** could
 not fetch the bundle, **7** could not upload the outputs. The SSH path (rsync +
 login-node preflight) is unchanged and remains the default until P2.
 
-### Keeping the RIS runner current (interim, until the ECS worker)
+### Legacy: keeping the RIS login-node runner current
+
+> *Retired.* Production runs on the ECS worker above. Kept for reference.
 
 The login-node runner updates itself: `scripts/ris/auto_update.sh` runs from
 cron every 10 minutes, fetches `master`, and restarts the runner when it is
@@ -560,7 +588,10 @@ Prerequisites and knobs:
   when the process already runs *on* a login node (no SSH hop);
   `TWAIN_SLURM_CLUSTER` / `--cluster` — another `configs/clusters/` profile.
 
-## Deploy the backend ON RIS (runner on the login node)
+## Legacy: the runner on the RIS login node
+
+> *Retired* (October 2026): the ECS worker replaced it, and jobs dispatched over SQS
+> are invisible to it. Kept for reference only; don't deploy it alongside the worker.
 
 Instead of running the runner on your laptop (VPN required, laptop must stay
 awake), deploy it to the cluster itself. It polls the same shared Postgres on
@@ -684,35 +715,49 @@ ruff check runner
 ```
 
 ## Deploy (AWS)
-The runner runs as its own ECS/Fargate service (`twain-runner`) on **linux-64**, so
-the `sim` env ships **GPAW** and a band-gap job computes a real DFT result. CI job
-`deploy` in `.github/workflows/ci-runner.yml` builds `runner/Dockerfile` **from the
-repo root** → pushes to ECR → deploys `runner/ecs-task-definition.json` to the ECS
-service. It runs on push to `master` (or `workflow_dispatch`).
 
-One-time prerequisites (the deploy job assumes these exist):
-1. **ECR repo** `twain-runner-ecr`.
-2. **ECS service** `twain-runner` on cluster `twain-cluster` (Fargate; no load
-   balancer — it's a worker). Size for DFT: the task def uses 2 vCPU / 8 GB.
-3. **Secrets** in Terraform (`terraform/secrets.json`, git-ignored; template in
-   `secrets.example.json`): the WashU LLM creds under `secure_api/*` and the RIS
-   API PAT under `ris_api/TOKEN`. `terraform apply` creates them and grants the
-   ECS **execution** role (`ecsTaskExecutionRole`, which resolves the task def's
-   `secrets` before the container starts) read on exactly those ARNs plus
-   decrypt on the TWAIN KMS key; `terraform output runner_secrets_missing` lists
-   any key still to add. Then `scripts/aws/setup_secrets.sh --apply` replaces the
-   task def's `…-REPLACE` ARNs from `terraform output runner_secret_arns`.
-   The DB password is already the shared `AWS_SECRET_ARN`.
-4. Repo secrets `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (same as the API).
-5. Task role: RDS access. (Secret injection uses the execution role -- step 3.)
+The worker is ECS Fargate service **`twain-runner`** on cluster
+`twain-cluster`: **1 vCPU / 4 GB**, no inbound traffic, private subnets. Its
+task role is `TWAIN-runner-worker`, and it logs to `/ecs/twain-runner`.
+Terraform ([`terraform/worker.tf`](../terraform/README.md)) owns the service,
+queues, roles and log group. CI owns the task-definition revisions.
 
-Execution mode (env in the task def):
-- **`TWAIN_EXECUTE_LOCALLY=1`** (the default set here) — run calculations for real,
-  keeping the web-UI plan-approval step. This is what computes the GPAW band gap.
-- **`TWAIN_AUTO_RUN=1`** — fully unattended: also skip the plan-approval and
-  heavy-calc gates. Swap it in if you want hands-off runs with no approval click.
+**Image.** `runner/Dockerfile` is built from the repository root on the pixi
+image, with `WITH_SIM=0`: there is no local calculator stack, because
+calculations and smoke tests run on RIS. Its command is
+`pixi run python -m runner.worker`.
 
-The image is identical locally and on ECS, so a run behaves the same in Docker and
-in Fargate. EXECUTE runs generated code, so keep the task sandboxed (resource
-limits, minimal IAM/network). To sanity-check the build before pushing, see
-"Run in Docker (any OS)" above (add `--platform linux/amd64` on Apple Silicon).
+**`ci-runner.yml`.** On changes to `runner/`, `modules/`, `configs/`,
+`schemas/`, `twain_paths.py` or `pixi.*`, it runs lint, runner tests and
+`tests/unit`. On `master` it then:
+1. builds and pushes to ECR `twain-runner-ecr`;
+2. renders `runner/ecs-task-definition.json` with `TWAIN_ENV_FILE`,
+   `TWAIN_GIT_SHA`, `TWAIN_NOTIFY_BACKEND`, `TWAIN_NOTIFY_FROM` and
+   `TWAIN_ENV_APPROVERS` (from repository variables), adding the SendGrid
+   secret only when the backend is `sendgrid`;
+3. deploys and waits for the service to be stable.
+
+The task definition sets:
+- `TWAIN_DISPATCH=sqs`, the queue URL and `TWAIN_WORKER_CONCURRENCY=2`;
+- `TWAIN_EXECUTE_SLURM=1`, `TWAIN_SLURM_CLUSTER=compute2`,
+  `TWAIN_SLURM_BACKEND=api`, `TWAIN_STAGING=s3` and `TWAIN_RUN_BUCKET`;
+- `TWAIN_API_PUBLIC_URL` and `TWAIN_APP_URL`;
+- the database, through RDS and `TWAIN/database/DB_PASSWORD`.
+
+Secrets come from Terraform-managed `TWAIN/*` entries, injected by
+`service-role/ecsTaskExecutionRole`: the LLM credentials (`secure_api/*`),
+`ris_api/TOKEN`, and `sendgrid/API_KEY` when email is on.
+
+**Checking a deploy.** `/ecs/twain-runner` should show:
+- `worker up: 2 consumers + cluster monitor on …`
+- `[monitor] leading: watching cluster jobs`
+- `planning from RIS inventory of …`
+- `[inventory] ingested job …` (once a day)
+
+**Rollback.** Update the service to the previous task-definition revision. To
+send all dispatch back to Postgres, set the repository variable
+`TWAIN_DISPATCH=db` and redeploy the API.
+
+EXECUTE runs generated code, but only on RIS: the worker itself never executes
+it. The worker's IAM role is limited to the job queue, `runs/*` in the run
+bucket and the DB password secret.

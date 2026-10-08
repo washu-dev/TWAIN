@@ -1,131 +1,152 @@
 # TWAIN API
 
-FastAPI backend for the TWAIN web UI. It is a **light request-server**: it
-validates auth, does CRUD on Postgres, enqueues runs into the `jobs` table, and
-streams progress back to the browser. It never drives the pipeline itself — the
-**runner** service claims jobs and runs the engine (see
-[`../docs/architecture/web_ui_plan.md`](../docs/architecture/web_ui_plan.md)).
+FastAPI service (Python 3.12, uvicorn on :8000) between the web app, the
+database and the worker. It owns the database schema, creates runs and
+dispatches their jobs, serves the run's transcript, activity and artifacts,
+signs S3 links for Slurm jobs and researchers, and receives RIS webhooks. It
+**never runs the pipeline itself**: the worker ([`runner/`](../runner/README.md))
+does.
 
-## Setup
+Deployed as ECS Fargate service **`twain-washu`** (cluster `twain-cluster`,
+task family `twain-api`), behind an ALB that is the `/api/*` origin of
+CloudFront `d1z5umg4xc2bl8.cloudfront.net`. Logs go to `/ecs/twain-api`. The
+[architecture diagrams](../docs/architecture/DIAGRAMS_INDEX.md) (07 and 08)
+show where it sits.
 
-```bash
-pip install -r requirements.txt          # or use the repo pixi env
-cp .env.example .env                      # then edit DB + auth settings
-```
-
-The schema lives in [`migrations/`](migrations); apply every file to your
-database (the repo-root [`../dev.sh`](../dev.sh) does this automatically):
-
-```bash
-for f in migrations/*.sql; do psql -d twaindb -f "$f"; done
-```
-
-## Configuration (env)
-
-| Var | Effect |
-|---|---|
-| `DB_HOST/PORT/NAME/USER/PASSWORD` | Postgres connection |
-| `AWS_SECRET_ARN` | if set, DB password is resolved from Secrets Manager instead of `DB_PASSWORD` |
-| `AUTH_DISABLED` | `true` for local dev — every request is a dev admin (never in production) |
-| `INTERIM_JWT_SECRET` | enables interim email login (`POST /api/auth/login`); the HS256 signing key |
-| `INTERIM_ALLOWED_DOMAINS` / `INTERIM_ALLOWED_EMAILS` | who may sign in via interim auth (default domain `wustl.edu`) |
-| `ENTRA_TENANT_ID` / `ENTRA_API_AUDIENCE` | Entra (WashU SSO) JWT validation, once SSO is wired up |
-| `BOOTSTRAP_ADMIN_EMAILS` | seed admins promoted on first login |
-
-See [`.env.example`](.env.example) for the full list.
-
-## Running
+## Run it
 
 ```bash
-python main.py           # dev server on http://localhost:8000 (reload on)
-# or: uvicorn main:app --host 0.0.0.0 --port 8000
+cd api
+AUTH_DISABLED=true DB_HOST=localhost DB_NAME=twaindb DB_USER=postgres DB_PASSWORD=postgres \
+  pixi run --manifest-path ../pixi.toml python main.py      # http://localhost:8000/docs
 ```
 
-Interactive docs: <http://localhost:8000/docs>.
+Or run everything with `../dev.sh`. The API applies the migrations on startup.
 
-## Endpoints
+## Routes
 
-All endpoints require a valid bearer token except `/api/health` and
-`/api/auth/login`. Auth is either an interim session token (HS256) or an Entra
-access token (RS256) — both are accepted, routed by algorithm.
+**Auth** column:
+- **user**: an Entra bearer token (RS256, checked against the tenant JWKS,
+  `aud`, `iss` and `exp`) or an interim HS256 token. Conversation routes
+  return **404 to anyone but the owner**.
+- **admin**: `users.role = admin`.
+- `AUTH_DISABLED=true` makes every request a dev admin (local only).
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/health` | liveness check |
-| POST | `/api/auth/login` | interim email sign-in → `{ token, user }` |
-| GET | `/api/me` | current user (id, email, name, role) |
-| GET | `/api/admin/users` · PATCH `/api/admin/users/{id}/role` | admin: list / set roles |
-| POST | `/api/conversations` | start a run from a prompt → enqueues a `start` job |
-| GET | `/api/conversations` · `/api/conversations/{id}` | list mine · one with transcript |
-| POST | `/api/conversations/{id}/messages` | add a chat / clarification reply |
-| POST | `/api/conversations/{id}/approval` | answer the plan-approval gate |
-| GET | `/api/conversations/{id}/stream` | **SSE** of pipeline progress (`run_events`) |
-| GET | `/api/conversations/{id}/report` | run summary + artifact list |
-| GET | `/api/conversations/{id}/artifacts` · `/artifacts/{name}` | list · fetch one artifact |
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/health` | none | `{status, version, commit}`, the ALB health check |
+| GET | `/api/version` | none | `{service, version, commit}` (shown in the app footer) |
+| POST | `/api/auth/login` | none | Interim email login (503 unless `INTERIM_JWT_SECRET` is set) |
+| GET | `/api/me` | user | The current user, role and notification preferences |
+| PUT | `/api/me/notifications` | user | Email preferences: `input`, `approval`, `completed`, `failed`, `terminated` |
+| GET | `/api/admin/users` · PATCH `/api/admin/users/{id}/role` | admin | User management |
+| GET | `/api/libraries` | user | Library availability, published by the worker from the RIS inventory |
+| POST | `/api/issues` | user | A plain GitHub issue (the "provision this engine" request) |
+| POST | `/api/conversations` | user | Start a run: `{request, title?, max_cost?}` → enqueues a `start` job |
+| GET | `/api/conversations` | user | My runs |
+| GET · DELETE | `/api/conversations/{id}` | owner | A run and its transcript · delete it |
+| POST | `/api/conversations/{id}/messages` | owner | A chat or clarification reply (enqueues `resume`) |
+| POST | `/api/conversations/{id}/approval` | owner | Approve or reject the plan; may override `slurm_request` and `acceptance_metrics` |
+| POST | `/api/conversations/{id}/rerun` | owner | Re-run from a stage (`state`, optional feedback, request, Slurm request, metrics) |
+| POST | `/api/conversations/{id}/terminate` | owner | Stop the run (and cancel its Slurm job) |
+| GET | `/api/conversations/{id}/activity?after=` | owner | In-stage subtasks (`stage.progress`), job log and failure since a cursor, polled every 2 s by the app |
+| GET | `/api/conversations/{id}/run-files?attempt=` | owner | Short-lived (1 h) links to a cluster attempt's `bundle` and `outputs` in S3 |
+| GET | `/api/conversations/{id}/stream` | owner | SSE of `run_events` (`SSE_POLL_SECONDS`, `SSE_MAX_SECONDS`) |
+| GET | `/api/conversations/{id}/report` | owner | Headline result, summary and artifact list |
+| GET | `/api/conversations/{id}/artifacts` · `/artifacts/{name}` | owner | List artifacts · fetch one |
+| GET · POST | `/api/conversations/{id}/issues` | owner | Run reports filed for this run · file one |
+| GET | `/api/conversations/{id}/issue-context` | owner | Exactly what a run report would attach |
+| POST | `/api/job-tickets/urls` | job ticket (`X-TWAIN-Ticket`) | A Slurm job swaps its ticket for presigned GET `input/…` and PUT `output/…` links |
+| POST | `/api/ris/webhooks` | Standard Webhooks HMAC | RIS API job events → `ris_job_events` (deduplicated, NOTIFY wakes the cluster monitor) |
 
-### Report an issue about a run
+Every route is a sync `def`, or awaits `run_in_threadpool`. `test_event_loop.py`
+fails CI if a route blocks the event loop.
 
-A researcher can report a problem from the run window without leaving TWAIN; the
-run's own data is attached server-side, so a maintainer never has to ask what was
-being run. See `run_issue_github.py` (labels + issue body) and `run_issues.py`
-(the snapshot + the local record). This is distinct from `POST /api/issues`
-(`github_issues.py`), which files a plain title+body issue — that is what the
-one-tap "provision this engine" request on the approval card uses.
+## Modules
 
-```
-GET  /api/conversations/{id}/issue-context   # exactly what would be attached, + whether GitHub is configured
-POST /api/conversations/{id}/issues          # {category, title, description} -> files the issue
-GET  /api/conversations/{id}/issues          # what has already been reported for this run
-```
-
-`category` is one of `bug | library | result | other` and maps to a GitHub label
-(`BugReport`, `LibraryAddition`, `ResultDiscrepancy`, `RunReport`); every issue
-also carries `RunReport`. `library` deliberately reuses the tag the pipeline uses
-when discovery reaches for an uninstalled library, so both kinds of request
-triage as one list.
-
-The response `status` is:
-
-| status | meaning |
+| File | Role |
 |---|---|
-| `created` | the issue was filed; `issue_url` points at it |
-| `queued` | no GitHub credentials in this deployment — the report is saved against the run, nothing was filed |
-| `failed` | GitHub refused or was unreachable; `error` says why. The report is still saved |
+| `main.py` | App, CORS, lifespan (migrations), routes |
+| `auth.py` | Entra OIDC validation, interim login, `CurrentUser` / `AdminUser` |
+| `database.py` | Postgres connection; DB credentials from Secrets Manager `TWAIN/database/*` (or env with `TWAIN_DB_FROM_ENV=true`); user CRUD |
+| `conversations.py` | Runs, messages, artifacts, events, cluster attempts, library availability |
+| `dispatch.py` | `TWAIN_DISPATCH=db`: the job is inserted `queued`. `=sqs`: inserted `dispatching` (outbox), then sent to the FIFO queue after commit (group = run, dedup = `job-<id>`) |
+| `job_tickets.py` | Hashed, attempt-scoped, expiring job tickets → presigned S3 links (GET only `input/`, PUT only `output/`); also signs the owner's bundle and outputs downloads |
+| `ris_webhooks.py` | Verifies the Standard Webhooks signature and timestamp (secret `TWAIN/ris_api/WEBHOOK_SECRET`) and records the event |
+| `github_issues.py` · `run_issues.py` · `run_issue_github.py` | GitHub identity, plain issues, run reports |
+| `migrate.py` | Applies `migrations/*.sql` in order under an advisory lock, with a `schema_migrations` ledger |
+| `version.py` | `TWAIN_VERSION`, then `api/VERSION`, then `dev` |
 
-Credentials are resolved by `github_issues.py`, which is the single GitHub
-identity for the whole API — so configuring the PAT once enables both this and
-`POST /api/issues`:
+## Database
 
-| Env var | Effect |
+`migrations/*.sql` are idempotent and applied at startup
+(`RUN_MIGRATIONS_ON_STARTUP=false` to skip; `python migrate.py --dry-run` to
+preview).
+
+| Migration | Adds |
 |---|---|
-| `GITHUB_ISSUE_TOKEN` | the PAT. Needs read+write on Issues for the repo. When unset, read from Secrets Manager at `TWAIN_GITHUB_SECRET_ID` (default `TWAIN/github/GITHUB_ISSUE_TOKEN`) |
-| `GITHUB_ISSUE_REPO` | `owner/repo` the issues go to (default `washu-dev/TWAIN`). There is no git remote inside the container, so this is configuration-only |
-| `TWAIN_RUN_ISSUES=0` | force run reports off, so a staging deployment can't post to the tracker |
+| 001 | users, conversations, messages, jobs, run_events, sessions |
+| 002 | artifacts (stage specs, bundle files) |
+| 003 | NOTIFY on new jobs; `terminate` message kind |
+| 004 | job leases and heartbeats (crash recovery); typed conversation lifecycle |
+| 005 · 007 | per-user contact · email notification preferences |
+| 006 | `cancelling` / `cancelled` |
+| 008 | one message kind per question gate |
+| 009 | run issue reports |
+| 010 · 011 | library availability (+ homepage) |
+| 012 | `ris_job_events` (webhooks) + NOTIFY trigger |
+| 013 | `job_tickets` |
+| 014 | `dispatching` status (SQS outbox) + `cluster_jobs` (detached EXECUTE) |
+| 015 | `ris_inventory` (what the RIS envs actually contain) |
 
-Without a PAT the run-report endpoints still work: a report is recorded against
-the run with status `queued`. `POST /api/issues` instead returns 502, since there
-the user explicitly asked to file an issue.
+## Configuration
+
+| Group | Variables |
+|---|---|
+| Database | `DB_*` or Secrets Manager `TWAIN/database/*` (`TWAIN_SECRET_PREFIX`, `TWAIN_SECRETS_ROLE_ARN`, `TWAIN_DB_FROM_ENV`), `DB_CONNECT_TIMEOUT`, `PGGSSENCMODE` |
+| Auth | `ENTRA_TENANT_ID`, `ENTRA_API_AUDIENCE`, `ENTRA_ISSUER` (or `TWAIN/sso/*`), `BOOTSTRAP_ADMIN_EMAILS`, `INTERIM_JWT_SECRET`, `INTERIM_ALLOWED_DOMAINS`/`_EMAILS`, `AUTH_DISABLED` |
+| Dispatch and staging | `TWAIN_DISPATCH`, `TWAIN_JOB_QUEUE_URL`, `TWAIN_RUN_BUCKET` (from repo variables at deploy) |
+| RIS webhooks | `RIS_WEBHOOK_SECRET` or `TWAIN_RIS_WEBHOOK_SECRET_ID` |
+| GitHub | `GITHUB_ISSUE_TOKEN` (or `TWAIN/github/GITHUB_ISSUE_TOKEN`), `GITHUB_ISSUE_REPO`, `TWAIN_RUN_ISSUES` |
+| Other | `SSE_POLL_SECONDS`, `SSE_MAX_SECONDS`, `RUN_MIGRATIONS_ON_STARTUP`, `TWAIN_VERSION`, `TWAIN_GIT_SHA` |
+
+The API's task role, **`twain-api-ecs-task-role`**, can send to the job queue
+and read/write `runs/*` in the run bucket (which it needs in order to sign
+links). Terraform manages both grants.
+
+## Deploy
+
+`.github/workflows/deploy-api.yml` runs on changes under `api/**`:
+1. ruff, pip-audit, and pytest with at least 50% coverage.
+2. Build `api/Dockerfile` (python:3.12-slim) with `GIT_SHA`/`VERSION` and push
+   it to ECR `twain-ecr`.
+3. **Copy the live `twain-api` task definition** and set the image plus
+   `TWAIN_DISPATCH`, `TWAIN_JOB_QUEUE_URL` and `TWAIN_RUN_BUCKET` from
+   repository variables.
+4. Deploy to `twain-washu`, then commit the release and tag `api-v…`.
+
+`api/ecs-task-definition.json` is **not** used by the deploy; it's a historical
+reference only. To change the task's environment, add it to the render step of
+`deploy-api.yml`.
+
+## Run issue reports
+
+The run window's **Report** button files a GitHub issue with the run's own data
+attached, assembled server-side (`run_issues.py`). Before filing,
+`issue-context` shows exactly what will be sent.
+
+- **Categories:** `category` is `bug | library | result | other`. They map to
+  the labels `BugReport`, `LibraryAddition`, `ResultDiscrepancy` and
+  `RunReport`; every issue also carries `RunReport`.
+- **Status:** `created` (filed); `queued` (no GitHub credentials, so the report
+  is saved against the run); `failed` (GitHub refused, also saved).
+- **Credentials:** `github_issues.py` is the single GitHub identity
+  (`GITHUB_ISSUE_TOKEN`, a PAT with Issues read/write; `GITHUB_ISSUE_REPO`,
+  default `washu-dev/TWAIN`). `TWAIN_RUN_ISSUES=0` turns run reports off.
 
 ## Tests
 
 ```bash
-pytest -q            # unit tests (fakes for DB; no Postgres needed)
-ruff check .
-```
-
-## Project structure
-
-```
-api/
-├── main.py               # FastAPI app + routes
-├── auth.py               # bearer-token auth: interim (HS256) + Entra (RS256)
-├── conversations.py      # conversation/message/artifact/event data access
-├── database.py           # Postgres connection + user CRUD (Secrets Manager aware)
-├── github_issues.py      # GitHub identity + plain title+body issues (POST /api/issues)
-├── run_issue_github.py   # Run reports as GitHub issues: labels + issue body
-├── run_issues.py         # The run snapshot attached to a report + its local record
-├── migrate.py            # Applies migrations/ on startup (advisory-locked, idempotent)
-├── migrations/           # idempotent SQL schema
-├── requirements.txt
-└── test_*.py             # test suite
+pixi run --manifest-path ../pixi.toml python -m pytest -q   # fakes for the DB; no Postgres needed
+pixi run --manifest-path ../pixi.toml -e lint ruff check .
 ```

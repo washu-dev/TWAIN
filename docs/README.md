@@ -38,8 +38,18 @@ Start here if you're new to the project.
 Architecture decision records; one file per decision
 (e.g. [`schema_versioning.md`](decisions/schema_versioning.md)).
 
-## Service-level docs (outside `docs/`)
+## Current system (start here)
 
-- [`../runner/README.md`](../runner/README.md) — runner service: local runs, Docker offload, AWS deploy
-- [`../api/QUICKSTART.md`](../api/QUICKSTART.md) — FastAPI backend
-- [`../app/QUICKSTART.md`](../app/QUICKSTART.md) — Expo web app
+The two diagrams below and the component READMEs describe TWAIN **as deployed today**
+(October 2026). Much of `project/`, `backlog/` and diagrams 01–06 is the
+original design: read those as history.
+
+| Document | What it is |
+|---|---|
+| [`architecture/07_deployment_dependencies.drawio`](architecture/07_deployment_dependencies.drawio) | Static view: web app, API, worker, AWS, GitHub, RIS (storage2 folders, environments, compute nodes), the repository's modules, registries and templates, and every external dependency, with when each is fetched |
+| [`architecture/08_run_lifecycle.drawio`](architecture/08_run_lifecycle.drawio) | Dynamic view: one run from submission to results, covering the approval gate, the pizza tracker, subtasks, emails, the detached Slurm job, the failure path and the planned observer |
+| [`../README.md`](../README.md) | Overview, local development, deploying |
+| [`../app/README.md`](../app/README.md) · [`../api/README.md`](../api/README.md) · [`../runner/README.md`](../runner/README.md) | The three services |
+| [`../modules/README.md`](../modules/README.md) | The pipeline modules and which state each serves |
+| [`../scripts/ris/README.md`](../scripts/ris/README.md) | What lives on RIS and how it's maintained |
+| [`../terraform/README.md`](../terraform/README.md) | AWS infrastructure (and the IAM add-only rule) |
