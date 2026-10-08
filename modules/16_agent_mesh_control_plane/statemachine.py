@@ -370,6 +370,23 @@ def _periodic_min_cores() -> int:
     return value if value >= 2 else 24
 
 
+def _poscar_as_structure(reference: dict) -> Optional[dict]:
+    """A Materials Project reference cell as the JSON codegen bakes into the prompt."""
+    try:
+        import io
+        from ase.io import read
+        atoms = read(io.StringIO(reference["poscar"]), format="vasp")
+    except Exception:  # noqa: BLE001 - no cell is fine; the guard still checks
+        return None
+    return {
+        "source": f"Materials Project {reference.get('mp_id')} (primitive cell, PBE-relaxed)",
+        "lattice": [[round(float(x), 6) for x in row] for row in atoms.cell[:]],
+        "lattice_units": "angstrom",
+        "atoms": [{"element": s, "frac": [round(float(x), 6) for x in f]}
+                  for s, f in zip(atoms.get_chemical_symbols(), atoms.get_scaled_positions())],
+    }
+
+
 def _is_periodic(system_descriptors) -> bool:
     """Whether the target is a periodic solid rather than an isolated molecule."""
     if not isinstance(system_descriptors, dict):
@@ -2268,6 +2285,46 @@ class StateMachine:
             return calc.compatible_libraries[0]
         return calc.driver_library
 
+    def _crystal_reference(self, plan: dict, intent: Optional[dict]) -> Optional[dict]:
+        """What the structure guard checks a crystal against, or None.
+
+        Always the plan's formula and space group. With a Materials Project key,
+        also MP's atoms-per-primitive-cell and volume per atom -- the facts that
+        actually exposed run 75f06090's wrong "diamond Si" (same space group,
+        twice the atoms, half the volume) -- and MP's cell is written into the
+        plan's target_system.structure, which codegen tells the model to build
+        verbatim instead of reconstructing coordinates from memory.
+        """
+        target = plan.get("target_system") if isinstance(plan, dict) else None
+        sysd = target or (intent or {}).get("system_descriptors") or {}
+        if not _is_periodic(sysd):
+            return None
+        material = CodegenEngine._material_brief(plan, intent)
+        if not material.get("formula"):
+            return None
+        expected = {k: material.get(k) for k in
+                    ("formula", "name", "space_group", "space_group_number", "mp_id")}
+        reference = mp_reference.reference_structure(
+            material["formula"], mp_id=material.get("mp_id"),
+            space_group_number=material.get("space_group_number"))
+        if reference:
+            expected.update({k: reference[k] for k in
+                             ("mp_id", "primitive_sites", "volume_per_atom")})
+            expected["space_group_number"] = (expected.get("space_group_number")
+                                              or reference.get("space_group_number"))
+            cell = _poscar_as_structure(reference)
+            if cell and isinstance(target, dict) and not CodegenEngine._structure_for(plan, intent):
+                target["structure"] = cell
+            self._progress("BUILD", "reference", "done",
+                           f"Reference structure: Materials Project {reference['mp_id']} "
+                           f"({reference['formula']}, {reference['space_group']}, "
+                           f"{reference['primitive_sites']} atoms per primitive cell)")
+        else:
+            self._progress("BUILD", "reference", "done",
+                           "No Materials Project reference structure (no key, or no entry): "
+                           "the structure check uses the formula and space group only")
+        return expected
+
     def build(self) -> State:
         """Generate a runnable RunBundle from the ExecutionPlan (Story 5.1).
 
@@ -2333,6 +2390,10 @@ class StateMachine:
                     smoke_compute = not ce.heavy and not ce.needs_external_data
         else:
             smoke_compute = True
+        # A crystal target gets its reference cell from Materials Project (when a
+        # key is configured): the cell goes into the prompt to be built verbatim,
+        # and the structure guard ships in the bundle to check what is computed.
+        expected_structure = self._crystal_reference(plan, intent)
         engine = CodegenEngine()
         tool = (method.get("calculator") or method.get("tool_name")
                 or "the selected tool") if isinstance(method, dict) else "the selected tool"
@@ -2356,6 +2417,7 @@ class StateMachine:
                 # script to hand it TWAIN_ENGINE_LAUNCH, and makes 6N+1
                 # finite-difference engine invocations worth warning about.
                 parallelism=(ce.parallelism if calc_name and ce else "threads"),
+                expected_structure=expected_structure,
                 # A run that is going to EXECUTE must not fall back to the
                 # placeholder scaffold: it loads the tool, writes a stub and
                 # exits 0, so the job, the scheduler and TWAIN all report success

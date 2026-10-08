@@ -992,6 +992,11 @@ class SlurmExecutionAdapter:
         # already activated its base env above; re-running twain_use_env on the
         # venv would put .venv/bin ahead of the engine's bin and drop CONDA_PREFIX.
         lines.append('if [ -z "$LAYERED" ]; then twain_use_env "$PY"; fi')
+        if (bundle / "sitecustomize.py").is_file():
+            # The structure guard: Python imports the bundle's sitecustomize at
+            # start-up only when the bundle is on PYTHONPATH (the script's own
+            # directory is added too late). Covers the smoke test and the run.
+            lines.append('export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"')
         if run_smoke and (bundle / "inline_tests.py").is_file():
             lines.append('"$PY" inline_tests.py')
         # Bound the run. A wedged engine or a hung MPI teardown otherwise burns the

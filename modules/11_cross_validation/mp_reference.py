@@ -336,7 +336,7 @@ class MaterialsProjectBaselines:
         """
         if isinstance(doc, dict):
             return doc
-        fields = list(_IDENTITY_FIELDS) + [p.field for p in MP_PROPERTIES.values()]
+        fields = list(_IDENTITY_FIELDS) + [p.field for p in MP_PROPERTIES.values()] + ["structure"]
         return {f: getattr(doc, f, None) for f in fields}
 
     def _citation(self, doc: Dict[str, Any]) -> str:
@@ -347,3 +347,56 @@ class MaterialsProjectBaselines:
         # what the run was checked against.
         kind = "computed" if doc.get("theoretical") else "MP entry"
         return f"Materials Project {mp_id}{f' ({formula})' if formula else ''} [{kind}]"
+
+
+def reference_structure(formula: Optional[str] = None, *, mp_id: Optional[str] = None,
+                        space_group_number: Optional[int] = None,
+                        api_key: Optional[str] = None,
+                        client_factory: Optional[Callable[[str], Any]] = None,
+                        timeout: int = DEFAULT_TIMEOUT_SECONDS) -> Optional[Dict[str, Any]]:
+    """Materials Project's primitive cell for a crystal, for BUILD (or None).
+
+    ``{"mp_id", "formula", "space_group_number", "space_group", "primitive_sites",
+    "volume_per_atom", "poscar"}`` -- the cell itself (VASP POSCAR text, which
+    ``ase.io.read(..., format="vasp")`` loads) plus the two facts the structure
+    guard needs: the space group alone did not catch run 75f06090, whose 4-atom
+    "diamond Si" was Fd-3m too, but had twice the atoms per primitive cell and
+    half the volume per atom. ``None`` -- no key, no network, no entry -- is
+    "no reference", never a failure: BUILD carries on without one.
+    """
+    finder = MaterialsProjectBaselines(formula, mp_id=mp_id, space_group_number=space_group_number,
+                                       api_key=api_key, client_factory=client_factory,
+                                       timeout=timeout)
+    if not finder.configured:
+        return None
+    try:
+        with finder._rester() as rester:
+            fields = list(_IDENTITY_FIELDS) + ["structure"]
+            if finder.mp_id:
+                docs = rester.search(material_ids=[finder.mp_id], fields=fields)
+            else:
+                docs = rester.search(formula=finder.formula, fields=fields)
+        doc = finder._choose(docs)
+        structure = (doc or {}).get("structure")
+        if structure is None:
+            return None
+        if isinstance(structure, dict):
+            from pymatgen.core import Structure
+            structure = Structure.from_dict(structure)
+        primitive = structure.get_primitive_structure()
+        symmetry = doc.get("symmetry") or {}
+        symbol = (symmetry.get("symbol") if isinstance(symmetry, dict)
+                  else getattr(symmetry, "symbol", None))
+        return {
+            "mp_id": str(doc.get("material_id")),
+            "formula": doc.get("formula_pretty"),
+            "space_group_number": MaterialsProjectBaselines._space_group(doc),
+            "space_group": symbol,
+            "primitive_sites": len(primitive),
+            "volume_per_atom": round(primitive.volume / len(primitive), 4),
+            "poscar": primitive.to(fmt="poscar"),
+        }
+    except Exception as exc:  # noqa: BLE001 - a missing reference must never fail BUILD
+        logger.info("[build] no Materials Project structure for %s: %s",
+                    mp_id or formula, exc)
+        return None

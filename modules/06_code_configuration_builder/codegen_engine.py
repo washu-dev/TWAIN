@@ -534,8 +534,10 @@ Hard requirements:
 structure file. Build the EXACT phase/polymorph named -- if a space group is given, \
 construct THAT structure (e.g. `ase.spacegroup.crystal(...)` with that space group, or \
 pymatgen), and never substitute a different or more common polymorph than the one \
-requested. For a simple element or binary that `ase.build.bulk` supports, use it (it \
-carries the correct experimental lattice constant); otherwise supply the standard \
+requested. For an element or simple binary whose prototype `ase.build.bulk` supports \
+(fcc, bcc, hcp, diamond, zincblende, rocksalt, cesiumchloride, fluorite, wurtzite) you \
+MUST use `ase.build.bulk` -- never `ase.spacegroup.crystal` for those -- because hand-written \
+Wyckoff coordinates are where wrong cells come from; otherwise supply the standard \
 reference lattice parameters and Wyckoff positions for the named polymorph -- these are \
 structural INPUTS that define the cell, not the {property} you compute. Do NOT hardcode \
 the {property} value itself or any other result you are meant to calculate.
@@ -1004,7 +1006,8 @@ class CodegenEngine:
                  require_synthesis: bool = False,
                  calculator_executable: Optional[str] = None,
                  pseudo_library: Optional[str] = None,
-                 parallelism: str = "threads") -> RunBundle:
+                 parallelism: str = "threads",
+                 expected_structure: Optional[dict] = None) -> RunBundle:
         """Build a :class:`RunBundle` from an ExecutionPlan.
 
         ``plan`` may be an ``ExecutionPlan`` dataclass, a plain dict, or a path
@@ -1040,6 +1043,7 @@ class CodegenEngine:
                 calculator_executable=calculator_executable,
                 pseudo_library=pseudo_library,
                 parallelism=parallelism,
+                expected_structure=expected_structure,
             )
         # Library-only run. Prefer a dedicated, tested template when one fits the
         # tool (Pymatgen/ASE/RDKit). Otherwise, if the plan asks for a real property
@@ -1068,6 +1072,7 @@ class CodegenEngine:
                 plan, libraries, None, None, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
                 require_synthesis=require_synthesis,
+                expected_structure=expected_structure,
             )
         bundle = self._generate_standard(plan, tool_name, intent=intent)
         # (b) The backstop. Any route to the placeholder scaffold is refused when
@@ -1135,7 +1140,8 @@ class CodegenEngine:
                                   require_synthesis: bool = False,
                                   calculator_executable: Optional[str] = None,
                                   pseudo_library: Optional[str] = None,
-                                  parallelism: str = "threads") -> RunBundle:
+                                  parallelism: str = "threads",
+                                  expected_structure: Optional[dict] = None) -> RunBundle:
         generated_at = (plan.get("metadata") or {}).get("timestamp", "") or ""
         acceptance = plan.get("acceptance_metrics", []) or []
         requested_property = plan.get("requested_property") or "the requested property"
@@ -1248,6 +1254,14 @@ class CodegenEngine:
             helpers["twain_pseudo.py"] = _bundle_helper_source("twain_pseudo")
         if wants_cycle:
             helpers["twain_thermo.py"] = _bundle_helper_source("twain_thermo")
+        if expected_structure:
+            # The structure guard (bundle_helpers/twain_structure_guard.py): the
+            # job checks the cell it hands the calculator against the reference
+            # before computing anything (run 75f06090 computed a wrong "diamond
+            # Si" for real). sitecustomize.py installs it at interpreter start-up.
+            helpers["twain_structure_guard.py"] = _bundle_helper_source("twain_structure_guard")
+            helpers["sitecustomize.py"] = _bundle_helper_source("sitecustomize")
+            helpers["twain_expected_structure.json"] = json.dumps(expected_structure, indent=2)
         # A calculator run executes in the heavy sim env; a library-only run runs on
         # the default interpreter (where its library is installed) -- record that so
         # provenance and run guidance point at the right environment.
