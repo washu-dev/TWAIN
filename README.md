@@ -147,7 +147,7 @@ ones:
 | `TWAIN_DISPATCH` | API, worker | `db` (Postgres queue, local) or `sqs` (cloud) |
 | `TWAIN_EXECUTE_SLURM=1` | worker | Run on RIS Compute2 (the cloud default) |
 | `TWAIN_STAGING=s3`, `TWAIN_RUN_BUCKET` | worker, API | Job files move through S3 with presigned URLs |
-| `TWAIN_ENV_FILE` | worker | `twain.sh` on RIS, which jobs source (`CODE_DIR`, `TWAIN_ENVS_ROOT`) |
+| `TWAIN_ENV_FILE` | worker | `twain.sh` on RIS, which jobs source (`TWAIN_HOME`, `TWAIN_ENVS_ROOT`) |
 | `TWAIN_INVENTORY_HOURS` / `_MAX_AGE_HOURS` | worker | How often RIS is inventoried (24 h), and when planning falls back to the specs (168 h) |
 | `TWAIN_RUNTIME_REPAIR_ATTEMPTS` | worker | Repair rounds after a script crash (default 2; 0 disables) |
 | `TWAIN_NOTIFY_BACKEND`, `TWAIN_NOTIFY_FROM` | worker | `log` or `sendgrid` (plus `ses`/`sns`); the email sender |
@@ -219,7 +219,7 @@ CI runs all of these on every pull request (see [Deploying](#deploying)).
 | Symptom | Look at |
 |---|---|
 | The chat never leaves INTAKE | `/ecs/twain-runner`: is the worker up (`worker up: …`)? Is SQS sending working (`/ecs/twain-api`, "SQS send … failed")? |
-| A run fails on RIS | The failure card: exception, job stdout/stderr, Reproduce on RIS. Exit 3 = `twain.sh`/`CODE_DIR`, 4 = stale checkout (`git -C $CODE_DIR pull`), 6 = bundle download, 7 = output upload |
+| A run fails on RIS | The failure card: exception, job stdout/stderr, Reproduce on RIS. Exit 3 = `twain.sh` unreadable, 6 = bundle download, 7 = output upload (4 = stale checkout, only on jobs submitted before #196) |
 | Plans pick environments that don't exist | `SELECT taken_at, status FROM ris_inventory ORDER BY id DESC LIMIT 3;`, and the worker log line `planning from …` |
 | No emails | Repository variables `TWAIN_NOTIFY_BACKEND=sendgrid` and `TWAIN_NOTIFY_FROM`, the `TWAIN/sendgrid/API_KEY` secret, and the user's notification preferences |
 

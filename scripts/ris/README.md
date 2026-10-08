@@ -13,8 +13,8 @@ Everything TWAIN owns is under **`/storage2/fs1/mdan/Active/common/projects/twai
 
 ```
 $TWAIN_HOME/
-  TWAIN/                       CODE_DIR: a git checkout of this repo (keep it on master)
-    twain.sh -> twain-ris.sh   sourced by every job: TWAIN_HOME, CODE_DIR, TWAIN_ENVS_ROOT, ...
+  TWAIN/                       CODE_DIR: a git checkout of this repo (for maintenance scripts)
+    twain.sh -> twain-ris.sh   sourced by every job: TWAIN_HOME, TWAIN_ENVS_ROOT, ...
   twain-envs/                  TWAIN_ENVS_ROOT
     <env> -> .versions/<v>/<env>   what jobs run: abinit cp2k default dftbplus gpaw nwchem psi4 qe
     .versions/<v>/<env>            real conda prefixes, never edited in place
@@ -32,19 +32,19 @@ $TWAIN_HOME/
   misleading there.
 
 **`twain.sh`** is the deployment's configuration on RIS. The worker points
-jobs at it through `TWAIN_ENV_FILE`. **Jobs need `CODE_DIR`** (and
-`TWAIN_HOME`); `TWAIN_ENVS_ROOT` is optional and defaults to the cluster
-profile's `envs_root`. Keep secrets out of it, because it's world-readable.
+jobs at it through `TWAIN_ENV_FILE`. Jobs use `TWAIN_HOME` and, optionally,
+`TWAIN_ENVS_ROOT` (default: the cluster profile's `envs_root`). `CODE_DIR`
+is for the maintenance scripts you run by hand, and needn't track master. Keep secrets out of it, because it's world-readable.
 Template: [`twain.sh.example`](twain.sh.example).
 
 ## What a job does on a compute node
 
-1. Source `twain.sh`. Exit **3** if it's unreadable or `CODE_DIR` isn't a
-   checkout.
-2. **Stale-checkout guard:** `CODE_DIR` must contain the commit that submitted
-   the job (`TWAIN_EXPECTED_SHA`). Otherwise exit **4**, with the
-   `git -C $CODE_DIR pull` to run.
-3. `$CODE_DIR/scripts/ris/job_wrapper.sh` exchanges the job's ticket at
+1. Source `twain.sh`. Exit **3** if it's unreadable.
+2. Run the **job wrapper embedded in the job script**. The worker ships
+   `scripts/ris/job_wrapper.sh` from its own image (#196), so jobs never read a
+   checkout on RIS and nothing has to be pulled after a deploy. The log notes
+   `submitted by TWAIN@<sha>`.
+3. The wrapper exchanges the job's ticket at
    `POST /api/job-tickets/urls` for presigned links and downloads
    `input/bundle.tar.gz`. Exit **6** if that fails.
 4. `twain_payload.sh` (from the bundle) picks an environment: the first
@@ -60,7 +60,7 @@ next step.
 
 | Script | Use |
 |---|---|
-| `job_wrapper.sh` | Runs on the compute node (above). Read from `CODE_DIR`, so pull after merging changes to it |
+| `job_wrapper.sh` | Runs on the compute node (above). Embedded in each job by the worker; never read from the RIS checkout |
 | `inventory.sh` | **Read-only** inventory of every env (version, Python, conda + pip packages) and `module spider`. The worker submits it daily; planning uses the result (`ris_inventory`) |
 | `envs/*.yml` | The environment specs: the source of truth for what each env should contain. Changing one is a shared-environment change and **needs approval** (`TWAIN_ENV_APPROVERS`) |
 | `rebuild_envs.sh` | **The way to change an env:** `build <version> <env>` → `verify` → `promote` → (`rollback`). Builds beside the live version, copies instead of hard-linking, uses a fresh cache per build, and verifies imports, binaries, a functional check (e.g. AM1-BCC on ethanol for `nwchem`) and ACLs. See [`runner/README.md`](../../runner/README.md#rebuilding-a-shared-env-build-beside-verify-promote) |

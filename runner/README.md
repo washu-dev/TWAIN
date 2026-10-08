@@ -507,8 +507,8 @@ scales horizontally; RDS and S3 hold everything a run needs.
    worker's task role, the API's send permission, the log group, and the
    `twain-runner` ECS service (in the API's subnets/security group).
 2. Set the repo variable `TWAIN_ENV_FILE` to the path of your `twain.sh` on RIS
-   storage (`gh variable set TWAIN_ENV_FILE --body /storage2/.../twain.sh`), and
-   make sure `$CODE_DIR` in it is a current checkout (`git -C "$CODE_DIR" pull`).
+   storage (`gh variable set TWAIN_ENV_FILE --body /storage2/.../twain.sh`).
+   Jobs embed their own wrapper (#196), so no checkout on RIS needs updating.
 3. Merge -- `ci-runner.yml` builds the worker image (without the `sim` stack:
    calculations and smoke tests run on RIS) and deploys it to the service.
 4. Check the worker's log (`/ecs/twain-runner`): `worker up: 2 consumers` and
@@ -533,9 +533,9 @@ run bucket (`terraform output run_bucket_name`) instead of rsync:
    attempt (random, only its hash is stored, expires after the wait budget plus
    the wall time), and submits a tiny script through the RIS API;
 2. **the job** sources `$TWAIN_ENV_FILE` (`twain.sh`, owner-managed, mode 640 --
-   template: `scripts/ris/twain.sh.example`), checks that `$CODE_DIR` contains
-   the commit that submitted it (exit 4 with `git pull` otherwise), and runs
-   `$CODE_DIR/scripts/ris/job_wrapper.sh`: it trades the ticket at
+   template: `scripts/ris/twain.sh.example`) and runs the job wrapper, which the
+   worker **embeds in the job script** (#196). No checkout on RIS is read, so
+   nothing has to be pulled after a deploy. The wrapper trades the ticket at
    `POST /api/job-tickets/urls` for presigned URLs (GET `input/`, PUT `output/`
    only), unpacks the bundle in node scratch, picks an env and **smoke-tests it in
    the job** (exit 2 = missing dependency), runs `main.py`, and uploads
@@ -543,8 +543,9 @@ run bucket (`terraform output run_bucket_name`) instead of rsync:
 3. the submit side downloads and unpacks the outputs.
 
 No AWS credentials exist on the cluster; the API signs URLs with its task role.
-Wrapper exits the failure card explains: **4** stale RIS checkout, **6** could
-not fetch the bundle, **7** could not upload the outputs. The SSH path (rsync +
+Exits the failure card explains: **3** `twain.sh` unreadable, **6** could not
+fetch the bundle, **7** could not upload the outputs (**4**, a stale RIS
+checkout, only applies to jobs submitted before #196). The SSH path (rsync +
 login-node preflight) is unchanged and remains the default until P2.
 
 ### Legacy: keeping the RIS login-node runner current
