@@ -36,6 +36,11 @@ class Context:
     # the same run is noise -- they already agreed to spend that compute.
     heavy_confirmed: str | None = None
 
+    # Methods this run gave up on (#188): EXECUTE couldn't make them work within
+    # the self-heal budget, so the run re-planned without them. Each entry is
+    # {"method", "libraries", "calculator", "reason", "last_attempt"}.
+    failed_methods: list = field(default_factory=list)
+
     artifacts: dict[str, str] = field(default_factory=dict)
     # {"intent_spec": "<repo>/logs/artifacts/intent_spec_<run_id>.json"}
 

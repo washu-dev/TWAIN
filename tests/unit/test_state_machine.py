@@ -167,6 +167,7 @@ class TestGuardTable:
         (State.BUILD, State.REPAIR),
         (State.REPAIR, State.EXECUTE),
         (State.EXECUTE, State.INTERPRET),
+        (State.EXECUTE, State.REPLAN),
         (State.INTERPRET, State.VALIDATE),
         (State.VALIDATE, State.ACCEPT),
         (State.VALIDATE, State.REPLAN),
@@ -1327,6 +1328,80 @@ class TestExecuteSelfHeals:
             m.execute()
         assert len(m._execution_adapter.calls) == 1
         assert m._script_doctor.failures == []
+
+
+class TestMethodFallback:
+    """EXECUTE gives up on a method it can't make work and re-plans without it (#188)."""
+
+    H = TestExecuteSelfHeals
+
+    def _machine(self, tmp_path, results, failed_methods=()):
+        m, bundle_dir = self.H._machine(self.H(), tmp_path, results)
+        # Library-only (a heavy calculator would stop at the heavy-run prompt).
+        plan = {"selected_method": {"tool_name": "RDKit", "libraries": ["RDKit"],
+                                    "calculator": None}}
+        m.context.artifacts["execution_plan"] = m._write_artifact("execution_plan", plan)
+        m.context.failed_methods = list(failed_methods)
+        return m, bundle_dir
+
+    def _same_failure(self, m):
+        fixes = iter(f"print('fix {i}')\n" for i in range(10))
+        m._script_doctor.repair_runtime = lambda src, failure: next(fixes)
+
+    def test_a_method_that_keeps_failing_is_abandoned_for_a_replan(self, tmp_path):
+        m, _ = self._machine(tmp_path, [self.H._failed(self.H())])
+        self._same_failure(m)
+        assert m.execute() == State.REPLAN
+        assert m.context.execution_status is False
+        (gave_up,) = m.context.failed_methods
+        assert (gave_up["method"], gave_up["libraries"], gave_up["last_attempt"]) == \
+            ("rdkit", ["RDKit"], 2)
+        assert "self_heal" not in m.context.artifacts         # the next method starts clean
+        assert SM.GUARDS[(State.EXECUTE, State.REPLAN)](m.context)
+
+    def test_the_budget_running_out_on_a_script_failure_falls_back(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TWAIN_SELF_HEAL_ATTEMPTS", "0")
+        m, _ = self._machine(tmp_path, [self.H._failed(self.H())])
+        assert m.execute() == State.REPLAN
+
+    def test_only_one_fallback_by_default(self, tmp_path):
+        m, _ = self._machine(tmp_path, [self.H._failed(self.H())],
+                             failed_methods=[{"method": "xtb", "last_attempt": 2}])
+        self._same_failure(m)
+        with pytest.raises(Exception):
+            m.execute()
+
+    def test_fallback_can_be_switched_off(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TWAIN_METHOD_FALLBACKS", "0")
+        m, _ = self._machine(tmp_path, [self.H._failed(self.H())])
+        self._same_failure(m)
+        with pytest.raises(Exception):
+            m.execute()
+
+    def test_a_failure_that_isnt_the_methods_still_stops(self, tmp_path):
+        from execution_adapter.execution_result import ExecutionResult, ExecutionStatus
+        setup = ExecutionResult(status=ExecutionStatus.SETUP_FAILED, exit_code=6,
+                                stderr="TWAIN_BUNDLE_FETCH_FAILED: 403")
+        m, _ = self._machine(tmp_path, [setup])
+        with pytest.raises(Exception):
+            m.execute()
+        assert m.context.failed_methods == []
+
+    def test_the_next_methods_budget_counts_from_where_the_last_ended(self, tmp_path, monkeypatch):
+        # Job attempts are numbered per run (5, 6, ...); the new method still
+        # gets its full self-heal budget.
+        monkeypatch.setenv("TWAIN_METHOD_FALLBACKS", "2")
+        fails = [self.H._failed_with(self.H(), n) for n in "ABC"]
+        for i, r in enumerate(fails):
+            r.install_log = {"attempt": 5 + i}
+        ok = self.H._ok(self.H())
+        ok.install_log = {"attempt": 8}
+        m, _ = self._machine(tmp_path, [*fails, ok],
+                             failed_methods=[{"method": "xtb", "last_attempt": 4}])
+        fixes = iter(f"print('fix {i}')\n" for i in range(10))
+        m._script_doctor.repair_runtime = lambda src, failure: next(fixes)
+        assert m.execute() == State.INTERPRET
+        assert len(m._execution_adapter.calls) == 4
 
 
 class TestClusterEngineDataIsProvisioned:

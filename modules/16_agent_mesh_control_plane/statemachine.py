@@ -117,6 +117,44 @@ def use_cluster_inventory(envs: Optional[dict], taken_at: Optional[str] = None) 
     _CLUSTER_INVENTORY_TAKEN = taken_at
 
 
+# What each method has done on this deployment's cluster (#188): a callable
+# ``requested_property -> [{method, calculator, libraries, completed, accepted,
+# failed}]`` the runner installs (runner/method_history.py). None offline.
+_METHOD_HISTORY: Optional[Callable[[str], list]] = None
+
+
+def use_method_history(fn: Optional[Callable[[str], list]]) -> None:
+    global _METHOD_HISTORY
+    _METHOD_HISTORY = fn
+
+
+def property_key(requested_property) -> str:
+    """A property name as the method history keys it ("Band gap" -> "band_gap")."""
+    return re.sub(r"[^a-z0-9]+", "_", str(requested_property or "").lower()).strip("_")
+
+
+def history_key(requested_property, acceptance_metrics=None) -> str:
+    """What the method history files a run under: its canonical property, else its
+    first acceptance metric (a solubility request has no canonical property)."""
+    if requested_property:
+        return property_key(requested_property)
+    for metric in acceptance_metrics or []:
+        if isinstance(metric, dict) and metric.get("metric_name"):
+            return property_key(metric["metric_name"])
+    return ""
+
+
+def _proven_methods(key: str) -> list:
+    """Methods that have completed for this history key here, best record first."""
+    if _METHOD_HISTORY is None or not key:
+        return []
+    try:
+        return list(_METHOD_HISTORY(key) or [])
+    except Exception as exc:  # noqa: BLE001 - planning goes on without history
+        logger.warning("[plan] method history unavailable: %s", exc)
+        return []
+
+
 def cluster_env_source() -> str:
     """Where planning's view of the cluster envs comes from, for notes and logs."""
     if _CLUSTER_INVENTORY is not None:
@@ -656,7 +694,9 @@ _STAGE_OUTPUTS: dict[State, dict[str, list[str]]] = {
     State.CLARIFY:   {"artifacts": [], "flags": ["clarified"]},
     State.DECOMPOSE: {"artifacts": ["goal_graph", "goal_graph_error"], "flags": []},
     State.DISCOVER:  {"artifacts": ["discovery"], "flags": []},
-    State.PLAN:      {"artifacts": ["execution_plan"], "flags": []},
+    # A re-run from PLAN (or earlier) is the researcher taking over the method
+    # choice, so it forgets the methods an automatic fallback gave up on.
+    State.PLAN:      {"artifacts": ["execution_plan"], "flags": ["failed_methods"]},
     State.BUILD:     {"artifacts": ["run_bundle", "script", "repair_report",
                                     "codegen_report"],
                       "flags": ["plan_approved", "approved_plan"]},
@@ -692,6 +732,9 @@ GUARDS: dict[tuple[State, State], "Callable[[Context], bool]"] = {
     (State.BUILD, State.REPAIR): lambda c: c.plan_approved,
     (State.REPAIR, State.EXECUTE): lambda c: c.plan_approved,
     (State.EXECUTE, State.INTERPRET): lambda c: c.execution_status,
+    # Method fallback (#188): the method couldn't be made to work; re-plan
+    # without it (and back through the approval gate, since the method changed).
+    (State.EXECUTE, State.REPLAN): lambda c: c.execution_status is False and bool(c.failed_methods),
     (State.INTERPRET, State.VALIDATE): lambda c: True,
     (State.VALIDATE, State.ACCEPT): lambda c: c.validation_result == "accepted",
     (State.VALIDATE, State.REPLAN): lambda c: c.validation_result == "rejected",
@@ -891,8 +934,20 @@ class StateMachine:
             verdict = observer.bundle_gate(
                 plan, Path(bundle_dir), template=self._bundle_config(bundle_dir).get("template"),
                 periodic=_is_periodic(sysd))
+            main = Path(bundle_dir) / "main.py"
+            if not verdict.failed and main.is_file():
+                observer.llm_script_check(verdict, self._reviewer(), request=self._review_text(),
+                                          plan=plan, main_py=main.read_text(encoding="utf-8"))
         else:
-            verdict = observer.outputs_gate(self._load_artifact("execution_result"))
+            result = self._load_artifact("execution_result")
+            verdict = observer.outputs_gate(result)
+            if not verdict.failed:
+                observer.llm_outputs_check(verdict, self._reviewer(), request=self._review_text(),
+                                           plan=plan, execution_result=result)
+                if verdict.warnings and isinstance(result, dict):
+                    result["observer_warnings"] = [c.detail for c in verdict.warnings]
+                    self.context.artifacts["execution_result"] = self._write_artifact(
+                        "execution_result", result)
         for check in verdict.checks:
             mark = {"pass": "✓", "warn": "⚠", "fail": "✕"}[check.status]
             self._progress(stage, f"observer.{check.name}",
@@ -904,6 +959,18 @@ class StateMachine:
                 f"the observer stopped the run before {nxt.name}: {reasons}",
                 "Re-run from PLAN or BUILD after addressing this -- nothing was submitted "
                 "to the cluster.")
+
+    def _review_text(self):
+        """What the researcher asked, for the reviewer: the request this machine was
+        started with, else what the driver read back on resume (``review_request``)."""
+        return getattr(self, "_request", None) or getattr(self, "review_request", None)
+
+    def _reviewer(self):
+        """The observer's LLM: the same model, a fresh prompt each time (no shared
+        conversation), or None offline -- the machine never builds one just to review."""
+        if getattr(self, "_agent", None) is None:
+            return None
+        return lambda prompt: self._agent_text(prompt, max_tokens=300)
 
     def _note_on_plan(self, plan: dict, verdict) -> None:
         """Put the observer's PLAN warnings on the plan card, once."""
@@ -1831,6 +1898,14 @@ class StateMachine:
         honoured_requests, missing_requests = self._installed_libraries(
             ranked, self._requested_libraries(intent))
         ranked = self._prefer_requested(ranked, honoured_requests)
+        # Methods this run already gave up on (#188 fallback) are out of the running.
+        failed_methods = self._failed_methods()
+        avoid = {m.get("method") for m in failed_methods if m.get("method")}
+        if avoid:
+            ranked = [c for c in ranked if c.entry.name.lower() not in avoid
+                      and str(c.entry.id).lower() not in avoid]
+            if not ranked:
+                raise self._no_method_left(failed_methods)
 
         requested_property = self._requested_property(intent)
         domain = (intent.get("domain") or "").lower() or None
@@ -1855,8 +1930,25 @@ class StateMachine:
             for name in preempted_uninstalled
         ]
 
+        proven = [p for p in _proven_methods(history_key(
+                      requested_property, intent.get("acceptance_metrics")))
+                  if str(p.get("method") or "").lower() not in avoid]
+        if proven and not honoured_requests:
+            # The deterministic pick prefers a proven library-only method too (the
+            # researcher's own named software, when there is some, still comes first).
+            proven_libs = [str(p["method"]).lower() for p in proven if not p.get("calculator")]
+            ranked = sorted(ranked, key=lambda c: (
+                proven_libs.index(c.entry.name.lower()) if c.entry.name.lower() in proven_libs
+                else len(proven_libs)))
         recommendation = self._llm_recommend(intent, ranked, requested_property, domain,
-                                             platform, requested_libraries=honoured_requests)
+                                             platform, requested_libraries=honoured_requests,
+                                             proven=proven)
+        if recommendation is not None and avoid:
+            rec_calc = find_calculator(recommendation.calculator)
+            rec_key = (rec_calc.name if rec_calc else recommendation.calculator
+                       or (recommendation.libraries or [""])[0])
+            if str(rec_key or "").lower() in avoid:
+                recommendation = None       # it picked the method that just failed
         if recommendation is not None:
             # Ground every library the model named -- not just the primary, since an
             # uninstalled supporting library would fail the bundle just as surely.
@@ -1907,10 +1999,18 @@ class StateMachine:
         else:
             libraries, calc_entry, calculator_library, blocked_calcs = (
                 self._select_toolset(
-                    ranked, requested_property, domain, platform=platform))
+                    ranked, requested_property, domain, platform=platform, avoid=avoid,
+                    prefer=[str(p.get("calculator")).lower() for p in proven
+                            if p.get("calculator")]))
             cluster_blocked.extend(blocked_calcs)
             primary = ranked[0]
-            selection_note = None
+            # Say why, as the LLM path does: the same request should be able to
+            # explain its method, run to run.
+            selection_note = (
+                f"Chosen by the discovery ranking: {primary.entry.name} ranks first for "
+                f"{', '.join(query.capability_tags) or 'this request'}"
+                + (f", with {calc_entry.name}, the best-ranked calculator for "
+                   f"'{requested_property}' that runs here" if calc_entry is not None else ""))
 
         # A calculator run executes in the sim env, so its toolset must import
         # THERE, not just in the default env the candidate grounding checked. Drop
@@ -2186,6 +2286,31 @@ class StateMachine:
                     f"with nothing behind it.")
         execution_plan.summary = self._compose_plan_summary(
             intent, requested_property, libraries, calc_entry, recommendation)
+        # Say whether this method has a track record here (#188).
+        chosen_key = self._method_key(asdict(execution_plan))
+        record = next((p for p in proven if str(p.get("method") or "").lower() == chosen_key),
+                      None)
+        if record:
+            execution_plan.safety_notes.append(
+                f"Track record: {record.get('calculator') or chosen_key} has completed "
+                f"{record.get('completed')} run(s) like this one on this cluster "
+                f"({record.get('accepted')} accepted by validation).")
+        elif proven:
+            best = proven[0]
+            execution_plan.safety_notes.append(
+                f"Not the proven method: {best.get('calculator') or best.get('method')} has "
+                f"completed {best.get('completed')} run(s) like this one here, "
+                f"but this plan uses {chosen_key} (the selection note says why).")
+        if failed_methods:
+            new_key = chosen_key
+            if new_key in avoid:
+                raise self._no_method_left(failed_methods)
+            gave_up = failed_methods[-1]
+            execution_plan.safety_notes.insert(0, (
+                f"Method changed: {gave_up.get('calculator') or gave_up['method']} couldn't be "
+                f"made to work for this run ({gave_up.get('reason')}), so TWAIN re-planned "
+                f"with {calc_entry.name if calc_entry is not None else libraries[0]}. This is a "
+                f"different method from the one you approved; it runs only if you approve it."))
 
         if self.execute_slurm:
             # The whole toolset must fit ONE cluster env (+ pip): each library can
@@ -2243,7 +2368,7 @@ class StateMachine:
         return None
 
     def _llm_recommend(self, intent, ranked, requested_property, domain, platform,
-                       requested_libraries=None):
+                       requested_libraries=None, proven=None):
         """Ask the LLM to pick a toolset, grounded by platform availability.
 
         Returns a ToolRecommendation, or None (no agent wired, or the pick
@@ -2274,13 +2399,14 @@ class StateMachine:
                 objective=intent.get("objective", ""), material=material, domain=domain,
                 requested_property=requested_property, platform=platform,
                 libraries=library_candidates, calculators=calc_candidates,
-                requested_libraries=requested_libraries,
+                requested_libraries=requested_libraries, proven=proven,
                 agent=self._agent_text,
             )
         except Exception:  # noqa: BLE001 - any failure -> deterministic fallback
             return None
 
-    def _select_toolset(self, ranked, requested_property, domain, platform=None):
+    def _select_toolset(self, ranked, requested_property, domain, platform=None, avoid=(),
+                        prefer=()):
         """Assemble a compatible toolset from the discovery ranking.
 
         Returns ``(libraries, calculator_entry_or_None,
@@ -2308,6 +2434,12 @@ class StateMachine:
         if platform is None:
             platform = current_platform()
         covering = calculators_for_property(requested_property, domain=domain, platform=platform)
+        # A calculator this run already gave up on (#188 fallback) isn't offered again.
+        covering = [c for c in covering if c.name.lower() not in avoid]
+        # ... and one that has completed for this property here comes first (#188).
+        prefer = list(prefer)
+        covering.sort(key=lambda c: prefer.index(c.name.lower()) if c.name.lower() in prefer
+                      else len(prefer))
         blocked = []
         if self.execute_slurm:
             # Report only calculators that outrank the best runnable one (they
@@ -2780,16 +2912,23 @@ class StateMachine:
         # artifact, so a detached run -- re-entering here on every resume, maybe
         # on another worker -- keeps its history and its repeat detection.
         history = list(self._load_artifact("self_heal") or [])
+        # Job attempts are numbered per run, across methods (they name the S3
+        # prefixes); a fallback method's budget starts where the last one ended.
+        base = max([int(m.get("last_attempt") or 0) for m in self._failed_methods()] or [0])
         while True:
             attempt += 1
             result = adapter.execute(bundle_dir, **run_kwargs)
             # A detached run (P2) pauses between attempts and re-enters here on
             # every resume, so a local counter would restart at 1 and the repair
             # budget would never run out: trust the attempt the job was.
-            attempt = int((getattr(result, "install_log", None) or {}).get("attempt") or attempt)
+            job_attempt = (getattr(result, "install_log", None) or {}).get("attempt")
+            if job_attempt:
+                attempt = int(job_attempt) - base
+            triaged = False
             if result.succeeded or attempt >= attempts:
                 break
             if not self._self_heal_step(bundle_dir, result, attempt, attempts, history):
+                triaged = True
                 break
         result_doc = result.to_dict()
         if history:
@@ -2798,6 +2937,9 @@ class StateMachine:
             "execution_result", result_doc
         )
         self.context.execution_status = bool(result.succeeded)
+        if not result.succeeded and self._fall_back_from_method(
+                result, history, last_attempt=base + attempt, triaged=triaged):
+            return State.REPLAN
         if not result.succeeded:
             # Surface the *real* reason (missing deps, script error, resource
             # limits) with next steps, rather than letting the EXECUTE->INTERPRET
@@ -2820,6 +2962,78 @@ class StateMachine:
             "stage": stage, "step": step, "status": status,
             "label": label, "detail": detail,
         })
+
+    @staticmethod
+    def _no_method_left(failed_methods: list):
+        tried = ", ".join(m.get("calculator") or m.get("method") for m in failed_methods)
+        return _config_error(
+            f"no other method fits this request: TWAIN tried {tried} and couldn't make it "
+            f"work ({failed_methods[-1].get('reason')})",
+            "Re-run from PLAN to choose the method yourself (name a library or calculator "
+            "in your request), or from EXECUTE once the failure is fixed.")
+
+    def _failed_methods(self) -> list:
+        return list(getattr(self.context, "failed_methods", None) or [])
+
+    @staticmethod
+    def _method_key(plan: dict) -> str:
+        """A method's identity for fallback: its calculator, else its primary library."""
+        method = (plan or {}).get("selected_method") or {}
+        libraries = method.get("libraries") or []
+        name = (method.get("calculator") or (libraries[0] if libraries else None)
+                or method.get("tool_name") or "")
+        return str(name).strip().lower()
+
+    @staticmethod
+    def _method_fallback_budget() -> int:
+        """How many times a run may switch method after one fails (default 1; 0 = never)."""
+        try:
+            return max(0, int(os.getenv("TWAIN_METHOD_FALLBACKS", "1")))
+        except ValueError:
+            return 1
+
+    def _fall_back_from_method(self, result, history: list, *, last_attempt: int,
+                               triaged: bool) -> bool:
+        """Give up on this plan's method and re-plan without it? (#188)
+
+        Only for a failure of the METHOD -- the script couldn't be made to work
+        (a script-class failure after the self-heal budget, or the same failure
+        twice). A setup problem, a shared-environment need or a resource limit
+        is not the method's fault and another method wouldn't escape it: those
+        stop, as before. The new plan is a different method, so the approval is
+        withdrawn and the researcher sees it before anything runs.
+        """
+        failed = self._failed_methods()
+        if len(failed) >= self._method_fallback_budget():
+            return False
+        last = history[-1] if history else None
+        if triaged:
+            if (last or {}).get("class") != triage.SCRIPT:
+                return False
+        else:
+            # The budget ran out before the last attempt was triaged: judge it now.
+            final = triage.diagnose(triage.evidence(result), pip_gettable=lambda m: False)
+            if final.cls != triage.SCRIPT:
+                return False
+            last = {"reason": final.reason}
+        plan = self._load_artifact("execution_plan") or {}
+        key = self._method_key(plan)
+        if not key or key in {m.get("method") for m in failed}:
+            return False
+        method = plan.get("selected_method") or {}
+        why = (last or {}).get("reason") or "the script kept failing"
+        failed.append({"method": key, "libraries": list(method.get("libraries") or []),
+                       "calculator": method.get("calculator"), "reason": why,
+                       "last_attempt": last_attempt})
+        self.context.failed_methods = failed
+        # The next method starts with a clean self-heal record.
+        self.context.artifacts.pop("self_heal", None)
+        self._progress("EXECUTE", "fallback", "failed",
+                       f"{method.get('calculator') or key} couldn't be made to work ({why}); "
+                       f"re-planning with the next method -- it will need your approval")
+        logger.info("[execute] method %s abandoned after attempt %s: %s; re-planning",
+                    key, last_attempt, why)
+        return True
 
     def _runtime_repair_budget(self) -> int:
         """How many fix-and-re-execute rounds a failed run may consume (default 3).

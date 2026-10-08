@@ -8,6 +8,10 @@ SHA-256, bound to one gate message, single-use (every sibling button is spent
 with it), short-lived, and refused once the run is no longer waiting on that
 exact question -- answered in the app, re-planned, or terminated.
 
+The same tokens answer a shared-environment change proposal (#187: approve /
+reject, spent across every approver's email at once) and offer a finished run's
+owner a re-run from EXECUTE once the change is live.
+
 GET never acts. WashU mail is scanned by Microsoft Safe Links, which opens every
 link in a message before the reader does; a GET that approved would let the
 scanner approve runs.
@@ -32,6 +36,11 @@ _VERB = {
     "no": "not run the heavy calculation now",
     "accept": "accept the result as it stands",
     "rerun": "spend another correction pass on the result",
+    "EXECUTE": "re-run the calculation from EXECUTE",
+}
+_PROPOSAL_VERB = {
+    "approve": "approve this shared-environment change (TWAIN builds, verifies, then switches)",
+    "reject": "reject this shared-environment change (nothing on RIS is touched)",
 }
 
 #: Security headers for every page this module serves.
@@ -52,6 +61,10 @@ class Action:
     choice: str | None = None
     label: str | None = None
     title: str | None = None
+    proposal_id: int | None = None
+    proposal: str | None = None   # "add <package> to <env>", for the pages
+    recipient: str | None = None
+    user_id: str | None = None
 
 
 def token_hash(token: str) -> str:
@@ -60,14 +73,24 @@ def token_hash(token: str) -> str:
 
 _LOOKUP = """
     SELECT a.session_id::text AS session_id, a.gate_message_id, a.gate_kind, a.choice, a.label,
-           a.used_at, a.expires_at < now() AS expired, c.title,
-           (c.status IN ('awaiting_approval', 'awaiting_input') AND a.gate_message_id = (
-               SELECT m.id FROM messages m
-               WHERE m.conversation_id = a.session_id
-                 AND m.kind IN ('clarification', 'heavy_confirm', 'validation_gate',
-                                'revision_request', 'approval_request')
-               ORDER BY m.id DESC LIMIT 1)) AS pending
-    FROM email_actions a JOIN conversations c ON c.id = a.session_id
+           a.used_at, a.expires_at < now() AS expired, c.title, c.user_id::text AS user_id,
+           a.proposal_id, a.recipient,
+           CASE WHEN p.id IS NULL THEN NULL
+                ELSE 'add ' || p.package || ' to the shared ' || p.env || ' environment' END
+               AS proposal,
+           CASE a.gate_kind
+               WHEN 'env_change' THEN p.status = 'pending'
+               WHEN 'rerun' THEN c.status IN ('completed', 'error', 'rejected', 'cancelled')
+               ELSE c.status IN ('awaiting_approval', 'awaiting_input') AND a.gate_message_id = (
+                   SELECT m.id FROM messages m
+                   WHERE m.conversation_id = a.session_id
+                     AND m.kind IN ('clarification', 'heavy_confirm', 'validation_gate',
+                                    'revision_request', 'approval_request')
+                   ORDER BY m.id DESC LIMIT 1)
+           END AS pending
+    FROM email_actions a
+    LEFT JOIN conversations c ON c.id = a.session_id
+    LEFT JOIN env_proposals p ON p.id = a.proposal_id
     WHERE a.token_hash = %s
 """
 
@@ -78,7 +101,8 @@ def _state(row) -> Action:
     state = ("used" if row["used_at"] is not None else "expired" if row["expired"]
              else "ok" if row["pending"] else "answered")
     return Action(state, row["session_id"], row["gate_message_id"], row["gate_kind"],
-                  row["choice"], row["label"], row["title"])
+                  row["choice"], row["label"], row["title"], row["proposal_id"],
+                  row["proposal"], row["recipient"], row["user_id"])
 
 
 def peek(token: str) -> Action:
@@ -102,13 +126,34 @@ def consume(token: str) -> Action:
         if action.state != "ok":
             conn.rollback()
             return action
-        cursor.execute(
-            "UPDATE email_actions SET used_at = now() "
-            "WHERE session_id = %s AND gate_message_id = %s AND used_at IS NULL;",
-            (action.session_id, action.gate_message_id))
+        if action.gate_kind == "env_change":
+            # Every approver's buttons are spent together: one decision per proposal.
+            cursor.execute("UPDATE email_actions SET used_at = now() "
+                           "WHERE proposal_id = %s AND used_at IS NULL;", (action.proposal_id,))
+            cursor.execute(
+                "UPDATE env_proposals SET status = %s, decided_by = %s, decided_at = now() "
+                "WHERE id = %s AND status = 'pending';",
+                ("approved" if action.choice == "approve" else "rejected",
+                 action.recipient, action.proposal_id))
+        elif action.gate_kind == "rerun":
+            cursor.execute("UPDATE email_actions SET used_at = now() WHERE session_id = %s "
+                           "AND gate_kind = 'rerun' AND used_at IS NULL;", (action.session_id,))
+        else:
+            cursor.execute(
+                "UPDATE email_actions SET used_at = now() "
+                "WHERE session_id = %s AND gate_message_id = %s AND used_at IS NULL;",
+                (action.session_id, action.gate_message_id))
         conn.commit()
     finally:
         conn.close()
+    if action.gate_kind == "env_change":
+        return action          # the cluster monitor picks the approved proposal up
+    if action.gate_kind == "rerun":
+        try:
+            convo.rerun_conversation(action.session_id, action.user_id, action.choice)
+        except ValueError:     # it was re-run (or restarted) in the app meanwhile
+            action.state = "answered"
+        return action
     if action.gate_kind == "approval_request":
         convo.add_approval_response(action.session_id, action.choice)
     else:
@@ -137,8 +182,12 @@ def _page(title: str, body: str, session_id: str | None = None) -> str:
 def confirm_page(action: Action) -> str:
     if action.state != "ok":
         return result_page(action)
-    run = html.escape(action.title or "your run")
-    verb = html.escape(_VERB.get(action.choice or "", action.choice or ""))
+    if action.gate_kind == "env_change":
+        run = html.escape(action.proposal or "a shared-environment change")
+        verb = html.escape(_PROPOSAL_VERB.get(action.choice or "", action.choice or ""))
+    else:
+        run = html.escape(action.title or "your run")
+        verb = html.escape(_VERB.get(action.choice or "", action.choice or ""))
     body = (f"<p>For <strong>{run}</strong>, you're about to <strong>{verb}</strong>.</p>"
             "<form method='post'><button type='submit' style='background:#BA0C2F;color:#fff;"
             "border:0;border-radius:6px;padding:12px 22px;font-size:15px;font-weight:600;"
@@ -149,6 +198,15 @@ def confirm_page(action: Action) -> str:
 
 
 def result_page(action: Action, *, done: bool = False) -> str:
+    if done and action.gate_kind == "env_change":
+        text = ("Approved. TWAIN will build the new version beside the live one, verify it, "
+                "and only then switch to it; you'll get an email with the outcome."
+                if action.choice == "approve" else
+                "Rejected. Nothing on RIS will be changed.")
+        return _page("Done", f"<p>{html.escape(text)}</p>", action.session_id)
+    if done and action.gate_kind == "rerun":
+        return _page("Done", "<p>The run is starting again from EXECUTE. You'll get an email "
+                     "when it needs you again or finishes.</p>", action.session_id)
     if done:
         return _page("Done", "<p>Thanks: TWAIN has your answer and the run continues. "
                      "You'll get an email when it needs you again or finishes.</p>",

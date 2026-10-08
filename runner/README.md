@@ -27,6 +27,8 @@ waiting.
 | `worker.py` | ECS entrypoint. Runs `TWAIN_WORKER_CONCURRENCY` SQS consumers (claim the job by id → `process_job` → done or re-queue) plus the monitor thread |
 | `monitor.py` | Cluster monitor, a single leader through a Postgres advisory lock and woken by RIS webhooks (`LISTEN ris_job_events`). Polls `cluster_jobs` through the RIS API, publishes queue/node/log progress, enqueues the resume when a job ends, relays the outbox, reaps orphaned jobs, ticks the inventory |
 | `inventory.py` | Submits `scripts/ris/inventory.sh` daily; ingests it into `ris_inventory`; `apply_latest()` points planning at it |
+| `method_history.py` | What each method did here (#188): records one `method_outcomes` row per run per method when a run ends; points planning at the history so the same request gets the same, proven method |
+| `env_proposals.py` | Shared-environment change proposals (#187): drafted from a triage stop, approved from email, built + verified + promoted by one RIS job from the monitor's tick |
 | `runner.py` | `process_job` (start / resume / rerun slices, suspend, checkpoint, leases, retries) and the polling-runner CLI |
 | `engine.py` | Builds the `Orchestrator` (state machine, LLM client, Postgres store, event sink) from the execution flags |
 | `dispatch.py` | The worker's half of SQS dispatch (re-queue as `dispatching`, send) |
@@ -432,8 +434,33 @@ bash "$S" status
   each. The package cache (`$TWAIN_HOME/.micromamba`, about 6.5 GB) makes
   later builds faster.
 - A shared-env change is an **approved** change: edit the spec, get
-  sign-off from `TWAIN_ENV_APPROVERS`, commit, and then rebuild. #187
-  automates the proposal and approval.
+  sign-off from `TWAIN_ENV_APPROVERS`, commit, and then rebuild.
+
+### Proposals: a failed run asks for the package (#187)
+
+When triage stops a run because a **conda-only** package is missing from the
+env it ran in (`environment / stop`), the worker (`env_proposals.py`) drafts a
+proposal instead of leaving it to a person to notice:
+
+1. **Propose.** The package must exist on conda-forge and not already be in
+   `scripts/ris/envs/<env>.yml`. The proposal (env, package, why, the spec
+   before and after) goes into `env_proposals`. Each approver in
+   `TWAIN_ENV_APPROVERS` gets an email with **Approve** / **Reject** buttons.
+   The same need from another run reuses the open proposal; it doesn't send a
+   second email.
+2. **Decide.** One approver's answer decides: every approver's buttons are
+   spent together. The buttons are the same single-use, hashed, 72-hour
+   tokens as the gate buttons, and GET only shows a confirmation page.
+3. **Roll out.** The cluster monitor's tick (`EnvChangeScheduler`) submits one
+   maintenance job to `general-short`. It embeds `rebuild_envs.sh` and the
+   proposed spec, then runs `build <date>.p<id>` → `verify` → `import <module>`
+   → `promote`. A failure at any step leaves the live env untouched.
+4. **Report.** The approvers get the outcome, and the RIS inventory is marked
+   due so planning sees the new package. The run's owner gets a
+   **Re-run from EXECUTE** button.
+5. **Commit the spec.** The promotion email shows the line to add to
+   `scripts/ris/envs/<env>.yml`. It has to be committed, or the next full
+   rebuild drops the package.
 
 **The specs also gate planning.** Under `TWAIN_EXECUTE_SLURM`, discovery
 only plans around a library whose packages the cluster can actually get:

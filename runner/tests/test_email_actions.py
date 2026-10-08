@@ -2,25 +2,15 @@
 the API's confirmation page and POST answer the gate exactly once."""
 from __future__ import annotations
 
-import importlib
-import os
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 
 import pytest
 
 from runner import email_actions as issuer
+from runner.tests.conftest import pg_available
 
 REPO = Path(__file__).resolve().parents[2]
-
-
-def _pg_available():
-    try:
-        return subprocess.run(["pg_isready", "-h", "localhost"], capture_output=True).returncode == 0
-    except FileNotFoundError:
-        return False
 
 
 class FakeDB:
@@ -60,34 +50,11 @@ class TestIssue:
         assert 'href="https://x/api/actions/t1"' in html and ">Reject</a>" in html
 
 
-@pytest.mark.skipif(not _pg_available(), reason="no local Postgres")
+@pytest.mark.skipif(not pg_available(), reason="no local Postgres")
 class TestAgainstPostgres:
     @pytest.fixture
-    def env(self, monkeypatch):
-        name = f"twain_actions_test_{uuid.uuid4().hex[:8]}"
-        pg = {**os.environ, "PGGSSENCMODE": "disable"}
-        subprocess.run(["createdb", "-h", "localhost", name], check=True, env=pg)
-        for f in sorted((REPO / "api" / "migrations").glob("*.sql")):
-            subprocess.run(["psql", "-h", "localhost", "-d", name, "-q", "-v", "ON_ERROR_STOP=1",
-                            "-f", str(f)], check=True, capture_output=True, env=pg)
-        user = os.environ.get("USER", "postgres")
-        for k, v in {"DB_HOST": "localhost", "DB_NAME": name, "DB_USER": user, "DB_PASSWORD": "",
-                     "DB_PORT": "5432", "TWAIN_DB_FROM_ENV": "true", "TWAIN_DISPATCH": "db"}.items():
-            monkeypatch.setenv(k, v)
-        monkeypatch.delenv("AWS_SECRET_ARN", raising=False)
-        from runner import db as runner_db
-        monkeypatch.setattr(runner_db, "DB_HOST", "localhost")
-        monkeypatch.setattr(runner_db, "DB_NAME", name)
-        monkeypatch.setattr(runner_db, "DB_USER", user)
-        monkeypatch.syspath_prepend(str(REPO / "api"))
-        for mod in ("database", "conversations", "dispatch", "email_actions"):
-            sys.modules.pop(mod, None)
-        api_actions = importlib.import_module("email_actions")
-        db = runner_db.RunnerDB()
-        yield db, api_actions
-        for mod in ("database", "conversations", "dispatch", "email_actions"):
-            sys.modules.pop(mod, None)
-        subprocess.run(["dropdb", "-h", "localhost", name], env=pg)
+    def env(self, pg_actions):
+        return pg_actions
 
     def _run(self, db, kind, status):
         uid = db._query_one("INSERT INTO users (subject, email) VALUES (%s, 'r@wustl.edu') "

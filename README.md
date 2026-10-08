@@ -151,6 +151,8 @@ ones:
 | `TWAIN_INVENTORY_HOURS` / `_MAX_AGE_HOURS` | worker | How often RIS is inventoried (24 h), and when planning falls back to the specs (168 h) |
 | `TWAIN_SELF_HEAL_ATTEMPTS` | worker | Fix-and-re-run rounds after a failed calculation (default 3; 0 disables; `TWAIN_RUNTIME_REPAIR_ATTEMPTS` still works). Triage stops early for setup problems, shared-environment needs, resources, or the same failure twice |
 | `TWAIN_NOTIFY_BACKEND`, `TWAIN_NOTIFY_FROM` | worker | `log` or `sendgrid` (plus `ses`/`sns`); the email sender |
+| `TWAIN_METHOD_FALLBACKS` | worker | How many times a run may switch method when EXECUTE can't make the planned one work (default 1; 0 = never). The new plan always needs approval; a re-run from PLAN clears the list of abandoned methods |
+| `TWAIN_OBSERVER_LLM` | worker | The observer's LLM reviewer (#188): `enforce` (default; a script that doesn't compute what was asked stops before EXECUTE), `warn`, or `0` (off). Doubtful outputs only ever warn |
 | `TWAIN_ENV_APPROVERS` | worker | Who may approve changes to shared RIS environments (default `arifs@wustl.edu`) |
 | `TWAIN_AUTO_RUN=1` | runner | Unattended: skips the approval and heavy-calculation gates (testing only) |
 | `TWAIN_GITHUB_TOKEN` | pipeline | File `LibraryAddition` issues for libraries TWAIN wanted but doesn't have |
