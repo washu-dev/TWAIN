@@ -275,9 +275,42 @@ def make_notifier(db):
         except Exception as exc:  # noqa: BLE001 -- a missing title must not fail the notify
             logger.warning("[notify] title lookup failed for %s: %s", session_id, exc)
             request = None
-        default_notifier(session_id, reason, message, recipient=recipient, request=request)
+        actions = []
+        if reason in ("approval", "input") and _email_backend():
+            from runner import email_actions
+            actions = email_actions.issue(db, session_id)
+        extra = {"actions": actions} if actions else {}
+        default_notifier(session_id, reason, message, recipient=recipient, request=request,
+                         **extra)
 
     return _notifier
+
+
+def _email_backend() -> bool:
+    """Whether notifications go out as email (so gate buttons are worth issuing)."""
+    return os.getenv("TWAIN_NOTIFY_BACKEND", "log").strip().lower() == "sendgrid"
+
+
+def _html_body(subject: str, body: str, actions: list) -> str:
+    """The email as HTML: the message, then one button per choice, then the link."""
+    import html as _html
+    paragraphs = "".join(
+        f'<p style="margin:0 0 12px">{_html.escape(part).replace(chr(10), "<br>")}</p>'
+        for part in body.split("\n\n") if part.strip())
+    buttons = "".join(
+        f'<a href="{_html.escape(a["url"], quote=True)}" style="display:inline-block;'
+        f'margin:4px 8px 4px 0;padding:10px 18px;border-radius:6px;text-decoration:none;'
+        f'font-weight:600;font-size:14px;'
+        + ("background:#BA0C2F;color:#ffffff;border:1px solid #BA0C2F"
+           if a.get("primary") else "background:#ffffff;color:#BA0C2F;border:1px solid #BA0C2F")
+        + f'">{_html.escape(a["label"])}</a>'
+        for a in actions)
+    note = ('<p style="color:#5A5A5A;font-size:12px;margin:16px 0 0">Each button opens a '
+            "short confirmation page -- no sign-in needed. To change the CPUs, memory or "
+            "wall time, open the run instead.</p>") if actions else ""
+    return ('<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px;'
+            f'color:#1A1A1A;max-width:560px">{paragraphs}'
+            f'<div style="margin:16px 0">{buttons}</div>{note}</div>')
 
 
 def _recipient_email(recipient: dict | None, session_id: str = "") -> str | None:
@@ -308,7 +341,7 @@ def _recipient_email(recipient: dict | None, session_id: str = "") -> str | None
 
 def default_notifier(
     session_id: str, reason: str, message: str, recipient: dict | None = None,
-    request: str | None = None,
+    request: str | None = None, actions: list | None = None,
 ) -> None:
     """Dispatch a suspend notification to the run's owner via the configured backend.
 
@@ -326,7 +359,8 @@ def default_notifier(
         elif backend == "ses":
             _notify_ses(session_id, reason, message, recipient, request)
         elif backend == "sendgrid":
-            _notify_sendgrid(session_id, reason, message, recipient, request)
+            _notify_sendgrid(session_id, reason, message, recipient, request,
+                             *([actions] if actions else []))
         else:
             if backend != "log":
                 logger.warning("[notify] unknown TWAIN_NOTIFY_BACKEND %r; logging only", backend)
@@ -413,7 +447,7 @@ def _ensure_env_loaded() -> None:
 
 def _notify_sendgrid(
     session_id: str, reason: str, message: str, recipient: dict | None = None,
-    request: str | None = None,
+    request: str | None = None, actions: list | None = None,
 ) -> None:
     """Email the run's owner via the SendGrid HTTP API.
 
@@ -439,7 +473,8 @@ def _notify_sendgrid(
             "(SendGrid requires a verified sender address)"
         )
     subject, body = _compose(session_id, reason, message, request)
-    _sendgrid_post(api_key, from_addr, to_addr, subject, body)
+    _sendgrid_post(api_key, from_addr, to_addr, subject, body,
+                   html=_html_body(subject, body, actions or []))
     # An accepted send is the only positive evidence the email path works; log it
     # so "did the researcher get told?" is answerable from the runner log.
     logger.info(
@@ -459,7 +494,8 @@ def _sendgrid_sender(from_addr: str) -> dict:
     return {"email": address, "name": name} if name else {"email": address}
 
 
-def _sendgrid_post(api_key: str, from_addr: str, to_addr: str, subject: str, body: str) -> None:
+def _sendgrid_post(api_key: str, from_addr: str, to_addr: str, subject: str, body: str,
+                   html: str | None = None) -> None:
     """POST one plain-text mail to the SendGrid v3 API (stdlib only).
 
     Raises ``RuntimeError`` carrying SendGrid's own explanation on a rejection:
@@ -473,7 +509,9 @@ def _sendgrid_post(api_key: str, from_addr: str, to_addr: str, subject: str, bod
             "personalizations": [{"to": [{"email": to_addr}]}],
             "from": _sendgrid_sender(from_addr),
             "subject": subject,
-            "content": [{"type": "text/plain", "value": body}],
+            # Plain text first, then HTML: SendGrid requires that order.
+            "content": [{"type": "text/plain", "value": body}]
+                       + ([{"type": "text/html", "value": html}] if html else []),
         }
     ).encode("utf-8")
     request = urllib.request.Request(  # noqa: S310 (fixed https SendGrid API URL)

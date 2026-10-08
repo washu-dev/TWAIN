@@ -420,6 +420,40 @@ class RunnerDB:
         return {"email": row.get("email"), "name": row.get("name"),
                 "phone": row.get("phone"), "notify_prefs": row.get("notify_prefs")}
 
+    def pending_gate(self, session_id: str) -> dict | None:
+        """The question message this run is parked on, if it's awaiting the researcher.
+
+        The newest question-kind message of a run whose status is
+        awaiting_approval / awaiting_input -- what an email button may answer.
+        """
+        return self._query_one(
+            """
+            SELECT m.id, m.kind, m.content
+            FROM conversations c
+            JOIN messages m ON m.conversation_id = c.id
+            WHERE c.id = %s AND c.status IN ('awaiting_approval', 'awaiting_input')
+              AND m.kind IN ('clarification', 'heavy_confirm', 'validation_gate',
+                             'revision_request', 'approval_request')
+            ORDER BY m.id DESC LIMIT 1;
+            """, (session_id,))
+
+    def insert_email_actions(self, rows, valid_hours: float) -> None:
+        """Store issued tokens: ``[(token_hash, session_id, message_id, kind, choice, label)]``."""
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            for row in rows:
+                cursor.execute(
+                    """
+                    INSERT INTO email_actions (token_hash, session_id, gate_message_id,
+                                               gate_kind, choice, label, expires_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s));
+                    """, (*row, float(valid_hours) * 3600))
+            conn.commit()
+            cursor.close()
+        finally:
+            conn.close()
+
     def run_title(self, session_id: str) -> str | None:
         """The run's title (its originating request), or None if unknown.
 
