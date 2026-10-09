@@ -16,10 +16,41 @@ side effects and no import cycles.
 """
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+
+# A value written with its unit: "-1.9919 log10(mol/L)", "1.3101 (dimensionless)",
+# "180.159 g/mol". Generated scripts print these as often as bare numbers (run
+# ec48cda0 vs 4e51dd7d: the same ESOL result, one as a string with its unit, one
+# as a float), and reading only the floats made the run fail "more often than
+# not". The number must lead; the rest is the unit and may not hold another
+# number on its own ("1 to 2" stays unreadable).
+_QUANTITY = re.compile(
+    r"^\s*([-+\u2212]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+\u2212]?\d+)?)\s*(\S.*?)?\s*$")
+_LONE_NUMBER = re.compile(r"(?:^|\s)[-+]?(?:\d+\.?\d*|\.\d+)(?:\s|$)")
+
+
+def quantity(text) -> Optional[Tuple[float, Optional[str]]]:
+    """``(value, unit)`` from a number written with an optional unit, else None."""
+    if not isinstance(text, str):
+        return None
+    match = _QUANTITY.match(text)
+    if not match:
+        return None
+    unit = (match.group(2) or "").strip() or None
+    if unit and (len(unit) > 40 or _LONE_NUMBER.search(unit)):
+        return None
+    try:
+        value = float(match.group(1).replace("\u2212", "-"))
+    except ValueError:
+        return None
+    if unit and unit.startswith("(") and unit.endswith(")"):
+        unit = unit[1:-1].strip() or None
+    return value, unit
 
 
 class ParserError(Exception):

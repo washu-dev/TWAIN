@@ -16,6 +16,7 @@ from result_interpreter.extractors.base import (
     ParsedField,
     ParsedOutput,
     ParserError,
+    quantity,
     register,
 )
 
@@ -24,22 +25,31 @@ def _is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def _flatten(obj, prefix: str = "") -> Dict[str, List[float]]:
+def _flatten(obj, prefix: str = "", units: Optional[Dict[str, str]] = None
+             ) -> Dict[str, List[float]]:
     """Flatten to {dot_path: [values]}. A numeric array collapses to one entry
-    holding all its numbers; scalars become length-1 lists."""
+    holding all its numbers; scalars become length-1 lists. A string written as
+    a number with its unit ("-1.99 log10(mol/L)") counts, its unit recorded in
+    ``units``."""
     out: Dict[str, List[float]] = {}
     if isinstance(obj, dict):
         for key, value in obj.items():
             path = f"{prefix}.{key}" if prefix else str(key)
-            out.update(_flatten(value, path))
+            out.update(_flatten(value, path, units))
     elif isinstance(obj, list):
         if obj and all(_is_number(v) for v in obj):
             out[prefix] = [float(v) for v in obj]  # numeric array -> series
         else:
             for idx, value in enumerate(obj):
-                out.update(_flatten(value, f"{prefix}[{idx}]"))
+                out.update(_flatten(value, f"{prefix}[{idx}]", units))
     elif _is_number(obj):
         out[prefix or "value"] = [float(obj)]
+    elif isinstance(obj, str):
+        found = quantity(obj)
+        if found is not None:
+            out[prefix or "value"] = [found[0]]
+            if found[1] and units is not None:
+                units[prefix or "value"] = found[1]
     return out
 
 
@@ -68,11 +78,12 @@ class JsonExtractor(OutputParser):
         else:
             data = content  # already-decoded object
 
-        flat = _flatten(data)
+        found_units: Dict[str, str] = {}
+        flat = _flatten(data, units=found_units)
         if not flat:
             raise ParserError("json parser found no numeric fields")
 
-        units = units or {}
+        units = {**found_units, **(units or {})}
         if fields:
             missing = [f for f in fields if f not in flat]
             if missing:

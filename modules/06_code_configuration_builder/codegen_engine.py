@@ -670,8 +670,10 @@ __file__)))`) so relative outputs and calculator scratch files land next to the 
 script, never in the caller's working directory.
 {spin_note}{engine_note}{thermo_note}{pseudo_note}{database_note}{smoke_instruction}
 - Print a JSON object to stdout whose keys include {metric_keys} (the computed \
-value(s)), plus "tool", "calculator", "property", and "output_file". Write the same \
-metrics as one CSV row to --output.
+value(s)), plus "tool", "calculator", "property", and "output_file". Each metric's \
+value must be a bare JSON number (e.g. -1.99), never a string with its unit and never a \
+nested object; give units under "<metric>_unit" keys. Write the same metrics as one \
+CSV row to --output, numbers only in the metric columns.
 - End the file with an `if __name__ == "__main__":` block that runs the script \
 (calls your main function). Output the COMPLETE script in one reply -- do not stop \
 partway or omit the entrypoint.
