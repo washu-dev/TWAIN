@@ -134,6 +134,7 @@ def property_key(requested_property) -> str:
 
 
 _PROPERTY_FAMILIES: Optional[list] = None
+_FAMILY_DETAILS: dict = {}
 
 
 def _property_families() -> list:
@@ -145,6 +146,7 @@ def _property_families() -> list:
                               .read_text(encoding="utf-8"))
             _PROPERTY_FAMILIES = [(f["key"], re.compile(f["pattern"]))
                                   for f in data.get("families") or []]
+            _FAMILY_DETAILS.update({f["key"]: f for f in data.get("families") or []})
         except (OSError, ValueError, KeyError, re.error) as exc:
             logger.warning("[plan] property families unavailable: %s", exc)
             _PROPERTY_FAMILIES = []
@@ -165,6 +167,13 @@ def history_key(requested_property, acceptance_metrics=None) -> str:
                 break
     return next((family for family, pattern in _property_families() if pattern.search(key)),
                 key) if key else ""
+
+
+def family_detail(name, field: str) -> Optional[str]:
+    """A family's optional ``field`` (baseline_property, prefer) for a metric name."""
+    key = history_key(name)
+    _property_families()
+    return (_FAMILY_DETAILS.get(key) or {}).get(field)
 
 
 _METHOD_GUIDANCE: Optional[dict] = None
@@ -3794,10 +3803,15 @@ class StateMachine:
                 return match
         for hint in hints:
             h = str(hint).lower()
-            for name in names:
-                n = str(name).lower()
-                if h in n or n in h:
-                    return name
+            matches = [name for name in names
+                       if h in str(name).lower() or str(name).lower() in h]
+            if matches:
+                # Several variants of one quantity (a nested {"logS_mol_per_L",
+                # "solubility_g_per_L"}): take the family's conventional one --
+                # the one its reference values are in -- else the first.
+                prefer = family_detail(hint, "prefer")
+                return next((m for m in matches if prefer and prefer in str(m).lower()),
+                            matches[0])
         return None
 
     @staticmethod
@@ -3812,8 +3826,16 @@ class StateMachine:
         # A top-level array is not a metric summary, and its elements sit at
         # line-initial '{' when it is pretty-printed -- without this, one of
         # them would be picked up as though it were the summary.
+        # Only a real array counts: every RIS job's stdout starts with the wrapper's
+        # "[env] using ..." line, and treating that as an array threw away every
+        # cluster run's summary (run 7376b5bf: ESOL log S printed, "no value").
         if text.lstrip().startswith("["):
-            return None
+            try:
+                head, _ = json.JSONDecoder().raw_decode(text.lstrip())
+            except json.JSONDecodeError:
+                head = None
+            if isinstance(head, list):
+                return None
         # Every offset a JSON object could start at: index 0 (a summary that IS
         # the whole of stdout, which the generic template prints) plus every
         # line-initial '{'.
@@ -4172,7 +4194,8 @@ class StateMachine:
     def _baseline_property(self, name) -> str:
         """A metric name as the baseline DB spells the property."""
         text = str(name)
-        return self._BASELINE_PROPERTY_ALIASES.get(text.strip().lower(), text)
+        alias = self._BASELINE_PROPERTY_ALIASES.get(text.strip().lower())
+        return alias or family_detail(text, "baseline_property") or text
 
     def _predictions(self, normalized: dict, molecule: str) -> list:
         """Adapt the interpreted result into baseline-DB predictions.

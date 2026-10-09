@@ -96,7 +96,10 @@ def _reference_source(plan: dict, intent: dict | None, repo_root: Path,
     sysd = plan.get("target_system") or (intent or {}).get("system_descriptors") or {}
     molecule = (sysd.get("molecule") or {}) if isinstance(sysd, dict) else {}
     name = molecule.get("name") or (sysd.get("name") if isinstance(sysd, dict) else None)
-    prop = _norm(plan.get("requested_property"))
+    # A solubility plan has no canonical property: its acceptance metric names it.
+    prop = _norm(" ".join([str(plan.get("requested_property") or "")] + [
+        str(m.get("metric_name") or "") for m in plan.get("acceptance_metrics") or []
+        if isinstance(m, dict)]))
     if name and _norm(name) in _esol_molecules(repo_root) and ("solub" in prop or "logs" in prop):
         return "the ESOL literature value (Delaney 2004) -- if the result is reported as logS"
     return None
