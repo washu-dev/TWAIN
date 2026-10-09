@@ -1,0 +1,27 @@
+[env] using /storage2/fs1/mdan/Active/common/projects/twain/twain-envs/default/bin/python
+[smoke] checking bundle for tool: RDKit
+[smoke] imports OK: rdkit
+[smoke] syntax OK: main.py
+[smoke] smoke run OK -> results.csv
+[smoke] PASS
+Composition: C9H8O4
+cLogP = 1.3101  MW = 180.15899999999996  RotBonds = 2  AromaticProportion = 0.46153846153846156
+{
+  "aqueous_solubility_at_25C": {
+    "logS_mol_per_L": -1.9918872615384613,
+    "solubility_g_per_L": 1.835560489929148,
+    "model_RMSE_log_units": 0.75
+  },
+  "aqueous_solubility_at_25C_logS_mol_per_L": -1.9918872615384613,
+  "aqueous_solubility_at_25C_g_per_L": 1.835560489929148,
+  "esol_model_RMSE_log_units": 0.75,
+  "tool": "rdkit (ESOL/Delaney descriptor model)",
+  "property": "aqueous_solubility_at_25C",
+  "output_file": "results.csv",
+  "smoke": false,
+  "units": {
+    "logS_mol_per_L": "log10(mol/L)",
+    "solubility_g_per_L": "g/L",
+    "model_RMSE_log_units": "log10 units"
+  }
+}

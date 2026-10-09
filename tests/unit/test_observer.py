@@ -321,3 +321,14 @@ def test_the_failure_card_leads_with_the_reviewers_reason(tmp_path, monkeypatch)
         m._observe(State.REPAIR, State.EXECUTE)
     card = error_handler.describe_failure(error_handler.classify(err.value, "REPAIR"), "REPAIR", None)
     assert "hydration energy, not a solubility" in card["headline"]
+
+
+def test_a_solubility_plan_finds_the_aspirin_reference():
+    # Its property lives in the acceptance metric, not requested_property (#226).
+    plan = {"requested_property": None,
+            "acceptance_metrics": [{"metric_name": "aqueous_solubility_at_25C",
+                                    "target_value": None, "tolerance": None}],
+            "target_system": {"kind": "molecule", "molecule": {"name": "aspirin"}}}
+    v = O.plan_gate(plan, None, repo_root=REPO, periodic=False, env_candidates=["default"],
+                    execute_slurm=True)
+    assert not v.warnings and "ESOL" in v.checks[-1].detail
