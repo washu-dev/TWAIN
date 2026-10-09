@@ -483,3 +483,78 @@ class TestNullRequestedPropertyStillGetsRealCode:
     def test_planning_only_still_gets_the_scaffold(self):
         bundle = CodegenEngine().generate(self._psi4_plan())
         assert bundle.template_name == _GENERIC.filename
+
+
+# ── #224: a template is used only when it computes what was asked ────────────────
+
+ESOL_SCRIPT = '''\
+import argparse, csv, json
+
+
+def compute():
+    from rdkit import Chem
+    from rdkit.Chem import Crippen, Descriptors, Lipinski
+    mol = Chem.MolFromSmiles("CC(=O)Oc1ccccc1C(=O)O")
+    clogp = Crippen.MolLogP(mol)
+    mw = Descriptors.MolWt(mol)
+    rb = Lipinski.NumRotatableBonds(mol)
+    ap = sum(a.GetIsAromatic() for a in mol.GetAtoms()) / mol.GetNumHeavyAtoms()
+    return 0.16 - 0.63 * clogp - 0.0062 * mw + 0.066 * rb - 0.74 * ap
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--output", default="results.csv")
+    ap.add_argument("--smoke", action="store_true")
+    args = ap.parse_args()
+    logs = compute()
+    print(json.dumps({"aqueous_solubility_at_25C": logs, "tool": "RDKit",
+                      "output_file": args.output}))
+    with open(args.output, "w", newline="") as f:
+        csv.writer(f).writerows([["aqueous_solubility_at_25C"], [logs]])
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+ASPIRIN = dict(
+    selected_method={"tool_name": "RDKit", "libraries": ["RDKit"], "calculator": None,
+                     "calculator_import": None, "calculator_library": None},
+    requested_property=None,
+    acceptance_metrics=[{"metric_name": "aqueous_solubility_at_25C", "target_value": None,
+                         "tolerance": None}],
+    target_system={"kind": "molecule", "formula": "C9H8O4",
+                   "molecule": {"name": "aspirin", "SMILES": "CC(=O)Oc1ccccc1C(=O)O"}})
+
+
+def test_aspirin_solubility_with_rdkit_is_synthesized_not_the_descriptor_template():
+    bundle = CodegenEngine().generate(_plan(**ASPIRIN), agent=lambda prompt: ESOL_SCRIPT)
+    assert bundle.template_name == "llm_synthesized"
+    assert "molecules.csv" not in bundle.main_py
+
+
+def test_offline_it_still_renders_the_template():
+    bundle = CodegenEngine().generate(_plan(**ASPIRIN), agent=None)
+    assert bundle.template_name == "template_property_prediction.py"
+
+
+@pytest.mark.parametrize("wanted, fits", [
+    ("logP", True), ("tpsa", True), ("molecular_weight", True),
+    ("aqueous_solubility_at_25C", False), ("band_gap", False), (None, False)])
+def test_what_the_descriptor_template_computes(wanted, fits):
+    from codegen_engine import _RDKIT_PROPERTY
+    assert _RDKIT_PROPERTY.computes(wanted) is fits
+
+
+def test_a_template_needing_a_molecule_list_is_synthesized_even_for_logp():
+    # It computes logP, but from a molecules.csv the bundle never carries.
+    bundle = CodegenEngine().generate(
+        _plan(**{**ASPIRIN, "acceptance_metrics": [{"metric_name": "logP"}]}),
+        agent=lambda prompt: ESOL_SCRIPT.replace("aqueous_solubility_at_25C", "logP"))
+    assert bundle.template_name == "llm_synthesized"
+
+
+def test_a_structure_template_that_computes_the_property_is_kept():
+    from codegen_engine import _PYMATGEN
+    assert _PYMATGEN.computes("density") and not _PYMATGEN.needs_input_data
