@@ -1037,7 +1037,14 @@ def test_acceptance_thresholds_are_configurable(machine, tmp_path, monkeypatch):
     machine.validate()
     report = machine._load_artifact("validation_report")
     assert report["thresholds"]["accept_below"] == 0.01
-    assert report["acceptance_status"] == "rejected"
+    # logS is graded in log units (0.08 off, inside 0.5), not by relative error.
+    assert report["acceptance_status"] == "accepted"
+    # ... and its band is configurable per run too.
+    plan = machine._load_artifact("execution_plan")
+    plan["acceptance_thresholds"] = {"absolute": {"logS": [0.02, 0.05]}}
+    _seed(machine, tmp_path, "execution_plan", plan)
+    machine.validate()
+    assert machine._load_artifact("validation_report")["acceptance_status"] == "rejected"
 
 
 def test_incoherent_thresholds_fall_back_to_the_defaults(machine, tmp_path, monkeypatch):
@@ -1047,7 +1054,7 @@ def test_incoherent_thresholds_fall_back_to_the_defaults(machine, tmp_path, monk
     _seed_normalized(machine, tmp_path, -1.70)
     machine.validate()
     assert machine._load_artifact("validation_report")["thresholds"] == {
-        "accept_below": 0.15, "review_below": 0.30}
+        "accept_below": 0.15, "review_below": 0.30, "absolute": {"logS": [0.5, 1.0]}}
 
 
 def test_correct_never_rewrites_the_selected_method(machine, tmp_path):
@@ -1433,3 +1440,69 @@ class TestImplausibleValuesAreNotDelivered:
                           side_effect=RuntimeError("table on fire")):
             self._seed_thermo_run(machine, tmp_path, self.GOOD)
             assert machine.validate() == State.ACCEPT
+
+
+# -- run 52019085: validate the result, not every number in the output ---------
+
+_RUN_52019085 = json.loads((Path(__file__).resolve().parents[1] / "fixtures"
+                            / "run_52019085_normalized.json").read_text())
+_ASPIRIN_PLAN = dict(PLAN, requested_property=None,
+                     target_system={"formula": "C9H8O4", "molecule": {"name": "aspirin"}},
+                     acceptance_metrics=[{"metric_name": "aqueous_solubility_at_25C",
+                                          "target_value": None, "tolerance": None}])
+
+
+def _validate_run(machine, tmp_path, normalized=_RUN_52019085, plan=_ASPIRIN_PLAN):
+    _seed_planning(machine, tmp_path, plan)
+    _seed(machine, tmp_path, "normalized_result", normalized)
+    machine.validate()
+    return machine._load_artifact("validation_report")
+
+
+def test_only_the_log_s_result_is_compared(machine, tmp_path):
+    # Not the mol/L copy (0.0102), not the ESOL error estimate (0.69), not the
+    # descriptor block's duplicate: one comparison, -1.99 against -1.72.
+    report = _validate_run(machine, tmp_path)
+    (only,) = report["cross_validation"]["comparisons"]
+    assert (only["property"], round(only["predicted"], 2), only["literature"]) == \
+        ("logS", -1.99, -1.72)
+
+
+def test_it_is_graded_in_log_units_and_accepted(machine, tmp_path):
+    report = _validate_run(machine, tmp_path)
+    assert report["acceptance_status"] == "accepted"
+    assert "off by 0.27" in report["rationale"]
+
+
+def test_a_stated_mol_per_l_result_is_converted_to_log_s(machine, tmp_path):
+    only_molar = {"primary_metric": {"name": "aqueous_solubility_at_25C", "value": 0.0101886,
+                                     "unit": "mol/L", "uncertainty": 0.001},
+                  "secondary_metrics": []}
+    (only,) = _validate_run(machine, tmp_path, only_molar)["cross_validation"]["comparisons"]
+    assert round(only["predicted"], 2) == -1.99
+
+
+def test_far_off_in_log_units_is_still_rejected(machine, tmp_path):
+    wrong = {"primary_metric": {"name": "logS", "value": -4.0, "uncertainty": 0.1},
+             "secondary_metrics": []}
+    assert _validate_run(machine, tmp_path, wrong)["acceptance_status"] == "rejected"
+
+
+def test_your_target_met_but_the_literature_disagrees_needs_your_review(machine, tmp_path):
+    wrong = {"primary_metric": {"name": "aqueous_solubility_at_25C_logS", "value": -4.0,
+                                "uncertainty": 0.1}, "secondary_metrics": []}
+    plan = dict(_ASPIRIN_PLAN, acceptance_metrics=[
+        {"metric_name": "aqueous_solubility_at_25C", "target_value": -4.0, "tolerance": 0.3,
+         "set_by": "researcher"}])
+    report = _validate_run(machine, tmp_path, wrong, plan)
+    assert report["acceptance_status"] == "needs_review"
+    assert report["rationale"].startswith("Your acceptance target is met")
+    assert "literature disagrees" in report["rationale"]
+
+
+def test_a_target_twain_proposed_does_not_soften_a_rejection(machine, tmp_path):
+    wrong = {"primary_metric": {"name": "aqueous_solubility_at_25C_logS", "value": -4.0,
+                                "uncertainty": 0.1}, "secondary_metrics": []}
+    plan = dict(_ASPIRIN_PLAN, acceptance_metrics=[
+        {"metric_name": "aqueous_solubility_at_25C", "target_value": -4.0, "tolerance": 0.3}])
+    assert _validate_run(machine, tmp_path, wrong, plan)["acceptance_status"] == "rejected"

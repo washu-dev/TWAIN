@@ -14,8 +14,8 @@ predictions matched a baseline, the verdict is NEEDS_REVIEW (nothing to judge).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Sequence
+from dataclasses import dataclass, field
+from typing import Dict, List, Sequence, Tuple
 
 from cross_validation.baseline_validator import CrossValidationResult, PairComparison
 
@@ -30,6 +30,10 @@ _SEVERITY = {ACCEPTED: 0, NEEDS_REVIEW: 1, REJECTED: 2}
 class AcceptanceThresholds:
     accept_below: float = 0.15  # relative error < 15% -> ACCEPT
     review_below: float = 0.30  # relative error < 30% -> NEEDS_REVIEW
+    # Properties graded by ABSOLUTE difference, {property: (accept, review)}, in
+    # the property's own unit -- a log-scale quantity like logS, where relative
+    # error is meaningless (configs/baselines.json "agreement_bands").
+    absolute: Dict[str, Tuple[float, float]] = field(default_factory=dict)
 
     def __post_init__(self):
         if not 0 < self.accept_below <= self.review_below:
@@ -43,6 +47,11 @@ class Verdict:
 
 
 def _verdict_for(comparison: PairComparison, thresholds: AcceptanceThresholds) -> str:
+    band = thresholds.absolute.get(comparison.property)
+    if band:
+        accept, review = band
+        err = comparison.absolute_error
+        return ACCEPTED if err < accept else NEEDS_REVIEW if err < review else REJECTED
     rel = comparison.relative_error
     if rel is None:
         # The literature value is 0, so there is no relative error to compare --
@@ -84,6 +93,11 @@ def judge(
     offenders = [c for c, v in per if v != ACCEPTED]
 
     def describe(c: PairComparison) -> str:
+        if c.property in thresholds.absolute:
+            accept, review = thresholds.absolute[c.property]
+            return (f"{c.molecule}/{c.property} {c.predicted:.3g} vs {c.literature:.3g}, "
+                    f"off by {c.absolute_error:.2f} (accept below {accept:g}, "
+                    f"review below {review:g})")
         if c.relative_error is not None:
             return f"{c.molecule}/{c.property} rel err {c.relative_error * 100:.1f}%"
         # Say what is actually known. The old text read "rel err n/a (literature
@@ -93,7 +107,11 @@ def judge(
                 f"there is no relative error; absolute error "
                 f"{c.absolute_error:.4g}")
 
-    if worst == ACCEPTED:
+    banded = [c for c, _ in per if c.property in thresholds.absolute]
+    if worst == ACCEPTED and banded:
+        rationale = (f"All {len(per)} molecule(s) agree with their reference: "
+                     + "; ".join(describe(c) for c in banded) + ".")
+    elif worst == ACCEPTED:
         exact = [c for c, v in per if v == ACCEPTED and c.relative_error is None]
         rationale = f"All {len(per)} molecule(s) agree within {ap} relative error."
         if exact:
@@ -106,11 +124,16 @@ def judge(
                 + f". {names} matched a reference of 0 exactly."
             )
     elif worst == REJECTED:
-        rationale = f"Rejected: at least one molecule exceeds {rp} relative error. " \
-                    + "; ".join(describe(c) for c in offenders)
+        relative = [c for c in offenders if c.property not in thresholds.absolute]
+        lead = (f"Rejected: at least one molecule exceeds {rp} relative error. " if relative
+                else "Rejected: at least one molecule is outside its agreement band. ")
+        rationale = lead + "; ".join(describe(c) for c in offenders)
     else:
-        quantified = [c for c in offenders if c.relative_error is not None]
-        lead = (f"Needs review: agreement is marginal (within {rp} but not {ap})."
+        quantified = [c for c in offenders if c.relative_error is not None
+                      and c.property not in thresholds.absolute]
+        lead = ("Needs review: agreement is marginal." if not quantified
+                and any(c.property in thresholds.absolute for c in offenders) else
+                f"Needs review: agreement is marginal (within {rp} but not {ap})."
                 if quantified else
                 "Needs review: agreement could not be quantified.")
         rationale = lead + " " + "; ".join(describe(c) for c in offenders)
