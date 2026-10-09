@@ -30,7 +30,7 @@ from cross_validation.baseline_validator import (
     ChainedBaselines,
     Prediction,
 )
-from cross_validation import harmonize, mp_reference, plausibility, target_check
+from cross_validation import harmonize, literature, mp_reference, plausibility, target_check
 
 import observer
 import triage
@@ -4099,7 +4099,10 @@ class StateMachine:
         engine = method.get("calculator") or method.get("tool_name") or "the plan's method"
         comparisons = (artifact.get("cross_validation") or {}).get("comparisons") or []
         if comparisons:
-            reference = (f"literature values from the baseline database "
+            sources = sorted({c.get("literature_source") for c in comparisons
+                              if c.get("literature_source")})
+            reference = (("; ".join(sources)) if sources else
+                         f"literature values from the baseline database "
                          f"({len(comparisons)} compared)")
         elif artifact.get("gap_basis") == "tolerance_multiples":
             reference = ("the target this run's own plan proposed, which was not "
@@ -4183,8 +4186,20 @@ class StateMachine:
             self._load_artifact("intent_spec") or {})
         is_crystal = any(material.get(k) for k in
                          ("crystal_system", "space_group", "space_group_number", "phase"))
+        self._literature = None
         if not material.get("mp_id") and not (material.get("formula") and is_crystal):
-            return db
+            # A molecule: measured values from PubChem, read and checked against
+            # their text, with the curated value as one more voice (#238). Off
+            # with TWAIN_LITERATURE_LOOKUP=0 (the tests, an air-gapped host).
+            if os.environ.get("TWAIN_LITERATURE_LOOKUP", "1") == "0":
+                return db
+            self._literature = literature.LiteratureBaselines(
+                smiles=material.get("SMILES"), name=material.get("name"),
+                formula=material.get("formula"), curated=db,
+                # Its own call budget: a list of readings is longer than a verdict.
+                agent=((lambda p: self._agent_text(p, max_tokens=1200))
+                       if self._reviewer() is not None else None))
+            return ChainedBaselines(self._literature, db)
         space_group = material.get("space_group_number")
         mp = MaterialsProjectBaselines(
             formula=material.get("formula"),
@@ -4375,6 +4390,10 @@ class StateMachine:
             gap = None
         # How the researcher's target was read and compared, with the working.
         artifact["target_checks"] = list(getattr(self, "_target_checks", []))
+        # Every literature value found, its source, and why it counted or not.
+        lit = getattr(self, "_literature", None)
+        artifact["literature"] = ({family: a.as_dict() for family, a in lit.assessments.items()
+                                   if a is not None} if lit is not None else {})
         artifact["gap"] = gap
         artifact["gap_basis"] = basis
         # Whether anything actually checked the value: a literature baseline, an

@@ -1,0 +1,11 @@
+{
+  "_comment": "Where VALIDATE looks up literature values (#238), per property family (configs/property_families.json). pubchem_heading is the PUG-View section holding the experimental values. conditions are what a value must have been measured at to be compared (a solubility at 15 C is not one at 25 C). baseline_property is the name configs/baselines.json and VALIDATE use for it.",
+  "families": {
+    "aqueous_solubility": {
+      "baseline_property": "logS",
+      "pubchem_heading": "Solubility",
+      "solvent": "water",
+      "conditions": {"temperature_c": 25, "tolerance_c": 3}
+    }
+  }
+}
