@@ -593,6 +593,9 @@ class TestActivityLog:
         {"id": 2, "event_type": "stage.progress", "created_at": "2026-10-09T15:00:02Z",
          "payload": {"stage": "REPAIR", "step": "smoke", "status": "done",
                      "label": "Smoke test passed"}},
+        {"id": 8, "event_type": "stage.progress", "created_at": "2026-10-09T15:00:02Z",
+         "payload": {"stage": "PLAN", "step": "observer.method", "status": "done",
+                     "label": "Observer ✓ reviewer: rdkit can compute what was asked"}},
         {"id": 3, "event_type": "stage.completed", "created_at": "2026-10-09T15:00:03Z",
          "payload": {"from": "REPAIR", "to": "EXECUTE"}},
         {"id": 4, "event_type": "stage.progress", "created_at": "2026-10-09T15:00:04Z",
@@ -613,16 +616,18 @@ class TestActivityLog:
         log = activity_log.entries(self.EVENTS)
         assert [e["label"] for e in log] == [
             "Observer: the script needs an input file (molecules.csv)", "Smoke test passed",
+            "Reviewer: rdkit can compute what was asked",
             "REPAIR → EXECUTE", "Waiting for a node (PENDING, 10 s)", "Got a node after 60 s",
             "Run stopped: No finite value"]
-        assert [e["status"] for e in log] == ["failed", "done", "stage", "active", "done", "failed"]
+        assert [e["status"] for e in log] == ["failed", "done", "done", "stage", "active", "done",
+                                              "failed"]
 
     @patch("conversations.get_activity")
     @patch("main._require_own_conversation", return_value={"id": "c", "title": "t"})
     def test_the_route_serves_it(self, _owner, activity):
         activity.return_value = self.EVENTS
         body = client.get("/api/conversations/c/activity-log").json()
-        assert body["count"] == 6 and body["data"][0]["stage"] == "REPAIR"
+        assert body["count"] == 7 and body["data"][0]["stage"] == "REPAIR"
         assert set(activity.call_args.args[2]) == {"stage.progress", "stage.completed", "run.error"}
 
     @patch("conversations.get_activity")
@@ -635,7 +640,7 @@ class TestActivityLog:
         activity.return_value = self.EVENTS
         z = zipfile.ZipFile(io.BytesIO(client.get("/api/conversations/c/files.zip").content))
         text = z.read("twain/activity_log.txt").decode()
-        assert text.startswith("TWAIN activity log: Aspirin")
+        assert text.startswith("TWAIN activity log: Aspirin\nTimes are UTC.")
         assert "REPAIR     ✕ Observer: the script needs an input file" in text
 
     @patch("main._require_own_conversation", side_effect=__import__("fastapi").HTTPException(404, "x"))
