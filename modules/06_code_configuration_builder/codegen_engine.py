@@ -54,7 +54,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 # The heavy calculator stack (GPAW/DFTB+/MatGL/...) lives in this pixi environment
 # (Python 3.11), separate from the default env. A generated calculator bundle must
@@ -395,14 +395,38 @@ class TemplateSpec:
     # bake, it routes these to LLM synthesis + the REPAIR self-heal loop instead
     # of rendering the fail-loud template.
     requires_structure: bool = False
+    # What the template computes (substrings of a normalized property name), and
+    # whether it reads a researcher-supplied data file (a molecule list) that
+    # BUILD never writes. A property request it can't produce, or a data file
+    # nobody gave it, goes to synthesis instead (#224: aspirin solubility got the
+    # RDKit descriptor template -- mol_weight/logp/tpsa from a molecules.csv).
+    produces: Tuple[str, ...] = ()
+    needs_input_data: bool = False
+
+    def computes(self, wanted) -> bool:
+        key = re.sub(r"[^a-z0-9]+", "_", str(wanted or "").lower())
+        return any(token in key for token in self.produces)
 
 
 # Tool (canonical key) -> template. RDKit is resolved to one of two templates by
 # objective; unmapped tools fall back to the generic runner.
-_PYMATGEN = TemplateSpec("template_pymatgen_analysis.py", "structure_analysis", "structure.json", "results.csv", {"round_digits": 4}, requires_structure=True)
-_ASE = TemplateSpec("template_molecular_dynamics.py", "emt_md", "system.json", "trajectory.csv", {"steps": 20, "timestep_fs": 1.0, "temperature_K": 300.0}, requires_structure=True)
-_RDKIT_PROPERTY = TemplateSpec("template_property_prediction.py", "rdkit_descriptors", "molecules.csv", "predictions.csv", {"round_digits": 4})
-_RDKIT_MANIP = TemplateSpec("template_rdkit_manipulation.py", "graph_manipulation", "molecules.smi", "graph_features.csv", {"canonical": True})
+_PYMATGEN = TemplateSpec(
+    "template_pymatgen_analysis.py", "structure_analysis", "structure.json", "results.csv",
+    {"round_digits": 4}, requires_structure=True,
+    produces=("volume", "density", "lattice", "space_group", "num_sites"))
+_ASE = TemplateSpec(
+    "template_molecular_dynamics.py", "emt_md", "system.json", "trajectory.csv",
+    {"steps": 20, "timestep_fs": 1.0, "temperature_K": 300.0}, requires_structure=True,
+    produces=("trajectory", "molecular_dynamics"))
+_RDKIT_PROPERTY = TemplateSpec(
+    "template_property_prediction.py", "rdkit_descriptors", "molecules.csv", "predictions.csv",
+    {"round_digits": 4}, needs_input_data=True,
+    produces=("mol_weight", "molecular_weight", "logp", "partition_coefficient", "tpsa",
+              "polar_surface", "num_rings", "descriptor"))
+_RDKIT_MANIP = TemplateSpec(
+    "template_rdkit_manipulation.py", "graph_manipulation", "molecules.smi", "graph_features.csv",
+    {"canonical": True}, needs_input_data=True,
+    produces=("canonical", "scaffold", "fingerprint", "substructure", "fragment", "graph"))
 _GENERIC = TemplateSpec("template_generic.py", "generic_run", "input.json", "results.csv", {})
 
 # There is deliberately NO per-property template. A calculator-driven run (e.g.
@@ -1067,7 +1091,13 @@ class CodegenEngine:
         # skipped synthesis and rendered the placeholder scaffold instead --
         # which then ran on the cluster and "succeeded" (job 2571447).
         wants_property = plan.get("requested_property") or _first_metric_name(plan)
-        if (spec is _GENERIC or needs_structure) and wants_property and agent is not None:
+        # A template is only the right script when it computes what was asked from
+        # inputs the bundle has: otherwise the observer stops it before EXECUTE
+        # (#224) and the run never computes anything.
+        unfit = bool(wants_property) and (not spec.computes(wants_property)
+                                          or spec.needs_input_data)
+        if (spec is _GENERIC or needs_structure or unfit) and wants_property \
+                and agent is not None:
             return self._generate_with_calculator(
                 plan, libraries, None, None, calculator_library,
                 intent=intent, agent=agent, smoke_compute=smoke_compute,
