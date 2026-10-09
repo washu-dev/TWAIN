@@ -63,7 +63,7 @@ TASK
   domain:    {domain}
   property:  {property}
   platform:  {platform}
-{requested}{proven}
+{requested}{proven}{guidance}
 CANDIDATE LIBRARIES (the framework that builds the system / drives a calculator):
 {libraries}
 
@@ -135,9 +135,13 @@ def _fmt_candidates(items: List[dict], keys: List[str]) -> str:
 def build_prompt(*, objective, material, domain, requested_property, platform,
                  libraries: List[dict], calculators: List[dict],
                  requested_libraries: Optional[List[str]] = None,
-                 proven: Optional[List[dict]] = None) -> str:
+                 proven: Optional[List[dict]] = None,
+                 guidance: Optional[str] = None) -> str:
     return _PROMPT.format(
         proven=_fmt_proven(proven),
+        guidance=(f"\nESTABLISHED ROUTES FOR THIS PROPERTY (choose a method that follows one; "
+                  f"a method that can't deliver the quantity itself will be rejected):\n"
+                  f"  {guidance}\n" if guidance else ""),
         objective=objective or "(unspecified)",
         material=material or "(unspecified)",
         domain=domain or "(unspecified)",
@@ -218,6 +222,7 @@ def recommend_toolset(
     agent: Callable[[str], str],
     requested_libraries: Optional[List[str]] = None,
     proven: Optional[List[dict]] = None,
+    guidance: Optional[str] = None,
     available: Optional[Callable[[str, str], Optional[bool]]] = None,
     max_repair: int = 1,
 ) -> Optional[ToolRecommendation]:
@@ -237,7 +242,7 @@ def recommend_toolset(
         objective=objective, material=material, domain=domain,
         requested_property=requested_property, platform=platform,
         libraries=libraries, calculators=calculators,
-        requested_libraries=requested_libraries, proven=proven,
+        requested_libraries=requested_libraries, proven=proven, guidance=guidance,
     )
     warnings: List[str] = []
     for attempt in range(max_repair + 1):

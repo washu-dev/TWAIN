@@ -518,8 +518,8 @@ def test_the_deterministic_pick_prefers_a_proven_method(machine, tmp_path, histo
         pytest.skip("no second installed candidate in this environment")
     assert any(n.startswith(f"Track record: {other} has completed 4") for n in plan["safety_notes"])
     # The seed asks for solubility, which has no canonical property: the run is
-    # filed under its acceptance metric.
-    assert asked[-1] == "logs_mae"
+    # filed under its acceptance metric's family.
+    assert asked[-1] == "aqueous_solubility"
 
 
 def test_planning_goes_on_without_history(machine, tmp_path, history):
@@ -531,7 +531,7 @@ def test_planning_goes_on_without_history(machine, tmp_path, history):
 
 def test_history_keys_are_normalized():
     assert SM.history_key("Band gap") == SM.history_key("band_gap") == "band_gap"
-    assert SM.history_key(None, [{"metric_name": "logS_MAE"}]) == "logs_mae"
+    assert SM.history_key(None, [{"metric_name": "logS_MAE"}]) == "aqueous_solubility"
     assert SM.history_key(None) == ""
 
 
@@ -543,6 +543,10 @@ def test_the_runner_keys_methods_the_way_planning_does():
                  {"requested_property": "logS (25 C)", "selected_method": {"libraries": ["RDKit"]}},
                  {"selected_method": {"tool_name": "Psi4"},
                   "acceptance_metrics": [{"metric_name": "logS MAE"}]},
+                 {"selected_method": {"libraries": ["xtb"]},
+                  "acceptance_metrics": [{"metric_name": "aqueous_solubility_at_25C"}]},
+                 {"selected_method": {"libraries": ["Psi4"]},
+                  "acceptance_metrics": [{"metric_name": "standard_heat_of_formation_kJ_per_mol"}]},
                  {"selected_method": {"tool_name": "Psi4"}}):
         assert MH.method_key(plan) == SM.StateMachine._method_key(plan)
         assert MH.history_key(plan) == SM.history_key(plan.get("requested_property"),
@@ -599,3 +603,80 @@ def test_an_unrunnable_core_falls_back_to_the_ranking(machine, tmp_path, monkeyp
 def test_the_refusal_names_each_tool_once():
     gap = SM._cluster_env_gap(["xtb", "OpenMM", "OpenFF Toolkit", "OpenMM"])
     assert gap.count("OpenMM") == 1
+
+
+# -- #222: the reviewer judges the method at PLAN ----------------------------------
+
+def _review_machine(machine, tmp_path, monkeypatch, judge):
+    _seed_intent(machine, tmp_path)
+    machine.decompose()
+    machine.discover()
+    monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+    prompts = []
+
+    def agent(prompt):
+        prompts.append(prompt)
+        tools = prompt.split("Proposed method: ", 1)[1].split(".\n", 1)[0]
+        return '{"verdict": "%s", "reason": "judged %s"}' % (judge(tools), tools)
+    monkeypatch.setattr(machine, "_reviewer", lambda: agent)
+    return prompts
+
+
+def test_a_method_the_reviewer_rejects_is_replaced_before_approval(machine, tmp_path, monkeypatch):
+    first = {}
+    def judge(tools):
+        first.setdefault("tools", tools)
+        return "no" if tools == first["tools"] else "yes"
+    _review_machine(machine, tmp_path, monkeypatch, judge)
+    assert machine.plan() == State.BUILD
+    plan = machine._load_artifact("execution_plan")
+    (rejected,) = machine.context.failed_methods
+    assert rejected["stage"] == "PLAN"
+    assert SM.StateMachine._method_key(plan) != rejected["method"]
+    assert plan["safety_notes"][0].startswith("Method replaced before you saw it:")
+
+
+def test_when_the_reviewer_rejects_everything_the_researcher_decides(machine, tmp_path, monkeypatch):
+    _review_machine(machine, tmp_path, monkeypatch, lambda tools: "no")
+    assert machine.plan() == State.BUILD                 # never a dead end
+    plan = machine._load_artifact("execution_plan")
+    assert len([m for m in machine.context.failed_methods if m["stage"] == "PLAN"]) == 2
+    assert plan["safety_notes"][0].startswith("Reviewer's concern:")
+
+
+def test_advise_only_mode(machine, tmp_path, monkeypatch):
+    monkeypatch.setenv("TWAIN_PLAN_REVIEW_REPLANS", "0")
+    _review_machine(machine, tmp_path, monkeypatch, lambda tools: "no")
+    machine.plan()
+    assert machine.context.failed_methods == []
+    assert machine._load_artifact("execution_plan")["safety_notes"][0].startswith("Reviewer's concern:")
+
+
+def test_the_reviewer_and_the_method_pick_get_the_solubility_guidance(machine, tmp_path, monkeypatch):
+    prompts = _review_machine(machine, tmp_path, monkeypatch, lambda tools: "yes")
+    machine.plan()
+    assert "ESOL" in prompts[0] and "hydration or solvation free energy alone" in prompts[0]
+    from method_discovery import llm_discovery as LD
+    assert "ESTABLISHED ROUTES" in LD.build_prompt(
+        objective="x", material="y", domain=None, requested_property=None, platform="linux-64",
+        libraries=[], calculators=[], guidance=SM.method_guidance("aqueous_solubility"))
+
+# The metric names production actually filed runs under (#216's measurement).
+@pytest.mark.parametrize("names, family", [
+    (["aqueous_solubility_at_25C", "aqueous_solubility_log_mol_per_L", "aqueous_solubility_25C",
+      "logS", "logS_MAE"], "aqueous_solubility"),
+    (["standard_heat_of_formation_kJ_per_mol", "standard_enthalpy_of_formation_kJ_per_mol",
+      "standard_heat_of_formation", "formation_energy_per_atom"], "formation_enthalpy"),
+    (["band_gap", "Band gap (eV)", "bandgap"], "band_gap"),
+])
+def test_one_quantity_is_one_history_key(names, family):
+    assert {SM.history_key(None, [{"metric_name": n}]) for n in names} == {family}
+
+
+def test_a_name_no_family_knows_is_kept():
+    assert SM.history_key(None, [{"metric_name": "Glass transition (K)"}]) == "glass_transition_k"
+    assert SM.history_key("lattice_constant") == "lattice_constant"
+
+
+def test_logs_doesnt_swallow_other_words():
+    assert SM.history_key(None, [{"metric_name": "logistics_score"}]) == "logistics_score"

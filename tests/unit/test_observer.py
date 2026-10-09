@@ -243,3 +243,81 @@ class TestReviewerInTheStateMachine:
         m.review_request = "band gap of silicon"
         m._observe(State.EXECUTE, State.INTERPRET)
         assert "a zero gap for silicon" in artifacts["execution_result"]["observer_warnings"][0]
+
+
+class TestReviewerOnTheMethod:
+    """#222: the reviewer judges the method at PLAN, before the approval card."""
+
+    PLAN = {"requested_property": None,
+            "acceptance_metrics": [{"metric_name": "aqueous_solubility_at_25C"}],
+            "summary": "Hydration free energy with OpenMM + GBSA; log S = -dG_hyd / 2.303RT",
+            "selected_method": {"libraries": ["OpenMM", "OpenFF Toolkit"], "calculator": None}}
+
+    def test_it_sees_the_method_the_summary_and_the_guidance(self, monkeypatch):
+        monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+        seen = []
+        O.llm_method_check(_reviewer("no", seen=seen), request="aspirin solubility",
+                           plan=self.PLAN, guidance="ESOL ... a hydration free energy alone")
+        assert "OpenMM + OpenFF Toolkit" in seen[0] and "GBSA" in seen[0]
+        assert "Established routes" in seen[0] and "ESOL" in seen[0]
+
+    @pytest.mark.parametrize("verdict, expected", [("yes", "yes"), ("no", "no"),
+                                                   ("unsure", None), ("maybe", None)])
+    def test_verdicts(self, verdict, expected, monkeypatch):
+        monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+        answer = O.llm_method_check(_reviewer(verdict), request="x", plan=self.PLAN)
+        assert (answer[0] if answer else None) == expected
+
+    def test_off_or_no_agent_asks_nothing(self, monkeypatch):
+        monkeypatch.setenv("TWAIN_OBSERVER_LLM", "0")
+        assert O.llm_method_check(_reviewer("no"), request="x", plan=self.PLAN) is None
+        monkeypatch.delenv("TWAIN_OBSERVER_LLM")
+        assert O.llm_method_check(None, request="x", plan=self.PLAN) is None
+
+
+class TestReviewerRejectionAtRepairReplans:
+    _machine = TestInTheStateMachine._machine
+
+    def _repair(self, tmp_path, monkeypatch, failed=()):
+        monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+        plan = {"requested_property": "logp",
+                "selected_method": {"libraries": ["RDKit"], "calculator": None}}
+        m, _, _ = self._machine(tmp_path, plan, _bundle(tmp_path, "logp = None\nprint('hello')\n"))
+        m._agent = _reviewer("no", "it prints hello")
+        m._request = "logP of ethanol"
+        m.context.failed_methods = list(failed)
+        return m
+
+    def test_a_rejected_script_replans_without_the_method(self, tmp_path, monkeypatch):
+        m = self._repair(tmp_path, monkeypatch)
+        assert m._observe(State.REPAIR, State.EXECUTE) == State.REPLAN
+        (entry,) = m.context.failed_methods
+        assert (entry["method"], entry["stage"]) == ("rdkit", "REPAIR")
+        assert "it prints hello" in entry["reason"]
+        assert SM.GUARDS[(State.REPAIR, State.REPLAN)](m.context)
+
+    def test_past_the_budget_it_stops_with_the_reason_first(self, tmp_path, monkeypatch):
+        m = self._repair(tmp_path, monkeypatch,
+                         failed=[{"method": "xtb", "stage": "EXECUTE", "last_attempt": 2}])
+        with pytest.raises(Exception) as err:
+            m._observe(State.REPAIR, State.EXECUTE)
+        assert str(err.value).startswith("The reviewer found the script doesn't compute")
+
+    def test_plan_rejections_dont_spend_the_fallback_budget(self, tmp_path, monkeypatch):
+        m = self._repair(tmp_path, monkeypatch,
+                         failed=[{"method": "openmm", "stage": "PLAN", "last_attempt": 0}])
+        assert m._observe(State.REPAIR, State.EXECUTE) == State.REPLAN
+
+
+def test_the_failure_card_leads_with_the_reviewers_reason(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(REPO / "modules" / "07_runtime_orchestrator"))
+    import error_handler
+    m, _, _ = TestInTheStateMachine._machine(TestInTheStateMachine(), tmp_path,
+                                             {"requested_property": "logp"},
+                                             _bundle(tmp_path, "logp = None\n"))
+    m._agent = _reviewer("no", "It computes a hydration energy, not a solubility")
+    monkeypatch.delenv("TWAIN_OBSERVER_LLM", raising=False)
+    with pytest.raises(Exception) as err:
+        m._observe(State.REPAIR, State.EXECUTE)
+    card = error_handler.describe_failure(error_handler.classify(err.value, "REPAIR"), "REPAIR", None)
+    assert "hydration energy, not a solubility" in card["headline"]

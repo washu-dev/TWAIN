@@ -152,6 +152,7 @@ ones:
 | `TWAIN_SELF_HEAL_ATTEMPTS` | worker | Fix-and-re-run rounds after a failed calculation (default 3; 0 disables; `TWAIN_RUNTIME_REPAIR_ATTEMPTS` still works). Triage stops early for setup problems, shared-environment needs, resources, or the same failure twice |
 | `TWAIN_NOTIFY_BACKEND`, `TWAIN_NOTIFY_FROM` | worker | `log` or `sendgrid` (plus `ses`/`sns`); the email sender |
 | `TWAIN_METHOD_FALLBACKS` | worker | How many times a run may switch method when EXECUTE can't make the planned one work (default 1; 0 = never). The new plan always needs approval; a re-run from PLAN clears the list of abandoned methods |
+| `TWAIN_PLAN_REVIEW_REPLANS` | worker | How many methods the observer's reviewer may reject at PLAN, before the approval card (default 2; 0 = only flag its concern on the card). Past that, the plan reaches the card with the reviewer's concern on top |
 | `TWAIN_OBSERVER_LLM` | worker | The observer's LLM reviewer (#188): `enforce` (default; a script that doesn't compute what was asked stops before EXECUTE), `warn`, or `0` (off). Doubtful outputs only ever warn |
 | `TWAIN_ENV_APPROVERS` | worker | Who may approve changes to shared RIS environments (default `arifs@wustl.edu`) |
 | `TWAIN_AUTO_RUN=1` | runner | Unattended: skips the approval and heavy-calculation gates (testing only) |

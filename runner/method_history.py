@@ -11,8 +11,10 @@ LLM as a preference and puts proven methods first in the deterministic pick.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 
 log = logging.getLogger("twain.method_history")
 
@@ -23,13 +25,33 @@ def property_key(requested_property) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(requested_property or "").lower()).strip("_")
 
 
+_FAMILIES = None
+
+
+def _families() -> list:
+    global _FAMILIES
+    if _FAMILIES is None:
+        try:
+            data = json.loads((Path(__file__).resolve().parent.parent / "configs"
+                               / "property_families.json").read_text(encoding="utf-8"))
+            _FAMILIES = [(f["key"], re.compile(f["pattern"])) for f in data.get("families") or []]
+        except (OSError, ValueError, KeyError, re.error) as exc:
+            log.warning("[method-history] property families unavailable: %s", exc)
+            _FAMILIES = []
+    return _FAMILIES
+
+
 def history_key(plan: dict) -> str:
+    key = ""
     if plan.get("requested_property"):
-        return property_key(plan["requested_property"])
-    for metric in plan.get("acceptance_metrics") or []:
-        if isinstance(metric, dict) and metric.get("metric_name"):
-            return property_key(metric["metric_name"])
-    return ""
+        key = property_key(plan["requested_property"])
+    else:
+        for metric in plan.get("acceptance_metrics") or []:
+            if isinstance(metric, dict) and metric.get("metric_name"):
+                key = property_key(metric["metric_name"])
+                break
+    return next((family for family, pattern in _families() if pattern.search(key)),
+                key) if key else ""
 
 
 def method_key(plan: dict) -> str:
