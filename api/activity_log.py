@@ -35,7 +35,10 @@ def entries(events) -> list:
             if label.startswith("Observer ") and label[9:10] in ("✓", "✕", "⚠"):
                 # The observer's lines carry their own mark ("Observer ✕ ...").
                 status = {"✓": "done", "✕": "failed", "⚠": "warn"}[label[9]]
-                label = "Observer: " + label[11:]
+                label = label[11:]
+                # The reviewer's lines already say who is speaking.
+                label = ("Reviewer: " + label[len("reviewer: "):]
+                         if label.startswith("reviewer: ") else "Observer: " + label)
             if status == "active":
                 if last_active.get(key):
                     continue
@@ -69,7 +72,7 @@ def for_run(conversation_id: str) -> list:
 
 def as_text(log: list, title: str | None = None) -> str:
     """The log as plain text, for the zip."""
-    lines = [f"TWAIN activity log{': ' + title if title else ''}", ""]
+    lines = [f"TWAIN activity log{': ' + title if title else ''}", "Times are UTC.", ""]
     for e in log:
         mark = "→" if e["status"] == "stage" else _MARK.get(e["status"], " ")
         lines.append(f"{e['at'][:19].replace('T', ' ')}  {e['stage']:<9}  {mark} {e['label']}")

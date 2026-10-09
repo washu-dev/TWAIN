@@ -307,6 +307,15 @@ const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
 
 // Actual spend for the run, from the budget.json artifact the orchestrator writes
 // each step. Renders nothing until a budget snapshot exists (e.g. very early runs).
+/** An event's time on the reader's clock (the API sends UTC ISO timestamps). */
+function localTime(iso: string): string {
+  const when = new Date(iso);
+  return Number.isNaN(when.getTime())
+    ? iso.slice(11, 19)
+    : when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false });
+}
+
 // How many log lines show before "Show all".
 const ACTIVITY_LOG_PREVIEW = 40;
 
@@ -358,11 +367,12 @@ const ActivityLogCard: React.FC<{ conversationId: string; status: string }> = ({
     <View style={styles.card}>
       <Text style={styles.cardTitle}>Activity log</Text>
       <Text style={styles.logHint}>
-        Every step this run took, in order ({log.length}). Also in the zip as activity_log.txt.
+        Every step this run took, in order ({log.length}), in your local time. Also in the zip
+        as activity_log.txt (in UTC).
       </Text>
       {shown.map((e, i) => (
         <View key={`${e.at}-${i}`} style={[styles.logRow, e.status === 'stage' && styles.logStage]}>
-          <Text style={styles.logTime}>{e.at.slice(11, 19)}</Text>
+          <Text style={styles.logTime}>{localTime(e.at)}</Text>
           <Text style={[styles.logMark, { color: color(e.status) }]}>
             {ACTIVITY_MARK[e.status] ?? '·'}
           </Text>
