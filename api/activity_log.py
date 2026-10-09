@@ -48,7 +48,8 @@ def entries(events) -> list:
                         "label": f"{payload.get('from')} → {payload.get('to')}"})
         elif kind == "run.error":
             failure = payload.get("failure") or {}
-            text = failure.get("headline") or (payload.get("error") or {}).get("message") or "failed"
+            error = payload.get("error") or {}
+            text = failure.get("headline") or error.get("message") or "failed"
             out.append({"at": at, "stage": payload.get("state") or failure.get("state") or "",
                         "status": "failed", "label": f"Run stopped: {text}"})
     return out
