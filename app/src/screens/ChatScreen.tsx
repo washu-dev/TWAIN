@@ -548,6 +548,10 @@ export const ChatScreen: React.FC = () => {
               metric_name: d.metric_name,
               target_value: asNumber(d.target_value),
               tolerance: asNumber(d.tolerance),
+              // The words around the number carry its unit and scale ("log S",
+              // "mg/L"); VALIDATE reads them to compare like with like (#237).
+              ...(d.target_value.trim() ? { target_text: d.target_value.trim() } : {}),
+              ...(d.tolerance.trim() ? { tolerance_text: d.tolerance.trim() } : {}),
             }))
           : undefined;
       await apiClient.sendApproval(conversation.id, decision, overrides, metrics);

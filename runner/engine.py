@@ -295,6 +295,11 @@ class _RealEngine:
             patch = {"metric_name": name,
                      "target_value": _as_number(edit.get("target_value")),
                      "tolerance": _as_number(edit.get("tolerance"))}
+            # What the researcher typed, unit and scale included ("log S = -1.72"):
+            # VALIDATE reads it to compare like with like (#237).
+            for text_key in ("target_text", "tolerance_text"):
+                if isinstance(edit.get(text_key), str) and edit[text_key].strip():
+                    patch[text_key] = edit[text_key].strip()[:200]
             proposed = current[by_name[name]] if name in by_name else {}
             if patch["target_value"] is not None and (
                     patch["target_value"], patch["tolerance"]) != (

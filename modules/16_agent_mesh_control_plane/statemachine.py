@@ -30,7 +30,7 @@ from cross_validation.baseline_validator import (
     ChainedBaselines,
     Prediction,
 )
-from cross_validation import mp_reference, plausibility
+from cross_validation import harmonize, mp_reference, plausibility, target_check
 
 import observer
 import triage
@@ -4117,6 +4117,15 @@ class StateMachine:
             f"Accept this result, or rerun to try improving it? [accept/rerun]: "
         )
 
+    def _run_formula(self) -> Optional[str]:
+        """The run's chemical formula, for molar masses (None if unknown)."""
+        plan = self._load_artifact("execution_plan") or {}
+        intent = self._load_artifact("intent_spec") or {}
+        try:
+            return CodegenEngine._material_brief(plan, intent).get("formula")
+        except Exception:  # noqa: BLE001 - no formula just means no mass conversions
+            return None
+
     def _run_molecule(self) -> Optional[str]:
         """The molecule/material this run is about (baseline DB lookup key)."""
         plan = self._load_artifact("execution_plan") or {}
@@ -4225,8 +4234,10 @@ class StateMachine:
                 continue
             by_property.setdefault(self._baseline_property(m["name"]), []).append(m)
         predictions = []
+        formula = self._run_formula()
         for prop, candidates in by_property.items():
-            picked = self._pick_for_reference(candidates, units.get(prop))
+            picked = self._pick_for_reference(candidates, units.get(prop),
+                                              family=history_key(prop), formula=formula)
             if picked is not None:
                 value, unit, m = picked
                 predictions.append(Prediction(molecule=molecule, property=prop, value=value,
@@ -4240,7 +4251,7 @@ class StateMachine:
         r"tolerance|confidence|fit|diagnostic|descriptors?|n_[a-z]+)([._]|$)")
 
     @staticmethod
-    def _pick_for_reference(candidates: list, reference_unit):
+    def _pick_for_reference(candidates: list, reference_unit, *, family=None, formula=None):
         """``(value, unit, metric)`` to compare with a reference, or None.
 
         In order: a field stating the reference's own unit; one whose name or
@@ -4259,11 +4270,19 @@ class StateMachine:
                 text = f"{m['name']} {m.get('unit') or ''}".lower()
                 if "log" in text and not m.get("unit"):
                     return float(m["value"]), reference_unit, m
-            inner = re.search(r"log10\((.+)\)", want or "")
-            for m in candidates:
-                stated = canonical_unit(m.get("unit"))
-                if inner and stated == canonical_unit(inner.group(1)) and float(m["value"]) > 0:
-                    return math.log10(float(m["value"])), reference_unit, m
+            # A stated unit the converter can bring onto the reference's scale:
+            # mol/L, mg/L, g/100 mL, % ... (harmonize.py, #237).
+            if family in harmonize.CANONICAL and \
+                    canonical_unit(harmonize.CANONICAL[family]) == want:
+                for m in candidates:
+                    if not m.get("unit"):
+                        continue
+                    try:
+                        h = harmonize.to_canonical(family, float(m["value"]), m["unit"],
+                                                   formula=formula)
+                    except harmonize.NotConvertible:
+                        continue
+                    return h.value, reference_unit, m
         for m in candidates:
             if not m.get("unit") or not want:
                 return float(m["value"]), m.get("unit"), m
@@ -4279,6 +4298,7 @@ class StateMachine:
         so the flagged result is delivered (routed as accepted) with the true
         verdict and stop reason preserved in the report.
         """
+        self._target_checks = []
         molecule = self._run_molecule()
         predictions = self._predictions(normalized, molecule) if molecule else []
         thresholds = self._acceptance_thresholds()
@@ -4353,6 +4373,8 @@ class StateMachine:
             # is off the scale. Leaving gap None earns exactly one correction pass
             # (see _gate_rerun), which is what a regenerated script needs.
             gap = None
+        # How the researcher's target was read and compared, with the working.
+        artifact["target_checks"] = list(getattr(self, "_target_checks", []))
         artifact["gap"] = gap
         artifact["gap_basis"] = basis
         # Whether anything actually checked the value: a literature baseline, an
@@ -4490,7 +4512,28 @@ class StateMachine:
         by_name = {str(m["name"]): m for m in metrics}
 
         checked, worst_status, worst_gap = [], "accepted", None
+        self._target_checks = []
         for criterion in criteria:
+            # Read and compared like with like, when the quantity has a
+            # canonical scale (#237): the target's unit from what was typed,
+            # the result's from its field, both converted, the working shown.
+            family = history_key(criterion["metric_name"])
+            if family in harmonize.CANONICAL and criterion.get("target_value") is not None \
+                    and criterion.get("tolerance") is not None:
+                formula = self._run_formula()
+                reading = target_check.read_target(
+                    criterion, metrics, family, formula=formula, agent=self._reviewer(),
+                    pick_field=self._pick_metric)
+                result = target_check.compare(criterion, metrics, family, reading,
+                                              formula=formula)
+                if result is not None:
+                    self._target_checks.append(result.as_dict())
+                    checked.append(result.summary())
+                    if _SEVERITY[result.status] > _SEVERITY[worst_status]:
+                        worst_status = result.status
+                    gap = result.gap if math.isfinite(result.gap) else 1e9
+                    worst_gap = gap if worst_gap is None else max(worst_gap, gap)
+                    continue
             match = self._pick_metric(list(by_name), [criterion["metric_name"]])
             if match is None:
                 continue

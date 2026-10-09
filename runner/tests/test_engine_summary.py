@@ -196,6 +196,18 @@ class TestAcceptanceOverrides:
             {"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05,
              "set_by": "researcher"}]
 
+    def test_what_was_typed_is_kept_for_validate(self, tmp_path):
+        # "log S = −1.72" carries the unit and scale VALIDATE needs (#237).
+        orch, path = self._plan(tmp_path, [
+            {"metric_name": "aqueous_solubility_at_25C", "target_value": None, "tolerance": None}])
+        self._engine().apply_acceptance_overrides(orch, [
+            {"metric_name": "aqueous_solubility_at_25C", "target_value": -1.72,
+             "tolerance": 0.75, "target_text": " log S = −1.72 ",
+             "tolerance_text": "0.75 log units"}])
+        (metric,) = self._read(path)["acceptance_metrics"]
+        assert (metric["target_text"], metric["tolerance_text"]) == ("log S = −1.72",
+                                                                      "0.75 log units")
+
     def test_an_unchanged_proposal_is_not_marked_as_the_researchers(self, tmp_path):
         # VALIDATE weighs only the researcher's own bar against the literature.
         orch, path = self._plan(tmp_path, [

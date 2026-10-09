@@ -16,7 +16,7 @@ convert rather than a silently wrong number.
     >>> round(h.value, 2), h.unit
     (-1.59, 'log10(mol/L)')
     >>> h.chain
-    ['4600 mg/L = 4.6 g/L', '4.6 g/L / 180.16 g/mol = 0.025533 mol/L', 'log10(0.025533) = -1.593']
+    ['4600 mg/L = 4.6 g/L', '4.6 g/L / 180.16 g/mol = 0.025533 mol/L', 'log10(0.025533 mol/L) = -1.593']
 """
 from __future__ import annotations
 
@@ -152,7 +152,7 @@ def to_canonical(family: str, value: float, unit, *, formula: str | None = None,
         if molar <= 0:
             raise NotConvertible("a solubility must be positive to take its log")
         logs = math.log10(molar)
-        chain.append(f"log10({_g(molar)}) = {logs:.3f}")
+        chain.append(f"log10({_g(molar)} mol/L) = {logs:.3f}")
         return Harmonized(logs, target, chain)
 
     table = _ENERGY if family == "formation_enthalpy" else _GAP
