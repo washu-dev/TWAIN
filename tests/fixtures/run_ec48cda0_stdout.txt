@@ -1,0 +1,22 @@
+[env] using /storage2/fs1/mdan/Active/common/projects/twain/twain-envs/default/bin/python
+[smoke] checking bundle for tool: RDKit
+[smoke] imports OK: rdkit
+[smoke] syntax OK: main.py
+[smoke] smoke run OK -> results.csv
+[smoke] PASS
+Built molecule: SMILES=CC(=O)Oc1ccccc1C(=O)O  formula=C9H8O4
+{
+  "tool": "rdkit (Crippen logP + Delaney ESOL model)",
+  "property": "aqueous_solubility_at_25C (ESOL log10 solubility in mol/L)",
+  "output_file": "results.csv",
+  "aqueous_solubility_at_25C": "-1.9919 log10(mol/L)",
+  "aqueous_solubility_mol_per_L": "0.0101886 mol/L",
+  "aqueous_solubility_g_per_L": "1.83556 g/L",
+  "crippen_logP": "1.3101 (dimensionless)",
+  "molecular_weight": "180.1590 g/mol",
+  "num_rotatable_bonds": "2 (count)",
+  "aromatic_proportion": "0.4615 (fraction)",
+  "model_rmse_diagnostic": "0.750 log10(mol/L)",
+  "formula": "C9H8O4",
+  "smoke": false
+}

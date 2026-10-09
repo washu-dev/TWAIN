@@ -20,6 +20,7 @@ from result_interpreter.extractors.base import (
     ParsedField,
     ParsedOutput,
     ParserError,
+    quantity,
     register,
 )
 
@@ -41,7 +42,9 @@ def _to_float(cell: str) -> Optional[float]:
     try:
         return float(cell)
     except ValueError:
-        return None
+        # "-1.9919 log10(mol/L)": a number written with its unit.
+        found = quantity(cell)
+        return found[0] if found else None
 
 
 class CsvExtractor(OutputParser):
@@ -79,12 +82,16 @@ class CsvExtractor(OutputParser):
         wanted = set(columns) if columns else None
         # collect per-column numeric values
         columns_values: Dict[int, List[float]] = {i: [] for i in range(len(header))}
+        cell_units: Dict[int, str] = {}
         for row in rows[1:]:
             for i in range(len(header)):
                 cell = row[i] if i < len(row) else ""
                 value = _to_float(cell)
                 if value is not None:
                     columns_values[i].append(value)
+                    found = quantity(cell.strip())
+                    if found and found[1] and i not in cell_units:
+                        cell_units[i] = found[1]
 
         fields: List[ParsedField] = []
         for i, (name, unit) in enumerate(names_units):
@@ -95,7 +102,8 @@ class CsvExtractor(OutputParser):
                 if wanted is not None and name in wanted:
                     raise ParserError(f"requested column {name!r} has no numeric values")
                 continue  # skip non-numeric columns when auto-selecting
-            fields.append(ParsedField(name=name, values=values, unit=unit, source=self.name))
+            fields.append(ParsedField(name=name, values=values, unit=unit or cell_units.get(i),
+                                      source=self.name))
 
         if not fields:
             raise ParserError("csv parser found no numeric columns")
