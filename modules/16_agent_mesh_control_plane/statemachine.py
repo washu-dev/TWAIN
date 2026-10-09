@@ -4214,13 +4214,60 @@ class StateMachine:
                 if isinstance(row, dict) and row.get("entity")
                 and isinstance(row.get("value"), (int, float))
             ]
-        predictions = []
+        # ONE number per reference property: the result itself, in the reference's
+        # unit. Every finite field used to be compared, so run 52019085's ESOL
+        # error estimate (0.69) and an un-unitted mol/L copy (0.0102) were graded
+        # against aspirin's log S of -1.72 and rejected a log S of -1.99.
+        units = self._baseline_config().get("property_units") or {}
+        by_property: dict = {}
         for m in self._normalized_metrics(normalized):
-            predictions.append(Prediction(
-                molecule=molecule, property=self._baseline_property(m["name"]),
-                value=float(m["value"]), unit=m.get("unit"),
-                uncertainty=m.get("uncertainty")))
+            if self._DIAGNOSTIC.search(str(m["name"]).lower()):
+                continue
+            by_property.setdefault(self._baseline_property(m["name"]), []).append(m)
+        predictions = []
+        for prop, candidates in by_property.items():
+            picked = self._pick_for_reference(candidates, units.get(prop))
+            if picked is not None:
+                value, unit, m = picked
+                predictions.append(Prediction(molecule=molecule, property=prop, value=value,
+                                              unit=unit, uncertainty=m.get("uncertainty")))
         return predictions
+
+    #: Fields that describe the method or its inputs, never the result: error
+    #: estimates and fit statistics, uncertainties, counts, and input descriptors.
+    _DIAGNOSTIC = re.compile(
+        r"(^|[._])(rmse|mae|mse|rms|r2|r_squared|std|stdev|sigma|uncertainty|error|errors|"
+        r"tolerance|confidence|fit|diagnostic|descriptors?|n_[a-z]+)([._]|$)")
+
+    @staticmethod
+    def _pick_for_reference(candidates: list, reference_unit):
+        """``(value, unit, metric)`` to compare with a reference, or None.
+
+        In order: a field stating the reference's own unit; one whose name or
+        unit says it is on the reference's log scale ("logS_log10_mol_per_L");
+        a stated linear concentration converted to the reference's log10; else
+        the first field (primary first) that states no conflicting unit.
+        """
+        from cross_validation.baseline_validator import canonical_unit
+        want = canonical_unit(reference_unit)
+        log_scale = bool(want and "log" in want)
+        for m in candidates:
+            if want and canonical_unit(m.get("unit")) == want:
+                return float(m["value"]), m.get("unit"), m
+        if log_scale:
+            for m in candidates:
+                text = f"{m['name']} {m.get('unit') or ''}".lower()
+                if "log" in text and not m.get("unit"):
+                    return float(m["value"]), reference_unit, m
+            inner = re.search(r"log10\((.+)\)", want or "")
+            for m in candidates:
+                stated = canonical_unit(m.get("unit"))
+                if inner and stated == canonical_unit(inner.group(1)) and float(m["value"]) > 0:
+                    return math.log10(float(m["value"])), reference_unit, m
+        for m in candidates:
+            if not m.get("unit") or not want:
+                return float(m["value"]), m.get("unit"), m
+        return None
 
     def _cross_validate(self, normalized: dict) -> str:
         """Grade the normalized result and return the verdict to route on.
@@ -4270,7 +4317,18 @@ class StateMachine:
             # result that agrees with the literature but misses the tolerance
             # they asked for is not reported as a clean pass.
             own_status, own_rationale, _ = self._acceptance_fallback(normalized)
-            if _SEVERITY.get(own_status, 0) > _SEVERITY.get(status, 0):
+            if (status == "rejected" and own_status == "accepted"
+                    and not normalized.get("entities")      # one system, not a mean
+                    and self._researcher_set_a_target()):
+                # The two references disagree. Neither silently wins: the
+                # researcher set this bar, so they decide (at the accept-or-rerun
+                # question), with both in front of them.
+                status = "needs_review"
+                artifact["acceptance_status"] = status
+                artifact["rationale"] = (
+                    f"Your acceptance target is met ({own_rationale}), but the "
+                    f"literature disagrees: {artifact['rationale']}")
+            elif _SEVERITY.get(own_status, 0) > _SEVERITY.get(status, 0):
                 status = own_status
                 artifact["acceptance_status"] = status
                 artifact["rationale"] = (
@@ -4372,12 +4430,48 @@ class StateMachine:
                 values[field_name] = float(raw)
             except (TypeError, ValueError):
                 values[field_name] = getattr(defaults, field_name)
+        values["absolute"] = self._agreement_bands()
+        # A run may tighten or loosen an absolute band too: {"logS": [0.2, 0.4]}.
+        for prop, band in (configured.get("absolute") or {}).items():
+            try:
+                values["absolute"][prop] = (float(band[0]), float(band[1]))
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
         try:
             return AcceptanceThresholds(**values)
         except ValueError:  # e.g. accept_below > review_below
             logger.info("[validate] ignoring incoherent acceptance thresholds "
                         "%s; using the defaults.", values)
-            return defaults
+            return AcceptanceThresholds(absolute=values["absolute"])
+
+    @staticmethod
+    def _baseline_config() -> dict:
+        try:
+            return json.loads((twain_paths.REPO_ROOT / "configs" / "baselines.json")
+                              .read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _agreement_bands(self) -> dict:
+        """Properties graded by absolute difference (configs/baselines.json)."""
+        bands = {}
+        for prop, band in (self._baseline_config().get("agreement_bands") or {}).items():
+            try:
+                bands[prop] = (float(band["accept_below"]), float(band["review_below"]))
+            except (TypeError, KeyError, ValueError):
+                continue
+        return bands
+
+    def _researcher_set_a_target(self) -> bool:
+        """Whether the researcher set (or changed) a target on the approval card.
+
+        Only theirs: a target TWAIN proposed is not a second opinion against the
+        literature (runner engine.apply_acceptance_overrides marks ``set_by``).
+        """
+        plan = self._load_artifact("execution_plan") or {}
+        return any(isinstance(c, dict) and c.get("set_by") == "researcher"
+                   and c.get("target_value") is not None
+                   for c in plan.get("acceptance_metrics") or [])
 
     def _acceptance_fallback(self, normalized: dict):
         """Judge against the plan's acceptance criteria (target +/- tolerance).

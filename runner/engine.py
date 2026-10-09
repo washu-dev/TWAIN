@@ -295,6 +295,13 @@ class _RealEngine:
             patch = {"metric_name": name,
                      "target_value": _as_number(edit.get("target_value")),
                      "tolerance": _as_number(edit.get("tolerance"))}
+            proposed = current[by_name[name]] if name in by_name else {}
+            if patch["target_value"] is not None and (
+                    patch["target_value"], patch["tolerance"]) != (
+                    proposed.get("target_value"), proposed.get("tolerance")):
+                # The researcher's own bar, not TWAIN's proposal: VALIDATE weighs
+                # it against the literature rather than letting either win alone.
+                patch["set_by"] = "researcher"
             if name in by_name:
                 current[by_name[name]] = {**current[by_name[name]], **patch}
             else:

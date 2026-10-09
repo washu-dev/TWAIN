@@ -193,7 +193,16 @@ class TestAcceptanceOverrides:
         self._engine().apply_acceptance_overrides(orch, [
             {"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}])
         assert self._read(path)["acceptance_metrics"] == [
-            {"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05}]
+            {"metric_name": "bandgap", "target_value": 0.0, "tolerance": 0.05,
+             "set_by": "researcher"}]
+
+    def test_an_unchanged_proposal_is_not_marked_as_the_researchers(self, tmp_path):
+        # VALIDATE weighs only the researcher's own bar against the literature.
+        orch, path = self._plan(tmp_path, [
+            {"metric_name": "bandgap", "target_value": 1.1, "tolerance": 0.2}])
+        self._engine().apply_acceptance_overrides(orch, [
+            {"metric_name": "bandgap", "target_value": 1.1, "tolerance": 0.2}])
+        assert "set_by" not in self._read(path)["acceptance_metrics"][0]
 
     def test_clearing_a_bar_is_expressible(self):
         """None is a legal target, so an emptied field must round-trip as "no bar"

@@ -1,0 +1,89 @@
+{
+  "primary_metric": {
+    "name": "aqueous_solubility_at_25C",
+    "value": 0.0101886,
+    "uncertainty": 0.0010188600000000001,
+    "uncertainty_method": "fallback",
+    "unit": "mol/L",
+    "source": "json"
+  },
+  "secondary_metrics": [
+    {
+      "name": "aqueous_solubility_at_25C_value",
+      "value": 0.010188558384144829,
+      "uncertainty": 0.001018855838414483,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    },
+    {
+      "name": "logS_log10_mol_per_L",
+      "value": -1.9918872615384613,
+      "uncertainty": 0.19918872615384614,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    },
+    {
+      "name": "fit_diagnostic_logS_rmse_log10",
+      "value": 0.69,
+      "uncertainty": 0.06899999999999999,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    },
+    {
+      "name": "descriptors.clogp",
+      "value": 1.3101,
+      "uncertainty": 0.13101000000000002,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    },
+    {
+      "name": "descriptors.mw",
+      "value": 180.15899999999996,
+      "uncertainty": 18.0159,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    },
+    {
+      "name": "descriptors.rotatable_bonds",
+      "value": 2.0,
+      "uncertainty": 0.2,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    },
+    {
+      "name": "descriptors.aromatic_proportion",
+      "value": 0.46153846153846156,
+      "uncertainty": 0.046153846153846156,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    },
+    {
+      "name": "descriptors.n_heavy_atoms",
+      "value": 13.0,
+      "uncertainty": 1.3,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    },
+    {
+      "name": "descriptors.logS_log10_mol_per_L",
+      "value": -1.9918872615384613,
+      "uncertainty": 0.19918872615384614,
+      "uncertainty_method": "fallback",
+      "unit": null,
+      "source": "json"
+    }
+  ],
+  "metadata": {
+    "parser": "json",
+    "field_count": 10,
+    "primary_samples": 1
+  }
+}
