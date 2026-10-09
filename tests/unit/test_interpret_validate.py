@@ -1506,3 +1506,17 @@ def test_a_target_twain_proposed_does_not_soften_a_rejection(machine, tmp_path):
     plan = dict(_ASPIRIN_PLAN, acceptance_metrics=[
         {"metric_name": "aqueous_solubility_at_25C", "target_value": -4.0, "tolerance": 0.3}])
     assert _validate_run(machine, tmp_path, wrong, plan)["acceptance_status"] == "rejected"
+
+
+def test_validate_reads_the_typed_target_and_shows_the_working(machine, tmp_path):
+    # The researcher typed "log S = −1.72" / "0.75 log units" (#237); the
+    # result's headline is in mol/L. Compared on one scale: accepted.
+    plan = dict(_ASPIRIN_PLAN, acceptance_metrics=[
+        {"metric_name": "aqueous_solubility_at_25C", "target_value": -1.72, "tolerance": 0.75,
+         "target_text": "log S = −1.72", "tolerance_text": "0.75 log units",
+         "set_by": "researcher"}])
+    report = _validate_run(machine, tmp_path, plan=plan)
+    (check,) = report["target_checks"]
+    assert check["status"] == "accepted" and check["unit"] == "log10(mol/L)"
+    assert round(check["result"], 2) == -1.99 and check["reading"]["source"] == "rules"
+    assert report["acceptance_status"] == "accepted"

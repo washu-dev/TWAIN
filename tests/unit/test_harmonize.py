@@ -34,7 +34,7 @@ def test_aspirin_solubility_on_one_scale(value, unit, expected):
 def test_the_working_is_shown():
     h = H.to_canonical("aqueous_solubility", 4600, "mg/L", formula=ASPIRIN)
     assert h.chain == ["4600 mg/L = 4.6 g/L", "4.6 g/L / 180.16 g/mol = 0.025533 mol/L",
-                       "log10(0.025533) = -1.593"]
+                       "log10(0.025533 mol/L) = -1.593"]
 
 
 @pytest.mark.parametrize("unit", ["mg·L⁻¹", "mg L-1", "mg per L", " MG/L "])

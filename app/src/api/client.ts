@@ -484,6 +484,10 @@ class APIClient {
       metric_name: string;
       target_value: number | null;
       tolerance: number | null;
+      /** What the researcher typed ("log S = −1.72"): VALIDATE reads the unit
+          and scale from it (#237). */
+      target_text?: string;
+      tolerance_text?: string;
     }[],
   ): Promise<Message> {
     const response = await this.client.post(`/api/conversations/${id}/approval`, {
