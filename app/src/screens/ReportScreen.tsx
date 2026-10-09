@@ -12,7 +12,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { AmbientBackdrop } from '@/components';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { apiClient, ArtifactMeta, Report } from '@/api/client';
+import { apiClient, ActivityLogEntry, ArtifactMeta, Report } from '@/api/client';
 import { useAuth } from '@/hooks/useAuth';
 import { useConversationStream } from '@/hooks/useConversationStream';
 import { canCopy, copyText } from '@/utils/clipboard';
@@ -157,6 +157,8 @@ export const ReportScreen: React.FC = () => {
           <SummaryCard report={report} />
 
           <BudgetCard report={report} />
+
+          <ActivityLogCard conversationId={report.conversation.id} status={report.status} />
 
           <Files report={report} />
         </ScrollView>
@@ -305,6 +307,80 @@ const SummaryCard: React.FC<{ report: Report }> = ({ report }) => {
 
 // Actual spend for the run, from the budget.json artifact the orchestrator writes
 // each step. Renders nothing until a budget snapshot exists (e.g. very early runs).
+// How many log lines show before "Show all".
+const ACTIVITY_LOG_PREVIEW = 40;
+
+const ACTIVITY_MARK: Record<string, string> = {
+  done: '✓', failed: '✕', warn: '⚠', active: '…', stage: '→',
+};
+
+/**
+ * Every step the run took, in order: observer checks, self-heal attempts, job
+ * phases, stage transitions and where it stopped. The chat's live checklist
+ * shows these only while the run is active (and only each step's latest
+ * state); this keeps the whole record on the report, success or failure. The
+ * same log is in the zip as twain/activity_log.txt.
+ */
+const ActivityLogCard: React.FC<{ conversationId: string; status: string }> = ({
+  conversationId,
+  status,
+}) => {
+  const [log, setLog] = useState<ActivityLogEntry[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .getActivityLog(conversationId)
+      .then((entries) => !cancelled && (setLog(entries), setFailed(false)))
+      .catch(() => !cancelled && setFailed(true));
+    return () => {
+      cancelled = true;
+    };
+    // Re-read when the run's status changes (a run finishing while open).
+  }, [conversationId, status]);
+
+  if (failed) {
+    return (
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Activity log</Text>
+        <Text style={styles.empty}>The activity log couldn't be loaded.</Text>
+      </View>
+    );
+  }
+  if (!log || log.length === 0) return null;
+  const shown = showAll ? log : log.slice(0, ACTIVITY_LOG_PREVIEW);
+  const color = (s: string) =>
+    s === 'done' ? C.washuGreen : s === 'failed' ? C.washuRed : s === 'warn' ? C.warning
+      : C.textSecondary;
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>Activity log</Text>
+      <Text style={styles.logHint}>
+        Every step this run took, in order ({log.length}). Also in the zip as activity_log.txt.
+      </Text>
+      {shown.map((e, i) => (
+        <View key={`${e.at}-${i}`} style={[styles.logRow, e.status === 'stage' && styles.logStage]}>
+          <Text style={styles.logTime}>{e.at.slice(11, 19)}</Text>
+          <Text style={[styles.logMark, { color: color(e.status) }]}>
+            {ACTIVITY_MARK[e.status] ?? '·'}
+          </Text>
+          <Text style={styles.logStageName}>{e.stage}</Text>
+          <Text style={styles.logLabel}>{e.label}</Text>
+        </View>
+      ))}
+      {log.length > ACTIVITY_LOG_PREVIEW && (
+        <TouchableOpacity onPress={() => setShowAll((v) => !v)} accessibilityRole="button">
+          <Text style={styles.logToggle}>
+            {showAll ? 'Show fewer' : `Show all ${log.length} steps`}
+          </Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+};
+
 const BudgetCard: React.FC<{ report: Report }> = ({ report }) => {
   const budget = typeof report.budget === 'object' && report.budget ? report.budget : null;
   const run = budget?.run;
@@ -609,7 +685,15 @@ const Files: React.FC<{ report: Report }> = ({ report }) => {
   return (
     <>
       {canDownload && report.artifacts.length > 0 && (
-        <View style={styles.downloadAll}>
+        // A card of its own, in the page's flow: a heading, what's in it, then
+        // the button -- nothing overlaps (the shared hint style's negative top
+        // margin pulled this text up under the button).
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Files</Text>
+          <Text style={styles.downloadHint}>
+            The run bundle (main.py, config, requirements, the job script), its outputs, the
+            plan, results and validation records, and the activity log.
+          </Text>
           <TouchableOpacity
             style={[styles.downloadAllBtn, zipping && styles.copyBtnDisabled]}
             onPress={downloadAll}
@@ -620,10 +704,6 @@ const Files: React.FC<{ report: Report }> = ({ report }) => {
               {zipping ? 'Preparing…' : `Download all files (.zip, ${report.artifacts.length})`}
             </Text>
           </TouchableOpacity>
-          <Text style={styles.sectionHint}>
-            The run bundle (main.py, config, requirements, the job script), its outputs, and the
-            plan, results and validation records.
-          </Text>
           {zipError && <Text style={styles.error}>{zipError}</Text>}
         </View>
       )}
@@ -656,7 +736,7 @@ const Files: React.FC<{ report: Report }> = ({ report }) => {
 const mono = Platform.select({ ios: 'Courier', android: 'monospace', default: 'monospace' });
 
 const styles = StyleSheet.create({
-  downloadAll: { marginTop: Spacing.three, gap: Spacing.one },
+  downloadHint: { color: C.textSecondary, fontSize: 13, marginBottom: Spacing.two },
   downloadAllBtn: {
     alignSelf: 'flex-start',
     backgroundColor: C.washuRed,
@@ -704,6 +784,14 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   cardTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: Spacing.one },
+  logHint: { color: C.textSecondary, fontSize: 13, marginBottom: Spacing.one },
+  logRow: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.two, paddingVertical: 2 },
+  logStage: { marginTop: Spacing.one },
+  logTime: { color: C.textSecondary, fontSize: 12, fontVariant: ['tabular-nums'], width: 60 },
+  logMark: { fontSize: 13, fontWeight: '700', width: 14, textAlign: 'center' },
+  logStageName: { color: C.textSecondary, fontSize: 12, fontWeight: '600', width: 76 },
+  logLabel: { color: C.text, fontSize: 13, flex: 1, flexWrap: 'wrap' },
+  logToggle: { color: C.washuRed, fontSize: 13, fontWeight: '600', marginTop: Spacing.one },
   meterTrack: {
     height: 8,
     borderRadius: 4,

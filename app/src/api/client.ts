@@ -107,6 +107,15 @@ export type ActivityEvent =
   | { id: number; event_type: 'run.error'; created_at: string;
       payload: { state: string; failure?: RunFailure } };
 
+/** One line of a run's activity log (GET /activity-log). */
+export interface ActivityLogEntry {
+  at: string;
+  stage: string;
+  /** done | failed | warn | active, or "stage" for a stage transition. */
+  status: string;
+  label: string;
+}
+
 export interface ActivityPage {
   data: ActivityEvent[];
   /** Pass back as `after` to receive only newer events. */
@@ -423,6 +432,12 @@ class APIClient {
       params: { after },
     });
     return response.data;
+  }
+
+  /** Every step the run took, in order -- kept after it ends (success or failure). */
+  async getActivityLog(id: string): Promise<ActivityLogEntry[]> {
+    const response = await this.client.get(`/api/conversations/${id}/activity-log`);
+    return response.data.data;
   }
 
   async getRunFiles(id: string, attempt?: number | null): Promise<RunFiles> {

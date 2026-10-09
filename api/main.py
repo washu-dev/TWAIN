@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
+import activity_log
 import auth
 import conversations as convo
 import email_actions
@@ -541,6 +542,19 @@ async def conversation_activity(conversation_id: str, user: CurrentUser, after: 
     return {"data": events, "next_after": events[-1]["id"] if events else max(0, after)}
 
 
+@app.get("/api/conversations/{conversation_id}/activity-log")
+def conversation_activity_log(conversation_id: str, user: CurrentUser):
+    """Every step the run took, in order -- kept after it ends, success or failure.
+
+    The live checklist shows each step's latest state while the run is active;
+    this is the full record for the report: checks, self-heal attempts, job
+    phases, stage transitions and where it stopped.
+    """
+    _require_own_conversation(conversation_id, user)
+    log = activity_log.for_run(conversation_id)
+    return {"data": log, "count": len(log)}
+
+
 @app.get("/api/conversations/{conversation_id}/run-files")
 def conversation_run_files(conversation_id: str, user: CurrentUser, attempt: int | None = None):
     """Short-lived download links to a cluster attempt's bundle and outputs.
@@ -792,6 +806,10 @@ def download_run_files(conversation_id: str, user: CurrentUser):
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for row in rows:
             archive.writestr(_zip_name(row["name"]), row["content"] or "")
+        log = activity_log.for_run(conversation_id)
+        if log:
+            archive.writestr("twain/activity_log.txt",
+                             activity_log.as_text(log, conversation.get("title")))
     slug = re.sub(r"[^a-z0-9]+", "-", (conversation.get("title") or "run").lower()).strip("-")[:40]
     filename = f"twain-{slug or 'run'}-{conversation_id.split('-')[0]}.zip"
     return Response(content=buffer.getvalue(), media_type="application/zip",
