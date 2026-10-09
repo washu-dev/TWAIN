@@ -22,6 +22,7 @@ import { MIN_WALL_HOURS, WallTimeField, wallTimeLabel } from '@/components/WallT
 import { useAuth } from '@/hooks/useAuth';
 import { useNow } from '@/hooks/useNow';
 import { useRunActivity } from '@/hooks/useRunActivity';
+import { looseNumber } from '@/utils/looseNumber';
 import { activeStep } from '@/utils/runActivity';
 import { RunActivity } from '@/components/RunActivity';
 import { FailureCard } from '@/components/FailureCard';
@@ -524,13 +525,23 @@ export const ChatScreen: React.FC = () => {
         if (slurmEdited || differsFromPlan) overrides = wanted;
       }
       // Numbers, or null for an empty field: null is "no bar", and coercing a
-      // blank to 0 would silently demand the answer be exactly zero.
-      const asNumber = (text: string) => {
-        const trimmed = text.trim();
-        if (!trimmed) return null;
-        const value = Number(trimmed);
-        return Number.isFinite(value) ? value : null;
-      };
+      // blank to 0 would silently demand the answer be exactly zero. Text around
+      // the number ("log S = −1.72") is allowed; a filled field with no single
+      // number stops the approval rather than vanishing (run ec48cda0).
+      const asNumber = (text: string) => looseNumber(text);
+      if (decision === 'approve' && metricsEdited) {
+        const unreadable = metricDrafts.flatMap((d) => [
+          ...(d.target_value.trim() && looseNumber(d.target_value) == null
+            ? [`the target for ${d.metric_name}`] : []),
+          ...(d.tolerance.trim() && looseNumber(d.tolerance) == null
+            ? [`the tolerance for ${d.metric_name}`] : []),
+        ]);
+        if (unreadable.length) {
+          setError(`Couldn't read a number in ${unreadable.join(' and ')}. Enter one number `
+            + '(e.g. -1.72), or clear the field for no target.');
+          return;
+        }
+      }
       const metrics =
         decision === 'approve' && metricsEdited
           ? metricDrafts.map((d) => ({
@@ -915,6 +926,8 @@ export const ChatScreen: React.FC = () => {
                       value={draft.target_value}
                       placeholder="none"
                       onChange={(v) => setMetricDraft(index, { target_value: v })}
+                      note={readAs(draft.target_value)}
+                      signed
                     />
                     <SlurmField
                       label={
@@ -925,6 +938,8 @@ export const ChatScreen: React.FC = () => {
                       value={draft.tolerance}
                       placeholder="none"
                       onChange={(v) => setMetricDraft(index, { tolerance: v })}
+                      note={readAs(draft.tolerance)}
+                      signed
                     />
                   </View>
                 </View>
@@ -1246,26 +1261,44 @@ export const ChatScreen: React.FC = () => {
   );
 };
 
+/** What a typed target will be sent as: shown under the field when it isn't a
+    bare number, so "log S = −1.72" visibly becomes -1.72 (or visibly fails). */
+function readAs(text: string): { text: string; bad: boolean } | undefined {
+  const trimmed = text.trim();
+  if (!trimmed || String(Number(trimmed)) === trimmed) return undefined;
+  const value = looseNumber(trimmed);
+  return value == null
+    ? { text: 'No single number found -- enter one, e.g. -1.72', bad: true }
+    : { text: `Read as ${value}`, bad: false };
+}
+
 const SlurmField: React.FC<{
   label: string;
   value: string;
   onChange: (v: string) => void;
+  /** A line under the field: how the text was read, or why it can't be. */
+  note?: { text: string; bad: boolean };
+  /** Signed values (targets) need a minus key; iOS's decimal-pad has none. */
+  signed?: boolean;
   /** Shown when the field is empty. An acceptance target is legitimately blank
       when TWAIN had no defensible value, and a bare empty box reads as a field
       that failed to load rather than as a deliberate "none". */
   placeholder?: string;
-}> = ({ label, value, onChange, placeholder }) => (
+}> = ({ label, value, onChange, placeholder, note, signed }) => (
   <View style={styles.slurmField}>
     <Text style={styles.slurmFieldLabel}>{label}</Text>
     <TextInput
       style={styles.slurmFieldInput}
       value={value}
       onChangeText={onChange}
-      keyboardType="decimal-pad"
+      keyboardType={signed ? 'numbers-and-punctuation' : 'decimal-pad'}
       placeholder={placeholder}
       placeholderTextColor={C.textPlaceholder}
       accessibilityLabel={label}
     />
+    {note && (
+      <Text style={[styles.fieldNote, note.bad && styles.fieldNoteBad]}>{note.text}</Text>
+    )}
   </View>
 );
 
@@ -1536,6 +1569,8 @@ const styles = StyleSheet.create({
   slurmNote: { fontSize: 12, color: C.textSecondary },
   slurmField: { flex: 1, gap: 4 },
   slurmFieldLabel: { fontSize: 11, color: C.textSecondary, fontWeight: '600' },
+  fieldNote: { color: C.textSecondary, fontSize: 12, marginTop: 2 },
+  fieldNoteBad: { color: C.washuRed },
   slurmFieldInput: {
     borderWidth: 1,
     borderColor: C.border,
