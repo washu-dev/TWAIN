@@ -204,7 +204,11 @@ class TestTracker:
         assert (req.issue_number, req.issue_url) == (55, "https://github.com/o/r/issues/55")
         assert gh.created_payloads == []    # nothing new was filed
 
-    def test_no_credentials_still_records_and_notes(self, tmp_path):
+    def test_no_credentials_still_records_and_notes(self, tmp_path, monkeypatch):
+        # token=None falls back to the environment; hosts that export a token
+        # (CI, cloud dev containers) would otherwise enable the filer.
+        for var in ("TWAIN_GITHUB_TOKEN", "GITHUB_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
         filer = LR.GitHubIssueFiler(repo=None, token=None, transport=FakeGitHub())
         t = LR.LibraryRequestTracker(run_id="r", filer=filer,
                                      ledger_path=tmp_path / "l.json")

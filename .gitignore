@@ -17,7 +17,11 @@ gcp-db-*.conf
 .LSOverride
 
 # ── Claude Code ────────────────────────────────────────────────────────────────
-.claude/
+# Local Claude state stays out; the shared cloud-session hook and its settings
+# are committed so every cloud session installs the same toolchain.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 
 # ── IDEs ───────────────────────────────────────────────────────────────────────
 .idea/
