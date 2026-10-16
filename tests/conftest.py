@@ -19,8 +19,13 @@ migration.
 """
 import importlib.machinery
 import importlib.util
+import os
 import sys
 from pathlib import Path
+
+# VALIDATE fetches literature values from PubChem (#238); tests never touch the
+# network. A test that exercises the lookup injects a fake fetch.
+os.environ.setdefault("TWAIN_LITERATURE_LOOKUP", "0")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULES = REPO_ROOT / "modules"

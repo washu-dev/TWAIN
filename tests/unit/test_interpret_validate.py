@@ -1520,3 +1520,24 @@ def test_validate_reads_the_typed_target_and_shows_the_working(machine, tmp_path
     assert check["status"] == "accepted" and check["unit"] == "log10(mol/L)"
     assert round(check["result"], 2) == -1.99 and check["reading"]["source"] == "rules"
     assert report["acceptance_status"] == "accepted"
+
+
+def test_validate_grades_against_sourced_literature_and_reports_every_value(
+        machine, tmp_path, monkeypatch):
+    # #238: PubChem's aspirin record (saved fixture) with the curated value as
+    # one more voice: median -1.726 from 4 sources, and the -1.99 ESOL result
+    # 0.26 log units off -- accepted, with every value and its source reported.
+    from test_literature import fake_fetch
+    from cross_validation import literature
+    monkeypatch.setenv("TWAIN_LITERATURE_LOOKUP", "1")
+    real = literature.LiteratureBaselines.__init__
+    monkeypatch.setattr(literature.LiteratureBaselines, "__init__",
+                        lambda self, **kw: real(self, **{**kw, "fetch": fake_fetch}))
+    report = _validate_run(machine, tmp_path)
+    (only,) = report["cross_validation"]["comparisons"]
+    assert round(only["literature"], 3) == -1.726 and "4 literature value(s)" in \
+        only["literature_source"]
+    assert report["acceptance_status"] == "accepted"
+    lit = report["literature"]["aqueous_solubility"]
+    assert lit["comparable_count"] == 4 and len(lit["values"]) == 7
+    assert any(v["reason"] == "no temperature stated" for v in lit["values"])

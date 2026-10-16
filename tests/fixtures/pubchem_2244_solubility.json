@@ -1,0 +1,236 @@
+{
+  "Record": {
+    "RecordType": "CID",
+    "RecordNumber": 2244,
+    "RecordTitle": "Aspirin",
+    "Section": [
+      {
+        "TOCHeading": "Chemical and Physical Properties",
+        "Description": "Various chemical and physical properties that are experimentally determined for this compound.  See also the Safety and Hazard Properties section (if available), which has additional properties pertinent to chemical safety and hazards.",
+        "Section": [
+          {
+            "TOCHeading": "Experimental Properties",
+            "Description": "Various experimentally determined properties for this compound.  See also the Safety and Hazard Properties section (if available), which has additional properties pertinent to chemical safety and hazards.",
+            "Section": [
+              {
+                "TOCHeading": "Solubility",
+                "Description": "The solubility of a substance is the amount of that substance that will dissolve in a given amount of solvent. The default solvent is water, if not indicated.",
+                "URL": "https://chem.libretexts.org/Courses/Purdue/Purdue%3A_Chem_26505%3A_Organic_Chemistry_I_(Lipton)/Chapter_4._Intermolecular_Forces_and_Physical_Properties/4.4_Solubility",
+                "Information": [
+                  {
+                    "ReferenceNumber": 9,
+                    "Reference": [
+                      "National Toxicology Program, Institute of Environmental Health Sciences, National Institutes of Health (NTP). 1992. National Toxicology Program Chemical Repository Database. Research Triangle Park, North Carolina."
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "National Toxicology Program, Institute of Environmental Health Sciences, National Institutes of Health (NTP). 1992. National Toxicology Program Chemical Repository Database. Research Triangle Park, North Carolina.",
+                        "Matched": {
+                          "PCLID": 900163266,
+                          "Citation": "National Toxicology Program, Institute of Environmental Health Sciences, National Institutes of Health (NTP). 1992. National Toxicology Program Chemical Repository Database. Research Triangle Park, North Carolina."
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "less than 1 mg/mL at 73 °F (NTP, 1992)"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 37,
+                    "Reference": [
+                      "https://www.sigmaaldrich.com/catalog/product/sigma/a5376?lang=en&region=US"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "https://www.sigmaaldrich.com/catalog/product/sigma/a5376?lang=en&region=US",
+                        "Matched": {
+                          "PCLID": 900289358,
+                          "Citation": "https://www.sigmaaldrich.com/catalog/product/sigma/a5376?lang=en&region=US"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "Number": [
+                        10
+                      ],
+                      "Unit": "mg/mL"
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 68,
+                    "Description": "PEER REVIEWED",
+                    "Reference": [
+                      "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Whitehouse Station, NJ:  Merck and Co., Inc., 2006., p. 140"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Whitehouse Station, NJ:  Merck and Co., Inc., 2006., p. 140",
+                        "Matched": {
+                          "PCLID": 900123151,
+                          "Citation": "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Whitehouse Station, NJ:  Merck and Co., Inc., 2006., p. 140"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "1 g sol in: 300 mL water at 25 °C, 100 mL water at 37 °C, 5 mL alcohol, 17 mL chloroform, 10-15 mL ether; less sol in anhydrous ether",
+                          "Markup": [
+                            {
+                              "Start": 19,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            },
+                            {
+                              "Start": 42,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            },
+                            {
+                              "Start": 78,
+                              "Length": 10,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/chloroform",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-6212"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 68,
+                    "Description": "PEER REVIEWED",
+                    "Reference": [
+                      "Yalkowsky SH, Dannenfelser RM; Aquasol Database of Aqueous Solubility. Version 5. College of Pharmacy, University of Arizona - Tucson, AZ (1992)"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "Yalkowsky SH, Dannenfelser RM; Aquasol Database of Aqueous Solubility. Version 5. College of Pharmacy, University of Arizona - Tucson, AZ (1992)",
+                        "Matched": {
+                          "PCLID": 900021980,
+                          "Citation": "Yalkowsky SH, Dannenfelser RM; Aquasol Database of Aqueous Solubility. Version 5. College of Pharmacy, University of Arizona - Tucson, AZ (1992)"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "In water, 4,600 mg/L at 25 °C",
+                          "Markup": [
+                            {
+                              "Start": 3,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 86,
+                    "Name": "",
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "Solubility in water, g/100ml at 15 °C: 0.25 (poor)",
+                          "Markup": [
+                            {
+                              "Start": 14,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 219,
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "(77 °F): 0.3%"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "Reference": [
+      {
+        "ReferenceNumber": 9,
+        "SourceName": "CAMEO Chemicals",
+        "SourceID": "19712",
+        "Name": "ACETYLSALICYLIC ACID",
+        "Description": "CAMEO Chemicals is a chemical database designed for people who are involved in hazardous material incident response and planning. CAMEO Chemicals contains a library with thousands of datasheets containing response-related information and recommendations for hazardous materials that are commonly transported, used, or stored in the United States. CAMEO Chemicals was developed by the National Oceanic and Atmospheric Administration's Office of Response and Restoration in partnership with the Environmental Protection Agency's Office of Emergency Management.",
+        "URL": "https://cameochemicals.noaa.gov/chemical/19712",
+        "LicenseNote": "CAMEO Chemicals and all other CAMEO products are available at no charge to those organizations and individuals (recipients) responsible for the safe handling of chemicals. However, some of the chemical data itself is subject to the copyright restrictions of the companies or organizations that provided the data.",
+        "LicenseURL": "https://cameochemicals.noaa.gov/help/reference/terms_and_conditions.htm?d_f=false",
+        "ANID": 756432
+      },
+      {
+        "ReferenceNumber": 37,
+        "SourceName": "DrugBank",
+        "SourceID": "DB00945",
+        "Name": "Acetylsalicylic acid",
+        "Description": "The DrugBank database is a unique bioinformatics and cheminformatics resource that combines detailed drug (i.e. chemical, pharmacological and pharmaceutical) data with comprehensive drug target (i.e. sequence, structure, and pathway) information.",
+        "URL": "https://go.drugbank.com/drugs/DB00945",
+        "LicenseNote": "Creative Common's Attribution-NonCommercial 4.0 International License (http://creativecommons.org/licenses/by-nc/4.0/legalcode)",
+        "LicenseURL": "https://www.drugbank.ca/legal/terms_of_use",
+        "ANID": 3594228
+      },
+      {
+        "ReferenceNumber": 68,
+        "SourceName": "Hazardous Substances Data Bank (HSDB)",
+        "SourceID": "652",
+        "Name": "ACETYLSALICYLIC ACID",
+        "Description": "The Hazardous Substances Data Bank (HSDB) is a toxicology database that focuses on the toxicology of potentially hazardous chemicals. It provides information on human exposure, industrial hygiene, emergency handling procedures, environmental fate, regulatory requirements, nanomaterials, and related areas. The information in HSDB has been assessed by a Scientific Review Panel.",
+        "URL": "https://pubchem.ncbi.nlm.nih.gov/source/hsdb/652",
+        "LicenseURL": "https://www.nlm.nih.gov/web_policies.html",
+        "IsToxnet": true,
+        "ANID": 586
+      },
+      {
+        "ReferenceNumber": 86,
+        "SourceName": "ILO-WHO International Chemical Safety Cards (ICSCs)",
+        "SourceID": "0822",
+        "Name": "2-(ACETYLOXY)BENZOIC ACID",
+        "Description": "The International Chemical Safety Cards (ICSCs) are data sheets intended to provide essential safety and health information on chemicals in a clear and concise way. The primary aim of the Cards is to promote the safe use of chemicals in the workplace.",
+        "URL": "https://chemicalsafety.ilo.org/dyn/icsc/showcard.display?p_card_id=0822",
+        "LicenseNote": "Creative Commons CC BY 4.0",
+        "LicenseURL": "https://www.ilo.org/global/copyright/lang--en/index.htm",
+        "ANID": 2260702
+      },
+      {
+        "ReferenceNumber": 219,
+        "SourceName": "The National Institute for Occupational Safety and Health (NIOSH)",
+        "SourceID": "npgd0010",
+        "Name": "Acetylsalicylic acid",
+        "Description": "The NIOSH Pocket Guide to Chemical Hazards is intended as a source of general industrial hygiene information on several hundred chemicals/classes for workers, employers, and occupational health professionals. Read more: https://www.cdc.gov/niosh/npg/",
+        "URL": "https://www.cdc.gov/niosh/npg/npgd0010.html",
+        "LicenseNote": "The information provided using CDC Web site is only intended to be general summary information to the public. It is not intended to take the place of either the written law or regulations.",
+        "LicenseURL": "https://www.cdc.gov/Other/disclaimer.html",
+        "ANID": 2266310
+      }
+    ]
+  }
+}

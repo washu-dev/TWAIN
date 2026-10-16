@@ -1,0 +1,365 @@
+{
+  "Record": {
+    "RecordType": "CID",
+    "RecordNumber": 2519,
+    "RecordTitle": "Caffeine",
+    "Section": [
+      {
+        "TOCHeading": "Chemical and Physical Properties",
+        "Description": "Various chemical and physical properties that are experimentally determined for this compound.  See also the Safety and Hazard Properties section (if available), which has additional properties pertinent to chemical safety and hazards.",
+        "Section": [
+          {
+            "TOCHeading": "Experimental Properties",
+            "Description": "Various experimentally determined properties for this compound.  See also the Safety and Hazard Properties section (if available), which has additional properties pertinent to chemical safety and hazards.",
+            "Section": [
+              {
+                "TOCHeading": "Solubility",
+                "Description": "The solubility of a substance is the amount of that substance that will dissolve in a given amount of solvent. The default solvent is water, if not indicated.",
+                "URL": "https://chem.libretexts.org/Courses/Purdue/Purdue%3A_Chem_26505%3A_Organic_Chemistry_I_(Lipton)/Chapter_4._Intermolecular_Forces_and_Physical_Properties/4.4_Solubility",
+                "Information": [
+                  {
+                    "ReferenceNumber": 8,
+                    "Reference": [
+                      "National Toxicology Program, Institute of Environmental Health Sciences, National Institutes of Health (NTP). 1992. National Toxicology Program Chemical Repository Database. Research Triangle Park, North Carolina."
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "National Toxicology Program, Institute of Environmental Health Sciences, National Institutes of Health (NTP). 1992. National Toxicology Program Chemical Repository Database. Research Triangle Park, North Carolina.",
+                        "Matched": {
+                          "PCLID": 900163266,
+                          "Citation": "National Toxicology Program, Institute of Environmental Health Sciences, National Institutes of Health (NTP). 1992. National Toxicology Program Chemical Repository Database. Research Triangle Park, North Carolina."
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "10 to 50 mg/mL at 73 °F (NTP, 1992)"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 32,
+                    "Reference": [
+                      "http://www.inchem.org/documents/icsc/icsc/eics0405.htm"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "http://www.inchem.org/documents/icsc/icsc/eics0405.htm",
+                        "Matched": {
+                          "PCLID": 900288905,
+                          "Citation": "http://www.inchem.org/documents/icsc/icsc/eics0405.htm"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "Number": [
+                        2.17
+                      ],
+                      "Unit": "g/100mL"
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 63,
+                    "Description": "PEER REVIEWED",
+                    "Reference": [
+                      "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289",
+                        "Matched": {
+                          "PCLID": 900118661,
+                          "Citation": "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "Solubility in water is increased by alkali benzoates, cinnamates, citrates or salicylates",
+                          "Markup": [
+                            {
+                              "Start": 14,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 63,
+                    "Description": "PEER REVIEWED",
+                    "Reference": [
+                      "Yalkowsky, S.H., He, Yan, Jain, P. Handbook of Aqueous Solubility Data Second Edition. CRC Press, Boca Raton, FL 2010, p. 506"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "Yalkowsky, S.H., He, Yan, Jain, P. Handbook of Aqueous Solubility Data Second Edition. CRC Press, Boca Raton, FL 2010, p. 506",
+                        "Matched": {
+                          "PCLID": 900073990,
+                          "Citation": "Yalkowsky, S.H., He, Yan, Jain, P. Handbook of Aqueous Solubility Data Second Edition. CRC Press, Boca Raton, FL 2010, p. 506"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "In water, 2.16X10+4 mg/L at 25 °C",
+                          "Markup": [
+                            {
+                              "Start": 3,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 63,
+                    "Description": "PEER REVIEWED",
+                    "Reference": [
+                      "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289",
+                        "Matched": {
+                          "PCLID": 900118661,
+                          "Citation": "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "1 gm dissolves in 46 mL water, 5.5 mL water at 80 °C, 1.5 mL boiling water, 66 mL alcohol, 22 mL alcohol at 60 °C, 50 mL acetone, 5.5 mL chloroform, 530 mL ether, 100 mL benzene, 22 mL boiling benzene.",
+                          "Markup": [
+                            {
+                              "Start": 24,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            },
+                            {
+                              "Start": 38,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            },
+                            {
+                              "Start": 69,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            },
+                            {
+                              "Start": 121,
+                              "Length": 7,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/acetone",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-180"
+                            },
+                            {
+                              "Start": 137,
+                              "Length": 10,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/chloroform",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-6212"
+                            },
+                            {
+                              "Start": 170,
+                              "Length": 7,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/benzene",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-241"
+                            },
+                            {
+                              "Start": 193,
+                              "Length": 7,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/benzene",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-241"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 63,
+                    "Description": "PEER REVIEWED",
+                    "Reference": [
+                      "Haynes, W.M. (ed.). CRC Handbook of Chemistry and Physics. 94th Edition. CRC Press LLC, Boca Raton: FL 2013-2014, p. 3-90"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "Haynes, W.M. (ed.). CRC Handbook of Chemistry and Physics. 94th Edition. CRC Press LLC, Boca Raton: FL 2013-2014, p. 3-90",
+                        "Matched": {
+                          "PCLID": 900121857,
+                          "Citation": "Haynes, W.M. (ed.). CRC Handbook of Chemistry and Physics. 94th Edition. CRC Press LLC, Boca Raton: FL 2013-2014, p. 3-90"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "Soluble in pyridine"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 63,
+                    "Description": "PEER REVIEWED",
+                    "Reference": [
+                      "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289"
+                    ],
+                    "ExtendedReference": [
+                      {
+                        "Citation": "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289",
+                        "Matched": {
+                          "PCLID": 900118661,
+                          "Citation": "O'Neil, M.J. (ed.). The Merck Index - An Encyclopedia of Chemicals, Drugs, and Biologicals. Cambridge, UK:  Royal Society of Chemistry, 2013., p. 289"
+                        }
+                      }
+                    ],
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "Freely soluble in pyrrole; slightly soluble in petroleum ether; freely soluble in tetrahydrofuran containing about 4% water",
+                          "Markup": [
+                            {
+                              "Start": 18,
+                              "Length": 7,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/pyrrole",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-8027"
+                            },
+                            {
+                              "Start": 82,
+                              "Length": 15,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/tetrahydrofuran",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-8028"
+                            },
+                            {
+                              "Start": 118,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 64,
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "21.6 mg/mL at 25 °C"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "ReferenceNumber": 83,
+                    "Name": "",
+                    "Value": {
+                      "StringWithMarkup": [
+                        {
+                          "String": "Solubility in water, g/100ml: 2.17",
+                          "Markup": [
+                            {
+                              "Start": 14,
+                              "Length": 5,
+                              "URL": "https://pubchem.ncbi.nlm.nih.gov/compound/water",
+                              "Type": "PubChem Internal Link",
+                              "Extra": "CID-962"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "Reference": [
+      {
+        "ReferenceNumber": 8,
+        "SourceName": "CAMEO Chemicals",
+        "SourceID": "19945",
+        "Name": "CAFFEINE",
+        "Description": "CAMEO Chemicals is a chemical database designed for people who are involved in hazardous material incident response and planning. CAMEO Chemicals contains a library with thousands of datasheets containing response-related information and recommendations for hazardous materials that are commonly transported, used, or stored in the United States. CAMEO Chemicals was developed by the National Oceanic and Atmospheric Administration's Office of Response and Restoration in partnership with the Environmental Protection Agency's Office of Emergency Management.",
+        "URL": "https://cameochemicals.noaa.gov/chemical/19945",
+        "LicenseNote": "CAMEO Chemicals and all other CAMEO products are available at no charge to those organizations and individuals (recipients) responsible for the safe handling of chemicals. However, some of the chemical data itself is subject to the copyright restrictions of the companies or organizations that provided the data.",
+        "LicenseURL": "https://cameochemicals.noaa.gov/help/reference/terms_and_conditions.htm?d_f=false",
+        "ANID": 757193
+      },
+      {
+        "ReferenceNumber": 32,
+        "SourceName": "DrugBank",
+        "SourceID": "DB00201",
+        "Name": "Caffeine",
+        "Description": "The DrugBank database is a unique bioinformatics and cheminformatics resource that combines detailed drug (i.e. chemical, pharmacological and pharmaceutical) data with comprehensive drug target (i.e. sequence, structure, and pathway) information.",
+        "URL": "https://go.drugbank.com/drugs/DB00201",
+        "LicenseNote": "Creative Common's Attribution-NonCommercial 4.0 International License (http://creativecommons.org/licenses/by-nc/4.0/legalcode)",
+        "LicenseURL": "https://www.drugbank.ca/legal/terms_of_use",
+        "ANID": 3600734
+      },
+      {
+        "ReferenceNumber": 63,
+        "SourceName": "Hazardous Substances Data Bank (HSDB)",
+        "SourceID": "36",
+        "Name": "CAFFEINE",
+        "Description": "The Hazardous Substances Data Bank (HSDB) is a toxicology database that focuses on the toxicology of potentially hazardous chemicals. It provides information on human exposure, industrial hygiene, emergency handling procedures, environmental fate, regulatory requirements, nanomaterials, and related areas. The information in HSDB has been assessed by a Scientific Review Panel.",
+        "URL": "https://pubchem.ncbi.nlm.nih.gov/source/hsdb/36",
+        "LicenseURL": "https://www.nlm.nih.gov/web_policies.html",
+        "IsToxnet": true,
+        "ANID": 7
+      },
+      {
+        "ReferenceNumber": 64,
+        "SourceName": "Human Metabolome Database (HMDB)",
+        "SourceID": "HMDB0001847",
+        "Name": "Caffeine",
+        "Description": "The Human Metabolome Database (HMDB) is a freely available electronic database containing detailed information about small molecule metabolites found in the human body.",
+        "URL": "http://www.hmdb.ca/metabolites/HMDB0001847",
+        "LicenseNote": "HMDB is offered to the public as a freely available resource. Use and re-distribution of the data, in whole or in part, for commercial purposes requires explicit permission of the authors and explicit acknowledgment of the source material (HMDB) and the original publication (see the HMDB citing page). We ask that users who download significant portions of the database cite the HMDB paper in any resulting publications.",
+        "LicenseURL": "https://www.hmdb.ca/citing",
+        "ANID": 2143385
+      },
+      {
+        "ReferenceNumber": 83,
+        "SourceName": "ILO-WHO International Chemical Safety Cards (ICSCs)",
+        "SourceID": "0405",
+        "Name": "CAFFEINE",
+        "Description": "The International Chemical Safety Cards (ICSCs) are data sheets intended to provide essential safety and health information on chemicals in a clear and concise way. The primary aim of the Cards is to promote the safe use of chemicals in the workplace.",
+        "URL": "https://chemicalsafety.ilo.org/dyn/icsc/showcard.display?p_card_id=0405",
+        "LicenseNote": "Creative Commons CC BY 4.0",
+        "LicenseURL": "https://www.ilo.org/global/copyright/lang--en/index.htm",
+        "ANID": 2260311
+      }
+    ]
+  }
+}
